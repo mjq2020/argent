@@ -106,6 +106,8 @@ export interface TreeReadSink {
   /** The most recent successfully read tree. */
   tree?: DescribeNode;
   source?: DescribeSource;
+  /** Screen size {@link tree}'s frames were normalized against, when the source reports it. */
+  screen?: { width: number; height: number };
   /** `Date.now()` of the read {@link tree} came from. */
   readAt?: number;
   /** The most recent read error, verbatim (cleared by a later successful read). */
@@ -394,7 +396,7 @@ export function selectorMissEvidence(
     budgetMs,
     attempts: sink.attempts,
     ...(sink.tree !== undefined
-      ? { tree: sink.tree, source: sink.source, readAt: sink.readAt }
+      ? { tree: sink.tree, source: sink.source, screenSize: sink.screen, readAt: sink.readAt }
       : {}),
     ...(sink.error !== undefined ? { treeError: sink.error } : {}),
   };
@@ -452,6 +454,7 @@ export async function settleTree(
       if (sink) {
         sink.tree = data.tree;
         sink.source = data.source;
+        sink.screen = data.screen;
         sink.readAt = Date.now();
         sink.error = undefined;
       }
@@ -711,7 +714,7 @@ async function scrollToVisible(
       ...(within ? { within: describeSelector(within) } : {}),
     },
     ...(sink.tree !== undefined
-      ? { tree: sink.tree, source: sink.source, readAt: sink.readAt }
+      ? { tree: sink.tree, source: sink.source, screenSize: sink.screen, readAt: sink.readAt }
       : {}),
     ...(sink.error !== undefined ? { treeError: sink.error } : {}),
     ...(sink.tree !== undefined ? { matches: flowFindAll(sink.tree, target) } : {}),
@@ -1218,6 +1221,7 @@ async function waitForCondition(
   // argent simply could not see it.
   let lastTrustedTree: DescribeNode | undefined;
   let lastTrustedSource: DescribeSource | undefined;
+  let lastTrustedScreen: { width: number; height: number } | undefined;
   let attempts = 0;
   // Date.now() of the most recent TRUSTED read — undefined until one lands.
   // Post-loop it anchors the dark-tail measurement: how long the window's
@@ -1246,6 +1250,7 @@ async function waitForCondition(
         lastTrustedReadAt = Date.now();
         lastTrustedTree = data.tree;
         lastTrustedSource = data.source;
+        lastTrustedScreen = data.screen;
       }
       lastReadTrusted = !blind;
       if (
@@ -1315,7 +1320,12 @@ async function waitForCondition(
     },
     ...(lastTrustedReadAt !== undefined ? { lastTrustedReadAt } : {}),
     ...(lastTrustedTree !== undefined
-      ? { tree: lastTrustedTree, source: lastTrustedSource, readAt: lastTrustedReadAt }
+      ? {
+          tree: lastTrustedTree,
+          source: lastTrustedSource,
+          screenSize: lastTrustedScreen,
+          readAt: lastTrustedReadAt,
+        }
       : {}),
     ...(fetchError !== undefined ? { treeError: fetchError } : {}),
     ...extra,
