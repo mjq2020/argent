@@ -10,7 +10,8 @@ export interface KeyboardParams {
   key?: string;
   /**
    * Empty the focused field (select-all, then delete) before typing `text`.
-   * Not valid on Vega or TV targets. Order within one call: clear → text → key.
+   * Not valid on Vega, on TV targets, or on Android below API 30 (no
+   * `input keycombination`). Order within one call: clear → text → key.
    */
   clear?: boolean;
   /** Delay in ms between key presses (default 50). */

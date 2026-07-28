@@ -37,6 +37,28 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     }
   }
 
+  // Resolve EVERY character before touching the page. Typing used to resolve
+  // per character inside the loop, which was harmless when the worst outcome
+  // was a partially-typed field. With `clear` it is not: clearing and then
+  // rejecting on character 4 destroys the field's original value and leaves a
+  // fragment behind, so the caller ends up worse off than before a call that
+  // returned 400. Same up-front-validation rule the android backend applies
+  // with `assertTypeableAndroidText`.
+  const descs = params.text
+    ? [...params.text].map((char) => ({ char, desc: charToChromiumKey(char) }))
+    : [];
+  for (const { char, desc } of descs) {
+    if (!desc) {
+      // A character with no CDP descriptor can't be typed — caller input error
+      // → 400, keeping the KEYBOARD_CHARACTER_UNSUPPORTED telemetry code (#420).
+      throw new InvalidToolInputError(`No CDP key descriptor for character "${char}"`, {
+        error_code: FAILURE_CODES.KEYBOARD_CHARACTER_UNSUPPORTED,
+        failure_stage: "keyboard_char_chromium",
+        error_kind: "unsupported",
+      });
+    }
+  }
+
   // Clear before text, as `commands` on a rawKeyDown rather than a Ctrl/Cmd+A
   // modifier chord — see the `commands` doc on KeyEventArgs for why the
   // modifier form silently deletes a single character instead. Both editing
@@ -57,36 +79,24 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     await sleep(delay);
   }
 
-  if (params.text) {
-    for (const char of params.text) {
-      const desc = charToChromiumKey(char);
-      if (!desc) {
-        // A character with no CDP descriptor can't be typed — caller input error
-        // → 400, keeping the KEYBOARD_CHARACTER_UNSUPPORTED telemetry code (#420).
-        throw new InvalidToolInputError(`No CDP key descriptor for character "${char}"`, {
-          error_code: FAILURE_CODES.KEYBOARD_CHARACTER_UNSUPPORTED,
-          failure_stage: "keyboard_char_chromium",
-          error_kind: "unsupported",
-        });
-      }
-      await api.dispatchKeyEvent({
-        type: "keyDown",
-        key: desc.key,
-        code: desc.code,
-        windowsVirtualKeyCode: desc.windowsVirtualKeyCode,
-      });
-      // `char` delivers the actual codepoint to the focused input; without
-      // this the field receives no value.
-      await api.dispatchKeyEvent({ type: "char", text: desc.text });
-      await api.dispatchKeyEvent({
-        type: "keyUp",
-        key: desc.key,
-        code: desc.code,
-        windowsVirtualKeyCode: desc.windowsVirtualKeyCode,
-      });
-      keysPressed++;
-      await sleep(delay);
-    }
+  for (const { desc } of descs) {
+    await api.dispatchKeyEvent({
+      type: "keyDown",
+      key: desc!.key,
+      code: desc!.code,
+      windowsVirtualKeyCode: desc!.windowsVirtualKeyCode,
+    });
+    // `char` delivers the actual codepoint to the focused input; without
+    // this the field receives no value.
+    await api.dispatchKeyEvent({ type: "char", text: desc!.text });
+    await api.dispatchKeyEvent({
+      type: "keyUp",
+      key: desc!.key,
+      code: desc!.code,
+      windowsVirtualKeyCode: desc!.windowsVirtualKeyCode,
+    });
+    keysPressed++;
+    await sleep(delay);
   }
 
   if (named) {

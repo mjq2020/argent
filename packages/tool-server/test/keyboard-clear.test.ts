@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeviceInfo } from "@argent/registry";
 import { typeSimulatorServer } from "../src/tools/keyboard/simulator-server-keys";
 import { makeChromiumImpl } from "../src/tools/keyboard/platforms/chromium";
@@ -104,7 +104,35 @@ describe("keyboard clear — iOS (simulator-server)", () => {
       `Down:${NAMED_KEYS.backspace}`,
       `Up:${NAMED_KEYS.backspace}`,
     ]);
-    expect(result).toEqual({ typed: "", keys: 2, cleared: true });
+    // `keys` counts what the caller asked to ENTER, so a clear contributes 0 —
+    // the same number Android and Chromium report for the same call. Counting
+    // the clear's own presses here would make one request report a different
+    // `keys` per platform, which is the cross-platform divergence this feature
+    // exists to avoid.
+    expect(result).toEqual({ typed: "", keys: 0, cleared: true });
+  });
+
+  it("reports the same `keys` for a clear as the other backends", async () => {
+    const { api } = recordingApi();
+
+    const ios = await typeSimulatorServer(registryWith(api), IOS_SIM, {
+      udid: IOS_SIM.id,
+      clear: true,
+      text: "abc",
+      delayMs: 0,
+    });
+    const android = await makeAndroidImpl(registryWith({})).handler(
+      {},
+      { udid: ANDROID.id, clear: true, text: "abc" },
+      ANDROID
+    );
+    const chromium = await makeChromiumImpl(
+      registryWith({ dispatchKeyEvent: async () => {} })
+    ).handler({}, { udid: CHROMIUM.id, clear: true, text: "abc", delayMs: 0 }, CHROMIUM);
+
+    expect(ios).toEqual({ typed: "abc", keys: 3, cleared: true });
+    expect(android).toEqual(ios);
+    expect(chromium).toEqual(ios);
   });
 
   it("orders clear → text → key in a single call", async () => {
@@ -142,6 +170,23 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     expect(events).toEqual([]);
   });
 
+  it("rejects un-typeable text BEFORE clearing (never destroys the old value)", async () => {
+    const { events, api } = recordingApi();
+
+    await expect(
+      typeSimulatorServer(registryWith(api), IOS_SIM, {
+        udid: IOS_SIM.id,
+        clear: true,
+        text: "café",
+        delayMs: 0,
+      })
+    ).rejects.toThrow(/No keycode for character "é"/);
+    // Clearing and THEN rejecting on character 4 would empty the field, leave
+    // "caf" behind, and return 400 — the caller's original value destroyed by a
+    // call that failed. Nothing may reach the device.
+    expect(events).toEqual([]);
+  });
+
   it("omits `cleared` entirely when clear was not requested", async () => {
     const { api } = recordingApi();
 
@@ -169,9 +214,19 @@ describe("keyboard clear — iOS (simulator-server)", () => {
 });
 
 describe("keyboard clear — Android (adb input)", () => {
-  it("selects all then deletes, before typing any text", async () => {
-    adbShell.mockClear();
+  // `mockReset` (not `mockClear`): several tests queue a one-shot
+  // implementation, and a queued entry that goes unconsumed would leak into the
+  // next test and fail it somewhere unrelated. Reset drops the queue, then the
+  // default "exit 0, no output" behaviour is restored — which is what a device
+  // that supports `keycombination` actually returns.
+  beforeEach(() => {
+    adbShell.mockReset();
+    adbShell.mockImplementation(async () => "");
+    isAndroidTv.mockReset();
+    isAndroidTv.mockImplementation(async () => false);
+  });
 
+  it("selects all then deletes, before typing any text", async () => {
     const result = await makeAndroidImpl(registryWith({})).handler(
       {},
       { udid: ANDROID.id, clear: true, text: "abc" },
@@ -187,8 +242,6 @@ describe("keyboard clear — Android (adb input)", () => {
   });
 
   it("orders clear → text → key in a single call", async () => {
-    adbShell.mockClear();
-
     await makeAndroidImpl(registryWith({})).handler(
       {},
       { udid: ANDROID.id, clear: true, text: "abc", key: "enter" },
@@ -203,32 +256,49 @@ describe("keyboard clear — Android (adb input)", () => {
     ]);
   });
 
-  it("falls back to MOVE_END + repeated DEL when `keycombination` is unavailable", async () => {
-    adbShell.mockClear();
-    // An older API level has no `keycombination` subcommand: `input` exits
-    // non-zero and runAdb rewraps that as a throw.
-    adbShell.mockImplementationOnce(async () => {
-      throw new Error("Unknown command: keycombination");
-    });
+  it("rejects loudly when `keycombination` is unavailable (API < 30)", async () => {
+    // An older API level has no `keycombination` subcommand — and it still
+    // EXITS 0: `input` reports the unknown subcommand on stdout and BaseCommand
+    // swallows the exception. Measured on-device: `adb shell input bogussubcmd`
+    // prints "Unknown command: bogussubcmd" and returns 0. Detecting this by
+    // catching a throw would never fire, and the post-select DEL would then
+    // delete exactly ONE character while the tool reported `cleared: true`.
+    adbShell.mockImplementationOnce(async () => "Unknown command: keycombination");
 
-    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+    await expect(
+      makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
+    ).rejects.toThrow(/needs Android 11 \(API 30\) or newer/);
 
-    const cmds = adbShell.mock.calls.map((c) => c[1]);
-    expect(cmds).toHaveLength(2);
-    expect(cmds[0]).toBe(SELECT_ALL_CMD);
-    // MOVE_END (123) first so the caret is past the last character, then a run
-    // of DELs backspacing over the contents — all in ONE `input` invocation.
-    expect(cmds[1]).toMatch(/^input keyevent 123( 67)+$/);
-    // The fallback must not also fire the standalone post-select DEL: that
-    // would delete one character beyond the field on a partially-filled clear.
-    expect(cmds).not.toContain(DEL_CMD);
+    // The select-all probe ran; the post-select DEL did NOT. Letting it through
+    // is the silent one-character delete this guard exists to stop.
+    expect(adbShell.mock.calls.map((c) => c[1])).toEqual([SELECT_ALL_CMD]);
   });
 
-  it("propagates a failure of the fallback itself (no silent partial clear)", async () => {
-    adbShell.mockClear();
-    adbShell.mockImplementationOnce(async () => {
-      throw new Error("Unknown command: keycombination");
-    });
+  it("rejects before typing, so clear+type cannot append to the old value", async () => {
+    adbShell.mockImplementationOnce(async () => "Unknown command: keycombination");
+
+    await expect(
+      makeAndroidImpl(registryWith({})).handler(
+        {},
+        { udid: ANDROID.id, clear: true, text: "new@example.com" },
+        ANDROID
+      )
+    ).rejects.toThrow(/needs Android 11 \(API 30\) or newer/);
+    // No `input text`: otherwise the field would end up
+    // "old@example.cnew@example.com" and the call would report success.
+    expect(adbShell.mock.calls.map((c) => c[1])).toEqual([SELECT_ALL_CMD]);
+  });
+
+  it("does NOT reject when `keycombination` is supported (exit 0, no marker)", async () => {
+    // Inverse of the detection: a supported device returns no marker, so the
+    // select-all stands and the post-select DEL follows. An over-eager matcher
+    // would break `clear` on every modern device.
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(adbShell.mock.calls.map((c) => c[1])).toEqual([SELECT_ALL_CMD, DEL_CMD]);
+  });
+
+  it("surfaces a transport failure on `keycombination` as-is", async () => {
     adbShell.mockImplementationOnce(async () => {
       throw new Error("device offline");
     });
@@ -236,11 +306,11 @@ describe("keyboard clear — Android (adb input)", () => {
     await expect(
       makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
     ).rejects.toThrow(/device offline/);
+    // Exactly one adb call — and not misreported as an API-level problem.
+    expect(adbShell).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an unknown key before clearing anything", async () => {
-    adbShell.mockClear();
-
     await expect(
       makeAndroidImpl(registryWith({})).handler(
         {},
@@ -252,8 +322,6 @@ describe("keyboard clear — Android (adb input)", () => {
   });
 
   it("rejects un-typeable text before clearing anything", async () => {
-    adbShell.mockClear();
-
     await expect(
       makeAndroidImpl(registryWith({})).handler(
         {},
@@ -284,12 +352,16 @@ describe("keyboard clear — Chromium (CDP)", () => {
 
     const down = events[0];
     expect(down.type).toBe("rawKeyDown");
+    // THE regression guard: the clear must be expressed as editing `commands`.
+    // A modifier-only Ctrl/Cmd+A never reaches Blink's editing layer — measured
+    // on Chrome 150, `modifiers: 2` and `modifiers: 4` each select ZERO
+    // characters, so the delete that follows removes exactly one while the tool
+    // still reports success. An implementation that swapped `commands` for
+    // `modifiers` fails on this line.
     expect(down.commands).toEqual(["selectAll", "deleteBackward"]);
-    // THE regression guard. A modifier-only Ctrl/Cmd+A never reaches Blink's
-    // editing layer: it selects zero characters, so the delete that follows
-    // removes exactly ONE character while the tool still reports success —
-    // a different wrong value per platform in a cross-platform flow.
-    expect(down.modifiers).toBeUndefined();
+    // Secondary: rules out a hybrid that also sets `modifiers`. Weaker than the
+    // line above (which already rejects the broken form), kept because a stray
+    // modifier changes what the page's own keydown handlers observe.
     expect(events.every((e) => e.modifiers === undefined)).toBe(true);
     expect(result.cleared).toBe(true);
   });
@@ -333,6 +405,21 @@ describe("keyboard clear — Chromium (CDP)", () => {
         CHROMIUM
       )
     ).rejects.toThrow(/Unknown key "bogus"/);
+    expect(dispatchKeyEvent).not.toHaveBeenCalled();
+  });
+
+  it("rejects un-typeable text BEFORE clearing (never destroys the old value)", async () => {
+    const dispatchKeyEvent = vi.fn(async () => {});
+
+    await expect(
+      makeChromiumImpl(registryWith({ dispatchKeyEvent })).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: "café", delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/No CDP key descriptor for character "é"/);
+    // Same hazard as the iOS case: a clear that lands and then 400s leaves the
+    // field holding "caf" instead of its original value.
     expect(dispatchKeyEvent).not.toHaveBeenCalled();
   });
 
@@ -382,5 +469,23 @@ describe("keyboard clear — unsupported platforms", () => {
 
     expect(type).toHaveBeenCalledWith("hi");
     expect(result).toEqual({ typed: "hi", keys: 2 });
+  });
+
+  it("an Android TV target routes clear to the TV rejection, not to adb", async () => {
+    // Joins the two halves the other tests check separately: `makeAndroidImpl`
+    // routes a TV target to `typeTv`, and `typeTv` rejects clear. Without this,
+    // an Android TV serial could reach `typeAndroidPhone` and silently run the
+    // select-all chord against a device that cannot use it.
+    adbShell.mockClear();
+    isAndroidTv.mockResolvedValueOnce(true);
+
+    await expect(
+      makeAndroidImpl(registryWith({ type: vi.fn() })).handler(
+        {},
+        { udid: ANDROID.id, clear: true, text: "hi" },
+        ANDROID
+      )
+    ).rejects.toBeInstanceOf(UnsupportedOperationError);
+    expect(adbShell).not.toHaveBeenCalled();
   });
 });
