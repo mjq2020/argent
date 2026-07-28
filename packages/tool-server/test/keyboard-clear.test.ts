@@ -38,7 +38,10 @@ const VEGA: DeviceInfo = { id: "vega-serial", platform: "vega", kind: "vvd" };
 const ANDROID: DeviceInfo = { id: "emulator-5554", platform: "android", kind: "emulator" };
 const APPLE_TV: DeviceInfo = { id: "TV-UDID", platform: "ios", kind: "simulator" };
 
-const SELECT_ALL_CMD = "input keycombination 113 29"; // KEYCODE_CTRL_LEFT + KEYCODE_A
+// `2>&1` folds the device's stderr into the stream `adbShell` returns: API 30
+// writes its usage dump to stderr while API 34/36 write "Unknown command" to
+// stdout, and without the redirect the API 30 case is invisible.
+const SELECT_ALL_CMD = "input keycombination 113 29 2>&1"; // KEYCODE_CTRL_LEFT + KEYCODE_A
 const DEL_CMD = "input keyevent 67"; // KEYCODE_DEL
 
 function registryWith(api: unknown) {
@@ -256,7 +259,7 @@ describe("keyboard clear — Android (adb input)", () => {
     ]);
   });
 
-  it("rejects loudly when `keycombination` is unavailable (API < 30)", async () => {
+  it("rejects loudly when `keycombination` is unavailable", async () => {
     // An older API level has no `keycombination` subcommand — and it still
     // EXITS 0: `input` reports the unknown subcommand on stdout and BaseCommand
     // swallows the exception. Measured on-device: `adb shell input bogussubcmd`
@@ -267,10 +270,38 @@ describe("keyboard clear — Android (adb input)", () => {
 
     await expect(
       makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
-    ).rejects.toThrow(/needs Android 11 \(API 30\) or newer/);
+    ).rejects.toThrow(/not supported on this Android version/);
 
     // The select-all probe ran; the post-select DEL did NOT. Letting it through
     // is the silent one-character delete this guard exists to stop.
+    expect(adbShell.mock.calls.map((c) => c[1])).toEqual([SELECT_ALL_CMD]);
+  });
+
+  it("redirects stderr so an API 30 usage dump is visible at all", async () => {
+    // THE regression guard for the shape that shipped broken. On API 30 the
+    // complaint is a usage dump on STDERR and the exit code is 0, while
+    // `adbShell` returns stdout only — so without the `2>&1` the probe returns
+    // "" and looks exactly like success. The DEL then runs as a plain
+    // backspace: a real device went "wifi" -> "wif" and reported cleared: true.
+    // Asserting the command string is what pins the redirect; the marker test
+    // below cannot, since a stdout-only mock is indistinguishable either way.
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(adbShell.mock.calls[0]![1]).toContain("2>&1");
+  });
+
+  it('rejects on the API 30 usage-dump wording, not just "Unknown command"', async () => {
+    // API 30 emits a `Usage: input …` block rather than "Unknown command: …",
+    // and it does not start at the beginning of the captured string once
+    // stderr is folded in — so the matcher must not be anchored.
+    adbShell.mockImplementationOnce(
+      async () =>
+        "Usage: input [<source>] [-d DISPLAY_ID] <command> [<arg>...]\n\nThe sources are: \n      dpad\n      keyboard\n"
+    );
+
+    await expect(
+      makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
+    ).rejects.toThrow(/not supported on this Android version/);
     expect(adbShell.mock.calls.map((c) => c[1])).toEqual([SELECT_ALL_CMD]);
   });
 
@@ -283,7 +314,7 @@ describe("keyboard clear — Android (adb input)", () => {
         { udid: ANDROID.id, clear: true, text: "new@example.com" },
         ANDROID
       )
-    ).rejects.toThrow(/needs Android 11 \(API 30\) or newer/);
+    ).rejects.toThrow(/not supported on this Android version/);
     // No `input text`: otherwise the field would end up
     // "old@example.cnew@example.com" and the call would report success.
     expect(adbShell.mock.calls.map((c) => c[1])).toEqual([SELECT_ALL_CMD]);
