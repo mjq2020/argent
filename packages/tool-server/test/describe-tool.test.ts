@@ -3,6 +3,7 @@ import type { AXServiceApi, AXDescribeResponse } from "../src/blueprints/ax-serv
 import type { NativeDevtoolsApi } from "../src/blueprints/native-devtools";
 import { NON_INJECTABLE_NATIVE_WARNING } from "../src/blueprints/native-devtools";
 import { createDescribeTool } from "../src/tools/describe";
+import { describeIos, __resetBootCaveatStateForTests } from "../src/tools/describe/platforms/ios";
 import { __primeDepCacheForTests, __resetDepCacheForTests } from "../src/utils/check-deps";
 import { isTvOsSimulator } from "../src/utils/ios-devices";
 
@@ -100,6 +101,10 @@ describe("describe tool", () => {
     __resetDepCacheForTests();
     __primeDepCacheForTests(["xcrun", "adb"]);
     mockIsTvOsSimulator.mockResolvedValue(false);
+    // The externally-booted caveat is emitted once per device per server
+    // lifetime, so the "already told" set survives between tests that share a
+    // udid unless it is cleared here.
+    __resetBootCaveatStateForTests();
   });
 
   it("returns elements from ax-service daemon", async () => {
@@ -492,6 +497,146 @@ describe("describe tool", () => {
     expect(result.source).toBe("ax-service");
     expect(result.hint).toMatch(/boot-device/);
     expect(result.hint).toMatch(/system dialogs/i);
+  });
+
+  // ── Externally-booted caveat: wording and repetition ─────────────────────
+  // A sim booted by the developer (`xcrun simctl boot`, Xcode, `expo run:ios`)
+  // never gets the pre-boot AX prefs, so `degraded` stays true for its whole
+  // life. Verified on an externally-booted iOS 18.6 sim: describe returns the
+  // full tree — the Maps location prompt included, all three buttons tappable —
+  // so the caveat must neither order a reboot that would kill the developer's
+  // Metro session nor repeat itself on every call.
+
+  it("states the limitation without ordering a reboot when the degraded read returned a tree", async () => {
+    const axApi = makeAXServiceApi(
+      {
+        alertVisible: false,
+        screenFrame: { width: 440, height: 956 },
+        elements: [
+          {
+            label: "General",
+            frame: { x: 0.045, y: 0.337, width: 0.9, height: 0.046 },
+            traits: [],
+          },
+        ],
+      },
+      { degraded: true }
+    );
+    const tool = createDescribeTool(makeMockRegistry({ axService: axApi }));
+
+    const result = await tool.execute({}, { udid: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA" });
+
+    // The tree read fine, so the caveat is a statement, not an instruction:
+    // no MUST, and no "do it now / before continuing" urgency for an agent to
+    // obey literally.
+    expect(result.hint).not.toMatch(/MUST/);
+    expect(result.hint).not.toMatch(/\bnow\b/i);
+    expect(result.hint).not.toMatch(/before continuing/i);
+    // It still names the remedy and what the remedy costs.
+    expect(result.hint).toMatch(/boot-device/);
+    expect(result.hint).toMatch(/restart/i);
+  });
+
+  it("emits the degraded caveat once per device, not on every describe", async () => {
+    const axApi = makeAXServiceApi(
+      {
+        alertVisible: false,
+        screenFrame: { width: 440, height: 956 },
+        elements: [
+          {
+            label: "General",
+            frame: { x: 0.045, y: 0.337, width: 0.9, height: 0.046 },
+            traits: [],
+          },
+        ],
+      },
+      { degraded: true }
+    );
+    const tool = createDescribeTool(makeMockRegistry({ axService: axApi }));
+    const udid = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA";
+
+    const first = await tool.execute({}, { udid });
+    const second = await tool.execute({}, { udid });
+    const third = await tool.execute({}, { udid });
+
+    expect(first.hint).toMatch(/booted through argent/);
+    expect(second.hint).toBeUndefined();
+    expect(third.hint).toBeUndefined();
+    // Suppressing the caveat must not cost the caller the tree itself.
+    expect(elementLineCount(second.description)).toBe(1);
+  });
+
+  it("tells each degraded device its own caveat", async () => {
+    const axApi = makeAXServiceApi(
+      {
+        alertVisible: false,
+        screenFrame: { width: 440, height: 956 },
+        elements: [
+          {
+            label: "General",
+            frame: { x: 0.045, y: 0.337, width: 0.9, height: 0.046 },
+            traits: [],
+          },
+        ],
+      },
+      { degraded: true }
+    );
+    const tool = createDescribeTool(makeMockRegistry({ axService: axApi }));
+
+    const first = await tool.execute({}, { udid: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA" });
+    const other = await tool.execute({}, { udid: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB" });
+
+    expect(first.hint).toMatch(/booted through argent/);
+    expect(other.hint).toMatch(/booted through argent/);
+  });
+
+  it("repeats the blind-read caveat every call instead of deduping it", async () => {
+    // An empty tree from a degraded sim is the one case where the reboot earns
+    // its cost, and `isBlindRead` (await-ui-element / flows) reads a present
+    // `hint` on an empty tree as "this emptiness is untrustworthy". Deduping
+    // here would let a later `hidden` wait resolve true off a blind read.
+    const axApi = makeAXServiceApi({ alertVisible: false, elements: [] }, { degraded: true });
+    const tool = createDescribeTool(makeMockRegistry({ axService: axApi }));
+    const udid = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA";
+
+    const first = await tool.execute({}, { udid });
+    const second = await tool.execute({}, { udid });
+
+    expect(first.hint).toMatch(/boot-device/);
+    expect(second.hint).toEqual(first.hint);
+    expect(first.hint).toMatch(/no elements/i);
+  });
+
+  it("keeps the caveat on every internal describeIos read, which the tool alone dedupes", async () => {
+    // await-ui-element / flows / await-screen-idle poll describeIos directly and
+    // fold the last read's hint into one terminal note. The per-device gate
+    // lives at the tool boundary, so their diagnostics stay intact.
+    const axApi = makeAXServiceApi(
+      {
+        alertVisible: false,
+        screenFrame: { width: 440, height: 956 },
+        elements: [
+          {
+            label: "General",
+            frame: { x: 0.045, y: 0.337, width: 0.9, height: 0.046 },
+            traits: [],
+          },
+        ],
+      },
+      { degraded: true }
+    );
+    const registry = makeMockRegistry({ axService: axApi });
+    const device = {
+      id: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+      platform: "ios" as const,
+      kind: "simulator" as const,
+    };
+
+    const first = await describeIos(registry, device, {}, { isTvOs: false });
+    const second = await describeIos(registry, device, {}, { isTvOs: false });
+
+    expect(first.hint).toMatch(/booted through argent/);
+    expect(second.hint).toEqual(first.hint);
   });
 
   it("omits hint when ax-service is not degraded", async () => {
