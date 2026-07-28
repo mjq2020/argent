@@ -166,22 +166,31 @@ const KEYCODE_DEL = 67;
  * and a React Native `TextInput` (Bluesky sign-in) — the field empties, the
  * placeholder returns and focus is retained.
  *
- * `keycombination` was added in Android 11 (API 30). On an older level it is
- * absent — and CANNOT be detected by exit code. `input` reports an unknown
- * subcommand by throwing IllegalArgumentException, which `BaseCommand` catches
- * and turns into a usage dump, so the process still **exits 0**:
+ * `keycombination` is a recent `input` subcommand; older levels do not have it
+ * (measured absent on API 30, present on API 34 and 36) — and its absence
+ * CANNOT be detected by exit code. `input` reports the bad subcommand by
+ * throwing IllegalArgumentException, which `BaseCommand` catches and turns into
+ * a usage dump, so the process still **exits 0**:
  *
- *     $ adb shell input bogussubcmd 1 2
- *     Unknown command: bogussubcmd
+ *     $ adb shell input keycombination 113 29   # API 30
+ *     Usage: input [<source>] [-d DISPLAY_ID] <command> [<arg>...]
  *     $ echo $?
  *     0
  *
- * (Measured on API 34 and API 36.) Detecting this by catching a throw would
- * therefore never fire: the select-all would silently do nothing, the DEL below
- * would delete exactly ONE character, and the tool would report `cleared: true`
- * — the same silent-no-op class as issue #449. So the marker is read out of the
- * command's OUTPUT instead. A thrown error is left to propagate as the genuine
- * transport failure it is.
+ * Detecting this by catching a throw would therefore never fire: the select-all
+ * would silently do nothing, the DEL below would delete exactly ONE character,
+ * and the tool would report `cleared: true` — the same silent-no-op class as
+ * issue #449. So the marker is read out of the command's OUTPUT instead.
+ *
+ * The `2>&1` is load-bearing. Which stream carries the complaint varies by
+ * level — API 30 writes the usage dump to STDERR, while API 34/36 write
+ * "Unknown command: …" to stdout — and `adbShell` returns stdout only, so
+ * without the redirect an API 30 device looks exactly like a success and the
+ * one-character delete ships. Redirecting on the device folds both into the
+ * stream we can see. Verified that a device which DOES support the subcommand
+ * prints nothing on either stream, so this cannot false-reject.
+ *
+ * A thrown error is left to propagate as the genuine transport failure it is.
  *
  * There is deliberately NO best-effort fallback for API < 30. The only portable
  * substitute is MOVE_END plus a fixed run of KEYCODE_DELs, and it is wrong in
@@ -196,14 +205,17 @@ const KEYCODE_DEL = 67;
  * instead — same treatment as Vega and TV.
  */
 export async function injectAndroidClear(serial: string): Promise<void> {
-  const out = await adbShell(serial, `input keycombination ${KEYCODE_CTRL_LEFT} ${KEYCODE_A}`, {
-    timeoutMs: ADB_INPUT_TIMEOUT_MS,
-  });
-  if (/unknown command|^usage: input/im.test(out)) {
+  const out = await adbShell(
+    serial,
+    `input keycombination ${KEYCODE_CTRL_LEFT} ${KEYCODE_A} 2>&1`,
+    { timeoutMs: ADB_INPUT_TIMEOUT_MS }
+  );
+  if (/unknown command|usage: input/i.test(out)) {
     throw new InvalidToolInputError(
-      "keyboard `clear` needs Android 11 (API 30) or newer: this device's `input` has no " +
-        "`keycombination` subcommand, so the select-all chord cannot be sent. Delete the " +
-        'field\'s contents with repeated `key: "backspace"` presses instead.',
+      "keyboard `clear` is not supported on this Android version: its `input` has no " +
+        "`keycombination` subcommand, so the select-all chord cannot be sent (measured " +
+        "absent on API 30, present on API 34+). Delete the field's contents with repeated " +
+        '`key: "backspace"` presses instead.',
       {
         error_code: FAILURE_CODES.KEYBOARD_KEY_UNSUPPORTED,
         failure_stage: "keyboard_clear_android_unsupported",
