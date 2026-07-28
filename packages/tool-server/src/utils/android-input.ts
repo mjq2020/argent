@@ -157,6 +157,14 @@ const KEYCODE_CTRL_LEFT = 113;
 const KEYCODE_A = 29;
 const KEYCODE_DEL = 67;
 
+// The delete-based fallback drives one key event per character through a single
+// `input` invocation. Every key is delivered to the app, so the wall-clock cost
+// scales with its per-keystroke work (6.9s for 150 keys against a live-filtering
+// search box on API 30). Capped below the argent-mcp adapter's 30s per-request
+// fetch timeout — `keyboard` is not `longRunning`, so exceeding it would have
+// the client abandon the request while adb kept deleting on the device.
+const ADB_CLEAR_FALLBACK_TIMEOUT_MS = 25_000;
+
 /**
  * Empty the focused text field: select its whole contents, then delete.
  *
@@ -192,17 +200,8 @@ const KEYCODE_DEL = 67;
  *
  * A thrown error is left to propagate as the genuine transport failure it is.
  *
- * There is deliberately NO best-effort fallback for API < 30. The only portable
- * substitute is MOVE_END plus a fixed run of KEYCODE_DELs, and it is wrong in
- * three ways that all fail quietly: it is bounded, so a field longer than the
- * run keeps its head and the typed text is appended to that residue; MOVE_END is
- * end-of-LINE, so a multi-line field keeps every line below the caret; and each
- * DEL is delivered to the app, so the cost scales with the app's per-keystroke
- * work. Measured: a 200-DEL run against a React Native TextInput exceeded 25s
- * and was killed, while the same run against an idle emulator took ~1s. A clear
- * that reports success having removed part of a field is exactly the failure
- * this parameter exists to prevent, so an unsupported level is rejected loudly
- * instead — same treatment as Vega and TV.
+ * On a level without `keycombination` the clear falls back to
+ * {@link clearByDeleting}, which is exact rather than best-effort — see there.
  */
 export async function injectAndroidClear(serial: string): Promise<void> {
   const out = await adbShell(
@@ -211,19 +210,99 @@ export async function injectAndroidClear(serial: string): Promise<void> {
     { timeoutMs: ADB_INPUT_TIMEOUT_MS }
   );
   if (/unknown command|usage: input/i.test(out)) {
-    throw new InvalidToolInputError(
-      "keyboard `clear` is not supported on this Android version: its `input` has no " +
-        "`keycombination` subcommand, so the select-all chord cannot be sent (measured " +
-        "absent on API 30, present on API 34+). Delete the field's contents with repeated " +
-        '`key: "backspace"` presses instead.',
-      {
-        error_code: FAILURE_CODES.KEYBOARD_KEY_UNSUPPORTED,
-        failure_stage: "keyboard_clear_android_unsupported",
-        error_kind: "unsupported",
-      }
-    );
+    await clearByDeleting(serial);
+    return;
   }
   await injectAndroidKeycode(serial, KEYCODE_DEL);
+}
+
+const KEYCODE_MOVE_END = 123;
+
+// Extra backspaces beyond the field's measured length, to absorb a character
+// typed between the measurement and the delete run. Backspace on an empty field
+// is a no-op, so overshooting costs only key events.
+const DELETE_MARGIN = 8;
+
+// Used when the focused field's contents cannot be measured (no focused node in
+// the dump, or a password field, whose text uiautomator refuses to report).
+// Comfortably covers a credential or a single-line form field; each key is ~5ms
+// of the shared `input` invocation, so the whole run is well under a second of
+// device time.
+const BLIND_DELETE_COUNT = 160;
+
+const ADB_DUMP_TIMEOUT_MS = 20_000;
+
+/**
+ * Empty the focused field on an Android level whose `input` has no
+ * `keycombination`: move the caret to the end of the line, then backspace over
+ * the contents.
+ *
+ * The count is measured, not guessed. A `uiautomator dump` is read first and the
+ * focused node's `text` gives the exact number of characters to remove, so this
+ * is not the bounded best-effort it would otherwise be — the failure mode of a
+ * fixed run is that a longer field keeps its head and the typed text is appended
+ * to that residue, which is precisely what `clear` exists to prevent. When the
+ * text cannot be read (no focused node, or a password field — uiautomator
+ * reports those empty) it falls back to BLIND_DELETE_COUNT.
+ *
+ * Note the dump reports an EMPTY field's hint in the same `text` attribute, so a
+ * measurement can be the placeholder rather than real content. That is harmless
+ * in this direction: it only ever makes the run slightly longer than needed, and
+ * backspace on an empty field does nothing.
+ *
+ * Known limit, and the reason this is the fallback rather than the primary path:
+ * `KEYCODE_MOVE_END` is end-of-LINE, not end-of-buffer, so a multi-line field
+ * keeps whatever sits below the caret. Single-line inputs — every login, search
+ * and form field — are exact.
+ *
+ * Measured on an API 30 emulator: 150 keys against the live-filtering Settings
+ * search box took 6.9s wall-clock and emptied it; against an idle field the same
+ * run is ~0.75s, since the cost is dominated by one `input` VM start.
+ */
+async function clearByDeleting(serial: string): Promise<void> {
+  const count = (await measureFocusedTextLength(serial)) ?? BLIND_DELETE_COUNT;
+  const dels = Array.from({ length: count + DELETE_MARGIN }, () => KEYCODE_DEL).join(" ");
+  // One invocation for the whole run: `input keyevent` accepts a keycode list,
+  // and the per-key cost is negligible next to starting the app-process VM.
+  await adbShell(serial, `input keyevent ${KEYCODE_MOVE_END} ${dels}`, {
+    timeoutMs: ADB_CLEAR_FALLBACK_TIMEOUT_MS,
+  });
+}
+
+/**
+ * Characters in the focused field, or undefined when it cannot be read. Parsed
+ * straight out of a `uiautomator dump` rather than the describe stack, so this
+ * util stays dependency-free and usable from the keyboard backend.
+ */
+async function measureFocusedTextLength(serial: string): Promise<number | undefined> {
+  let xml: string;
+  try {
+    xml = await adbShell(serial, "uiautomator dump /dev/tty", {
+      timeoutMs: ADB_DUMP_TIMEOUT_MS,
+    });
+  } catch {
+    return undefined;
+  }
+  // uiautomator emits one self-closing <node .../> per view with a fixed
+  // attribute order in which `text` precedes `focused`, so match the whole tag
+  // and pull `text` back out of it.
+  for (const tag of xml.match(/<node\b[^>]*>/g) ?? []) {
+    if (!/\bfocused="true"/.test(tag)) continue;
+    // A password field reports empty text regardless of contents, so its length
+    // is not evidence — fall back to the blind count instead of clearing 0.
+    if (/\bpassword="true"/.test(tag)) return undefined;
+    const text = /\btext="([^"]*)"/.exec(tag)?.[1];
+    if (text === undefined) return undefined;
+    // The dump is XML-escaped; decode so the length is in real characters.
+    const decoded = text
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, "&");
+    return [...decoded].length;
+  }
+  return undefined;
 }
 
 /**
