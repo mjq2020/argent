@@ -380,6 +380,13 @@ function stepIndent(depth: unknown): string {
  * renderer clamps again rather than trusting the count it was handed.
  */
 const MAX_RENDER_CANDIDATES = 5;
+/**
+ * An honest tool-server sends at most one failure per run (the runner
+ * hard-stops at the first non-passing leaf), so this bounds only a buggy or
+ * hostile one — where an unbounded loop over individually-clamped blocks still
+ * adds up to a tool result no client can hold.
+ */
+const MAX_RENDER_FAILURES = 10;
 const MAX_RENDER_TEXT = 300;
 
 /**
@@ -391,7 +398,11 @@ const MAX_RENDER_TEXT = 300;
  */
 function wireText(value: unknown, limit = MAX_RENDER_TEXT): string | undefined {
   if (typeof value !== "string") return undefined;
-  const flat = value.replace(/\s+/g, " ").trim();
+  // Control characters collapse along with whitespace: `\s` alone leaves ESC,
+  // NUL and backspace intact, and this text is printed by a client TUI, so a
+  // hostile tool-server could move the cursor and repaint lines it does not own.
+  // eslint-disable-next-line no-control-regex -- collapsing control characters is the point
+  const flat = value.replace(/[\s\u0000-\u001F\u007F\u2028\u2029]+/g, " ").trim();
   if (flat === "") return undefined;
   return flat.length <= limit ? flat : `${flat.slice(0, Math.max(0, limit - 1))}…`;
 }
@@ -487,11 +498,16 @@ async function failureBlocks(
   ctx?: ContentContext
 ): Promise<ContentBlock[]> {
   if (failures.length === 0) return [];
+  // An honest server sends exactly one (the runner hard-stops at the first
+  // non-passing leaf), so this only ever bites a buggy or hostile one — where
+  // an unbounded loop over budget-respecting blocks is a half-gigabyte tool
+  // result. Same doctrine as MAX_RENDER_CANDIDATES / MAX_RENDER_DEPTH.
+  const shown = failures.slice(0, MAX_RENDER_FAILURES);
 
   const blocks: ContentBlock[] = [{ type: "text", text: "Failures:" }];
   let evidenceDir: string | undefined;
 
-  for (let i = 0; i < failures.length; i++) {
+  for (let i = 0; i < shown.length; i++) {
     const { num, step, failure } = failures[i]!;
     const lines: string[] = [`  ${num}) ${stepLabel(step)}${stepDuration(step.durationMs)}`];
 
@@ -582,7 +598,7 @@ async function failureBlocks(
     // other one the handle prints its path, with no download and no image.
     let inlineImage: ContentBlock | undefined;
     let screenshotPath: string | undefined;
-    if (i === 0 && ctx && !budget.used && isArtifactHandle(failure.screenshot)) {
+    if (ctx && !budget.used && isArtifactHandle(failure.screenshot)) {
       const { result: local, images } = await materializeArtifacts(failure.screenshot, ctx);
       // A null means the handle couldn't be fetched; say so rather than
       // rendering a dangling reference (the `stepArtifactBlocks` convention).
@@ -626,14 +642,21 @@ async function failureBlocks(
 }
 
 function stepLabel(step: FlowStepResult): string {
-  if (step.kind === "echo") return step.message ?? "";
-  if (step.tool) return step.tool;
+  // Every part is wire data, so each goes through the same clamp the rest of
+  // the block uses. Without it a `target` carrying newlines and ANSI escapes
+  // rendered raw into the failure heading, where it could repaint the lines
+  // above it — including the verdict.
+  const kind = wireText(step.kind, 64) ?? "step";
+  if (step.kind === "echo") return wireText(step.message) ?? "";
+  const tool = wireText(step.tool, 128);
+  if (tool) return tool;
   // A run step's target is the as-written path — `run ios/login.yaml` and
   // `run android/login.yaml` must render distinctly, not as one stem.
-  if (step.target) return `${step.kind} ${step.target}`;
+  const target = wireText(step.target);
+  if (target) return `${kind} ${target}`;
   // Legacy: a pre-target tool-server sends only the fragment stem in `flow`.
-  if (step.kind === "run") return `run ${step.flow ?? ""}`.trim();
-  return step.kind;
+  if (step.kind === "run") return `run ${wireText(step.flow, 128) ?? ""}`.trim();
+  return kind;
 }
 
 /**
