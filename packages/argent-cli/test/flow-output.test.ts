@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { MaterializeContext } from "@argent/tools-client";
-import { exportFailureArtifacts, type FlowReport, type StepReport } from "../src/flow.js";
+import { exportRunArtifacts, type FlowReport, type StepReport } from "../src/flow.js";
 
 // Spies over the real implementations, not stubs: every test here runs against
 // a real temp filesystem. Only the three marker-window tests override anything,
@@ -86,7 +86,7 @@ afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
-describe("exportFailureArtifacts", () => {
+describe("exportRunArtifacts", () => {
   it("copies every role of a failed snapshot to <output>/<flow>/<key>-<role>.png and rewrites the report", async () => {
     const baseline = await writeFile("b.png", "baseline-bytes");
     const current = await writeFile("c.png", "current-bytes");
@@ -99,7 +99,7 @@ describe("exportFailureArtifacts", () => {
       artifacts: { baseline, current, diff },
     };
 
-    await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+    await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
     const dir = path.join(outDir, "checkout");
     for (const [role, content] of [
@@ -124,7 +124,7 @@ describe("exportFailureArtifacts", () => {
       artifacts: { baseline },
     };
 
-    await exportFailureArtifacts(mkReport([seeded]), outDir, flowFile, ctx);
+    await exportRunArtifacts(mkReport([seeded]), outDir, flowFile, ctx);
 
     expect(seeded.artifacts?.baseline).toBe(baseline);
     await expect(fs.access(outDir)).rejects.toThrow();
@@ -139,7 +139,7 @@ describe("exportFailureArtifacts", () => {
       artifacts: { baseline },
     };
 
-    await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+    await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
     expect(step.artifacts?.baseline).toBe(
       path.join(outDir, "checkout", "home__android-1080x2400-baseline.png")
@@ -162,7 +162,7 @@ describe("exportFailureArtifacts", () => {
       artifacts: { current },
     };
 
-    await exportFailureArtifacts(mkReport([withNull, keyless]), outDir, flowFile, ctx);
+    await exportRunArtifacts(mkReport([withNull, keyless]), outDir, flowFile, ctx);
 
     expect(withNull.artifacts?.baseline).toBeNull();
     expect(withNull.artifacts?.current).toBe(
@@ -188,7 +188,7 @@ describe("exportFailureArtifacts", () => {
       throw new Error("unexpected network fetch");
     });
 
-    await exportFailureArtifacts(mkReport([step]), outDir, flowFile, {
+    await exportRunArtifacts(mkReport([step]), outDir, flowFile, {
       toolsUrl: "http://tools.invalid",
       fetchImpl: fetchSpy as unknown as typeof fetch,
     });
@@ -227,7 +227,7 @@ describe("exportFailureArtifacts", () => {
       };
       const fetchSpy = vi.fn(async () => new Response("diff-bytes"));
 
-      await exportFailureArtifacts(mkReport([step]), outDir, flowFile, {
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, {
         toolsUrl: "http://tools.invalid",
         authToken: "tok",
         fetchImpl: fetchSpy as unknown as typeof fetch,
@@ -270,7 +270,7 @@ describe("exportFailureArtifacts", () => {
       // The CLI validates the stem before ever calling the export, but the
       // function must stay safe in isolation: a path ending in "/.." has the
       // basename "..", which would resolve the subdirectory to outDir's parent.
-      await exportFailureArtifacts(mkReport([step]), outDir, `${tmpDir}${path.sep}..`, {
+      await exportRunArtifacts(mkReport([step]), outDir, `${tmpDir}${path.sep}..`, {
         toolsUrl: "http://tools.invalid",
         fetchImpl: fetchSpy as unknown as typeof fetch,
       });
@@ -296,7 +296,7 @@ describe("exportFailureArtifacts", () => {
       artifacts: { current },
     };
 
-    await exportFailureArtifacts({ ...mkReport([step]), flow: "../escape" }, outDir, flowFile, ctx);
+    await exportRunArtifacts({ ...mkReport([step]), flow: "../escape" }, outDir, flowFile, ctx);
 
     expect(step.artifacts?.current).toBe(
       path.join(outDir, "checkout", "home__ios-390x844-current.png")
@@ -322,7 +322,7 @@ describe("exportFailureArtifacts", () => {
       artifacts: { current: good },
     };
 
-    await exportFailureArtifacts(mkReport([badStep, goodStep]), outDir, flowFile, ctx);
+    await exportRunArtifacts(mkReport([badStep, goodStep]), outDir, flowFile, ctx);
 
     // Untouched — the join would have resolved to <tmpDir>/pwned-current.png.
     expect(badStep.artifacts?.current).toBe(evil);
@@ -341,10 +341,115 @@ describe("exportFailureArtifacts", () => {
       artifacts: { baseline: `${tmpDir}${path.sep}..` },
     };
 
-    await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+    await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
     expect(step.artifacts?.baseline).toBe(`${tmpDir}${path.sep}..`);
     await expect(fs.access(outDir)).rejects.toThrow();
+  });
+
+  it("exports the failing step's screenshot and tree under a sortable step-NN stem", async () => {
+    const shot = await writeHandle("shot.png", "screen-bytes");
+    const tree = await writeHandle("tree.txt", "tree-bytes");
+    const steps: StepReport[] = [
+      // Echo carries no number, so the failing step below is ordinal 2 — the
+      // same number the terminal block and the JUnit testcase print.
+      { index: 0, kind: "echo", status: "pass", message: "Opening the cart" },
+      { index: 1, kind: "launch", status: "pass" },
+      {
+        index: 2,
+        kind: "tap",
+        status: "fail",
+        target: '"Checkout"',
+        reason: "no match",
+        failure: {
+          code: "selector-not-found",
+          message: "no match",
+          screenshot: shot,
+          tree,
+        },
+      },
+    ];
+
+    await exportRunArtifacts(mkReport(steps), outDir, flowFile, ctx);
+
+    const dir = path.join(outDir, "checkout");
+    expect(steps[2]!.failure?.screenshot).toBe(path.join(dir, "step-02-screen.png"));
+    expect(steps[2]!.failure?.tree).toBe(path.join(dir, "step-02-tree.txt"));
+    expect(await fs.readFile(path.join(dir, "step-02-screen.png"), "utf8")).toBe("screen-bytes");
+    expect(await fs.readFile(path.join(dir, "step-02-tree.txt"), "utf8")).toBe("tree-bytes");
+  });
+
+  it("leaves existing snapshot filenames untouched while adding failure evidence", async () => {
+    const baseline = await writeFile("b.png", "baseline-bytes");
+    const shot = await writeHandle("shot.png", "screen-bytes");
+    const step: StepReport = {
+      index: 0,
+      kind: "snapshot",
+      status: "fail",
+      snapshotKey: "home__ios-390x844",
+      artifacts: { baseline },
+      failure: { code: "snapshot-diff", message: "diff 2.10% > 1%", screenshot: shot },
+    };
+
+    await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
+
+    const dir = path.join(outDir, "checkout");
+    // The historical name is byte-identical — anyone globbing it is unaffected.
+    expect(step.artifacts?.baseline).toBe(path.join(dir, "home__ios-390x844-baseline.png"));
+    expect(step.failure?.screenshot).toBe(path.join(dir, "step-01-screen.png"));
+  });
+
+  it("refuses a traversing flow name before touching the failure evidence either", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const remote = {
+        __argentArtifact: true,
+        id: "shot-1",
+        filename: "shot.png",
+        mimeType: "image/png",
+        size: 10,
+      };
+      const step: StepReport = {
+        index: 0,
+        kind: "tap",
+        status: "fail",
+        failure: { code: "selector-not-found", message: "no match", screenshot: remote },
+      };
+      const fetchSpy = vi.fn(async () => new Response("screen-bytes"));
+
+      await exportRunArtifacts(mkReport([step]), outDir, `${tmpDir}${path.sep}..`, {
+        toolsUrl: "http://tools.invalid",
+        fetchImpl: fetchSpy as unknown as typeof fetch,
+      });
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(step.failure?.screenshot).toBe(remote);
+      await expect(fs.access(outDir)).rejects.toThrow();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("warns and keeps the source handle when the failure evidence cannot be copied", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const gone = path.join(tmpDir, "vanished.png");
+      const step: StepReport = {
+        index: 0,
+        kind: "tap",
+        status: "fail",
+        failure: { code: "selector-not-found", message: "no match", screenshot: gone },
+      };
+
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
+
+      // Artifact export never changes a run's verdict, and never loses the
+      // path it failed to copy.
+      expect(step.failure?.screenshot).toBe(gone);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("warning: could not write"));
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it("warns and keeps the temp path when a source file is unreadable", async () => {
@@ -359,7 +464,7 @@ describe("exportFailureArtifacts", () => {
         artifacts: { diff: gone },
       };
 
-      await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
       expect(step.artifacts?.diff).toBe(gone);
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("warning: could not write"));
@@ -390,8 +495,8 @@ describe("exportFailureArtifacts", () => {
         artifacts: { current: await writeFile("b.png", "suiteB-bytes") },
       };
 
-      await exportFailureArtifacts(mkReport([stepA]), outDir, flowA, ctx);
-      await exportFailureArtifacts(mkReport([stepB]), outDir, flowB, ctx);
+      await exportRunArtifacts(mkReport([stepA]), outDir, flowA, ctx);
+      await exportRunArtifacts(mkReport([stepB]), outDir, flowB, ctx);
 
       // The first file keeps the documented <output>/<stem>/ path…
       const aDest = path.join(outDir, "checks", "shot__ios-390x844-current.png");
@@ -422,11 +527,11 @@ describe("exportFailureArtifacts", () => {
     // A CI re-run of one flow into a reused --output dir must keep the stable
     // documented path and overwrite, never accumulate hash-suffixed siblings.
     const first = await mkStep("run1-bytes");
-    await exportFailureArtifacts(mkReport([first]), outDir, flowFile, ctx);
+    await exportRunArtifacts(mkReport([first]), outDir, flowFile, ctx);
     expect(first.artifacts?.current).toBe(dest);
 
     const second = await mkStep("run2-bytes");
-    await exportFailureArtifacts(mkReport([second]), outDir, flowFile, ctx);
+    await exportRunArtifacts(mkReport([second]), outDir, flowFile, ctx);
 
     expect(second.artifacts?.current).toBe(dest);
     expect(await fs.readFile(dest, "utf8")).toBe("run2-bytes");
@@ -453,7 +558,7 @@ describe("exportFailureArtifacts", () => {
         artifacts: { current: await writeFile("c.png", "current-bytes") },
       };
 
-      await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
       expect(await fs.readFile(path.join(outDir, "checkout", "keep.txt"), "utf8")).toBe(
         "operator data"
@@ -497,7 +602,7 @@ describe("exportFailureArtifacts", () => {
         artifacts: { current: await writeFile("b.png", "suiteB-bytes") },
       };
 
-      await exportFailureArtifacts(mkReport([stepB]), outDir, flowB, ctx);
+      await exportRunArtifacts(mkReport([stepB]), outDir, flowB, ctx);
 
       // suiteD's evidence survives byte-for-byte, marker included.
       expect(await fs.readFile(path.join(occupied, ".argent-flow-source"), "utf8")).toBe(
@@ -547,7 +652,7 @@ describe("exportFailureArtifacts", () => {
         artifacts: { current: await writeFile("c.png", "current-bytes") },
       };
 
-      await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
       expect(await fs.readFile(path.join(occupied, "keep.txt"), "utf8")).toBe("more operator data");
       expect(step.artifacts?.current).toBe(
@@ -576,7 +681,7 @@ describe("exportFailureArtifacts", () => {
         artifacts: { current: await writeFile("c.png", "current-bytes") },
       };
 
-      await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
       const dest = path.join(target, "home__ios-390x844-current.png");
       expect(step.artifacts?.current).toBe(dest);
@@ -617,11 +722,11 @@ describe("exportFailureArtifacts", () => {
       );
 
       const first = await mkStep("run1-bytes");
-      await exportFailureArtifacts(mkReport([first]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([first]), outDir, flowFile, ctx);
       expect(first.artifacts?.current).toBe(dest);
 
       const second = await mkStep("run2-bytes");
-      await exportFailureArtifacts(mkReport([second]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([second]), outDir, flowFile, ctx);
 
       expect(second.artifacts?.current).toBe(dest);
       expect(await fs.readFile(dest, "utf8")).toBe("run2-bytes");
@@ -656,7 +761,7 @@ describe("exportFailureArtifacts", () => {
         artifacts: { current: source },
       };
 
-      await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
       // Source path left in place, nothing created, every squatter untouched.
       expect(step.artifacts?.current).toBe(source);
@@ -689,7 +794,7 @@ describe("exportFailureArtifacts", () => {
         artifacts: { current: await writeFile("c.png", "current-bytes") },
       };
 
-      await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
       const dest = path.join(outDir, "checkout", "home__ios-390x844-current.png");
       expect(step.artifacts?.current).toBe(dest);
@@ -718,11 +823,11 @@ describe("exportFailureArtifacts", () => {
         snapshotKey: "home__ios-390x844",
         artifacts: { current: await writeFile("c.png", "current-bytes") },
       };
-      await exportFailureArtifacts(mkReport([owned]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([owned]), outDir, flowFile, ctx);
       errSpy.mockClear();
 
       const passing: StepReport = { index: 0, kind: "snapshot", status: "pass" };
-      await exportFailureArtifacts(
+      await exportRunArtifacts(
         mkReport([passing]),
         outDir,
         path.join(tmpDir, "other", "checkout.yaml"),
@@ -763,8 +868,8 @@ describe("exportFailureArtifacts", () => {
       };
 
       await Promise.all([
-        exportFailureArtifacts(mkReport([stepA]), outDir, flowA, ctx),
-        exportFailureArtifacts(mkReport([stepB]), outDir, flowB, ctx),
+        exportRunArtifacts(mkReport([stepA]), outDir, flowA, ctx),
+        exportRunArtifacts(mkReport([stepB]), outDir, flowB, ctx),
       ]);
 
       // Two directories, never one — whichever run won <output>/checks, the
@@ -824,8 +929,8 @@ describe("exportFailureArtifacts", () => {
       const stepB = await mkStep("b.png", "suiteB-bytes");
 
       await Promise.all([
-        exportFailureArtifacts(mkReport([stepA]), outDir, flowA, ctx),
-        exportFailureArtifacts(mkReport([stepB]), outDir, flowB, ctx),
+        exportRunArtifacts(mkReport([stepA]), outDir, flowA, ctx),
+        exportRunArtifacts(mkReport([stepB]), outDir, flowB, ctx),
       ]);
 
       // Winner-agnostic: whoever holds the pre-created stem directory won.
@@ -865,8 +970,8 @@ describe("exportFailureArtifacts", () => {
       const second = await mkStep("c2.png", "run2-bytes");
 
       await Promise.all([
-        exportFailureArtifacts(mkReport([first]), outDir, flowFile, ctx),
-        exportFailureArtifacts(mkReport([second]), outDir, flowFile, ctx),
+        exportRunArtifacts(mkReport([first]), outDir, flowFile, ctx),
+        exportRunArtifacts(mkReport([second]), outDir, flowFile, ctx),
       ]);
 
       const dest = path.join(outDir, "checkout", "home__ios-390x844-current.png");
@@ -924,7 +1029,7 @@ describe("exportFailureArtifacts", () => {
         artifacts: { current: await writeFile("c.png", "current-bytes") },
       };
 
-      await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
       expect(served).toBe(true); // the create really did lose
       const target = path.join(outDir, `checkout-${pathHash(flowFile)}`);
@@ -990,7 +1095,7 @@ describe("exportFailureArtifacts", () => {
       // The server evicted the artifact: the fetch happens, the bytes don't.
       const fetchSpy = vi.fn(async () => new Response("gone", { status: 404 }));
 
-      await exportFailureArtifacts(mkReport([noRoles, nulled, remote]), outDir, flowFile, {
+      await exportRunArtifacts(mkReport([noRoles, nulled, remote]), outDir, flowFile, {
         toolsUrl: "http://tools.invalid",
         fetchImpl: fetchSpy as unknown as typeof fetch,
       });
@@ -1032,7 +1137,7 @@ describe("exportFailureArtifacts", () => {
         artifacts: { current: await writeFile("c.png", "current-bytes") },
       };
 
-      await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
       expect(served).toBe(true); // the window was actually exercised
       expect(step.artifacts?.current).toBe(
@@ -1077,7 +1182,7 @@ describe("exportFailureArtifacts", () => {
         artifacts: { current: await writeFile("c.png", "current-bytes") },
       };
 
-      await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+      await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
       expect(reads).toBe(5); // MARKER_READ_RETRIES + 1: the retries really ran out
       const target = path.join(outDir, `checkout-${pathHash(flowFile)}`);
@@ -1116,7 +1221,7 @@ describe("exportFailureArtifacts", () => {
           artifacts: { current: await writeFile("c.png", "current-bytes") },
         };
 
-        await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+        await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
         const target = path.join(outDir, `checkout-${pathHash(flowFile)}`);
         expect(step.artifacts?.current).toBe(path.join(target, "home__ios-390x844-current.png"));
@@ -1151,7 +1256,7 @@ describe("exportFailureArtifacts", () => {
           artifacts: { current: source },
         };
 
-        await exportFailureArtifacts(mkReport([step]), outDir, flowFile, ctx);
+        await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
 
         // Every rung unclaimable is the give-up case: source path left in place,
         // verdict unchanged, one warning naming the whole span it tried.
