@@ -156,17 +156,6 @@ export async function injectAndroidKeycode(serial: string, keycode: number): Pro
 const KEYCODE_CTRL_LEFT = 113;
 const KEYCODE_A = 29;
 const KEYCODE_DEL = 67;
-const KEYCODE_MOVE_END = 123;
-
-// How many backspaces the fallback issues. `input keyevent` accepts a list of
-// keycodes in one invocation, so this is a single adb round trip regardless of
-// the count. Sized to comfortably exceed any realistic field a flow types into
-// (an over-count is harmless: backspace on an empty field is a no-op).
-const FALLBACK_DELETE_COUNT = 200;
-
-// The fallback drives FALLBACK_DELETE_COUNT key events through a single `input`
-// invocation, so it needs a longer budget than a one-event inject.
-const ADB_CLEAR_FALLBACK_TIMEOUT_MS = 60_000;
 
 /**
  * Empty the focused text field: select its whole contents, then delete.
@@ -177,29 +166,50 @@ const ADB_CLEAR_FALLBACK_TIMEOUT_MS = 60_000;
  * and a React Native `TextInput` (Bluesky sign-in) — the field empties, the
  * placeholder returns and focus is retained.
  *
- * `keycombination` is a recent `input` subcommand, so an older API level exits
- * non-zero on it (`runAdb` surfaces that as a throw). Fall back to
- * MOVE_END + a run of DELs: move the caret past the last character, then
- * backspace over everything before it. That cannot use a selection, so it is
- * bounded by FALLBACK_DELETE_COUNT rather than being exact — but it needs no
- * knowledge of the field's length, which is the point (a password field reports
- * empty `text` to uiautomator, so counting characters is not an option).
+ * `keycombination` was added in Android 11 (API 30). On an older level it is
+ * absent — and CANNOT be detected by exit code. `input` reports an unknown
+ * subcommand by throwing IllegalArgumentException, which `BaseCommand` catches
+ * and turns into a usage dump, so the process still **exits 0**:
+ *
+ *     $ adb shell input bogussubcmd 1 2
+ *     Unknown command: bogussubcmd
+ *     $ echo $?
+ *     0
+ *
+ * (Measured on API 34 and API 36.) Detecting this by catching a throw would
+ * therefore never fire: the select-all would silently do nothing, the DEL below
+ * would delete exactly ONE character, and the tool would report `cleared: true`
+ * — the same silent-no-op class as issue #449. So the marker is read out of the
+ * command's OUTPUT instead. A thrown error is left to propagate as the genuine
+ * transport failure it is.
+ *
+ * There is deliberately NO best-effort fallback for API < 30. The only portable
+ * substitute is MOVE_END plus a fixed run of KEYCODE_DELs, and it is wrong in
+ * three ways that all fail quietly: it is bounded, so a field longer than the
+ * run keeps its head and the typed text is appended to that residue; MOVE_END is
+ * end-of-LINE, so a multi-line field keeps every line below the caret; and each
+ * DEL is delivered to the app, so the cost scales with the app's per-keystroke
+ * work. Measured: a 200-DEL run against a React Native TextInput exceeded 25s
+ * and was killed, while the same run against an idle emulator took ~1s. A clear
+ * that reports success having removed part of a field is exactly the failure
+ * this parameter exists to prevent, so an unsupported level is rejected loudly
+ * instead — same treatment as Vega and TV.
  */
 export async function injectAndroidClear(serial: string): Promise<void> {
-  try {
-    await adbShell(serial, `input keycombination ${KEYCODE_CTRL_LEFT} ${KEYCODE_A}`, {
-      timeoutMs: ADB_INPUT_TIMEOUT_MS,
-    });
-  } catch {
-    // Older `input` has no `keycombination` subcommand. Deleting backwards from
-    // the end of the field is the portable equivalent.
-    const dels = Array.from({ length: FALLBACK_DELETE_COUNT }, () => KEYCODE_DEL).join(" ");
-    // One invocation, but FALLBACK_DELETE_COUNT events deep — give it more room
-    // than a single-event inject before declaring the adb child hung.
-    await adbShell(serial, `input keyevent ${KEYCODE_MOVE_END} ${dels}`, {
-      timeoutMs: ADB_CLEAR_FALLBACK_TIMEOUT_MS,
-    });
-    return;
+  const out = await adbShell(serial, `input keycombination ${KEYCODE_CTRL_LEFT} ${KEYCODE_A}`, {
+    timeoutMs: ADB_INPUT_TIMEOUT_MS,
+  });
+  if (/unknown command|^usage: input/im.test(out)) {
+    throw new InvalidToolInputError(
+      "keyboard `clear` needs Android 11 (API 30) or newer: this device's `input` has no " +
+        "`keycombination` subcommand, so the select-all chord cannot be sent. Delete the " +
+        'field\'s contents with repeated `key: "backspace"` presses instead.',
+      {
+        error_code: FAILURE_CODES.KEYBOARD_KEY_UNSUPPORTED,
+        failure_stage: "keyboard_clear_android_unsupported",
+        error_kind: "unsupported",
+      }
+    );
   }
   await injectAndroidKeycode(serial, KEYCODE_DEL);
 }

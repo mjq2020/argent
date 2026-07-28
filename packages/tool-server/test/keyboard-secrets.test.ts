@@ -301,6 +301,51 @@ describe("keyboard tool with secret placeholders", () => {
     expect(dispatchKeyEvent).not.toHaveBeenCalled();
   });
 
+  it("clears then types the secret, echoing the placeholder and keeping `cleared`", async () => {
+    // `execute` re-wraps the backend result to swap the resolved value back out
+    // for the placeholder (`{ ...result, typed: params.text }`). That spread has
+    // to carry `cleared` through — losing it would report a replace-a-field call
+    // as a plain append.
+    vi.stubEnv("ARGENT_SECRET_APP_PASSWORD", "hunter2");
+    const { api, chars } = recordingCdpApi();
+    const tool = createKeyboardTool(registryWith(api));
+
+    const result = await tool.execute(
+      {},
+      { udid: CHROMIUM_UDID, clear: true, text: "{{secret:APP_PASSWORD}}", delayMs: 0 }
+    );
+
+    expect(chars.join("")).toBe("hunter2");
+    expect(result.typed).toBe("{{secret:APP_PASSWORD}}");
+    expect(result.cleared).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("hunter2");
+  });
+
+  it("scrubs the resolved value from errors thrown on the clear path", async () => {
+    vi.stubEnv("ARGENT_SECRET_APP_PASSWORD", "hunter2");
+    const api = {
+      // Fail on the clear's very first dispatch, before any character is typed.
+      dispatchKeyEvent: async () => {
+        throw new Error("CDP rejected clear while typing hunter2");
+      },
+    };
+    const tool = createKeyboardTool(registryWith(api));
+
+    let caught: Error | undefined;
+    try {
+      await tool.execute(
+        {},
+        { udid: CHROMIUM_UDID, clear: true, text: "{{secret:APP_PASSWORD}}", delayMs: 0 }
+      );
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toContain("{{secret:APP_PASSWORD}}");
+    expect(caught!.message).not.toContain("hunter2");
+    expect(caught!.stack ?? "").not.toContain("hunter2");
+  });
+
   it("scrubs the resolved value from backend errors", async () => {
     vi.stubEnv("ARGENT_SECRET_APP_PASSWORD", "hunter2");
     const api = {
