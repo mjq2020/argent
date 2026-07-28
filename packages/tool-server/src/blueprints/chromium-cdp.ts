@@ -68,6 +68,20 @@ export interface KeyEventArgs {
   /** DOM keyCode (deprecated but still consumed by many apps). */
   windowsVirtualKeyCode?: number;
   modifiers?: number;
+  /**
+   * Blink editing commands to run for this key event, e.g. `["selectAll"]`.
+   *
+   * This is the ONLY way to drive an editing chord over CDP. A modifier-only
+   * key event (`modifiers: 2` for Ctrl, `4` for Meta) never reaches Blink's
+   * editing layer: Ctrl/Cmd+A dispatched that way selects **zero** characters,
+   * so a Backspace after it deletes a single character while the call still
+   * reports success. Measured on Chrome 150 with a focused input seeded
+   * `hello123` — `modifiers` left `hello12`, `commands` left `""`.
+   *
+   * Only meaningful on `rawKeyDown` (the type Blink routes through its editor
+   * command handler). This is what Playwright uses internally.
+   */
+  commands?: string[];
 }
 
 export interface ViewportSize {
@@ -244,6 +258,7 @@ export const chromiumCdpBlueprint: ServiceBlueprint<ChromiumCdpApi, DeviceInfo> 
           payload.windowsVirtualKeyCode = event.windowsVirtualKeyCode;
         }
         if (event.modifiers !== undefined) payload.modifiers = event.modifiers;
+        if (event.commands !== undefined) payload.commands = event.commands;
         await server.cdp.send("Input.dispatchKeyEvent", payload);
       },
       captureScreenshot: (opts2?: ScreenshotOpts) => server.captureScreenshot(opts2),

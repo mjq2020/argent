@@ -8,6 +8,11 @@ export interface KeyboardParams {
    * shape (see ./index.ts), so a backend sees at most one of the two.
    */
   key?: string;
+  /**
+   * Empty the focused field (select-all, then delete) before typing `text`.
+   * Not valid on Vega or TV targets. Order within one call: clear → text → key.
+   */
+  clear?: boolean;
   /** Delay in ms between key presses (default 50). */
   delayMs?: number;
 }
@@ -15,4 +20,6 @@ export interface KeyboardParams {
 export interface KeyboardResult {
   typed: string;
   keys: number;
+  /** Present (and `true`) only when `clear` was requested and performed. */
+  cleared?: boolean;
 }

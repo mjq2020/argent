@@ -20,6 +20,18 @@ export async function typeTv(
         "(up/down/left/right/select) instead"
     );
   }
+  // The TV backends type whole strings through the focus daemon and have no
+  // modifier-chord primitive, so the select-all a clear depends on cannot be
+  // sent. Reject rather than silently no-op (issue #449), and do it up front so
+  // nothing is typed before the rejection.
+  if (params.clear) {
+    throw new UnsupportedOperationError(
+      "keyboard",
+      device,
+      "`clear` is not supported on a TV target — its typing backend cannot send the " +
+        "select-all modifier chord"
+    );
+  }
   const text = params.text ?? "";
   if (text) {
     const api = await resolveTvApi(registry, device.id);

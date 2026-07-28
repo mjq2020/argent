@@ -1,7 +1,13 @@
 import { FAILURE_CODES } from "@argent/registry";
 import type { DeviceInfo, Registry } from "@argent/registry";
 import { simulatorServerRef, type SimulatorServerApi } from "../../blueprints/simulator-server";
-import { charToKeyPress, NAMED_KEYS, SHIFT_KEYCODE } from "./key-codes";
+import {
+  A_KEYCODE,
+  charToKeyPress,
+  LEFT_GUI_KEYCODE,
+  NAMED_KEYS,
+  SHIFT_KEYCODE,
+} from "./key-codes";
 import { InvalidToolInputError } from "../../utils/capability";
 import type { KeyboardParams, KeyboardResult } from "./types";
 
@@ -22,46 +28,35 @@ export async function typeSimulatorServer(
   const delay = params.delayMs ?? 50;
   let keysPressed = 0;
 
-  const pressKeyCode = async (keyCode: number, withShift = false) => {
-    if (withShift) {
-      api.pressKey("Down", SHIFT_KEYCODE);
+  // Press `keyCode`, optionally while holding a modifier (shift for a capital,
+  // Left GUI/Command for the select-all in a clear). The modifier is held across
+  // the whole down/up pair so the guest sees a real chord, not two taps.
+  const pressKeyCode = async (keyCode: number, modifierKeyCode?: number) => {
+    if (modifierKeyCode !== undefined) {
+      api.pressKey("Down", modifierKeyCode);
       await sleep(10);
     }
     api.pressKey("Down", keyCode);
     await sleep(delay);
     api.pressKey("Up", keyCode);
-    if (withShift) {
+    if (modifierKeyCode !== undefined) {
       await sleep(10);
-      api.pressKey("Up", SHIFT_KEYCODE);
+      api.pressKey("Up", modifierKeyCode);
     }
     keysPressed++;
   };
 
-  // The tool rejects a request carrying both `text` and `key` (see ./index.ts),
-  // so at most one of the two blocks below runs.
-  if (params.text) {
-    for (const char of params.text) {
-      const press = charToKeyPress(char);
-      // A character with no keycode can't be typed on this backend — a caller
-      // input error → 400, keeping the KEYBOARD_CHARACTER_UNSUPPORTED telemetry
-      // code (#420).
-      if (!press)
-        throw new InvalidToolInputError(`No keycode for character "${char}"`, {
-          error_code: FAILURE_CODES.KEYBOARD_CHARACTER_UNSUPPORTED,
-          failure_stage: "keyboard_char_simulator",
-          error_kind: "unsupported",
-        });
-      await pressKeyCode(press.keyCode, press.withShift);
-      await sleep(delay);
-    }
-  }
-
+  // Resolve the named key BEFORE the clear: `clear` empties the field, so an
+  // unknown key name has to reject with the field still intact rather than
+  // emptied and then 400. (`text` and `key` are never both present — the tool
+  // rejects that shape, see ./index.ts.)
+  let namedKeyCode: number | undefined;
   if (params.key) {
     const lower = params.key.toLowerCase();
     // Own-property check: a prototype key like "constructor" would otherwise
     // pass the nullish guard with a garbage value (Object.prototype.constructor)
     // and go over the wire as a broken key press instead of rejecting.
-    const namedKeyCode = Object.hasOwn(NAMED_KEYS, lower) ? NAMED_KEYS[lower] : undefined;
+    namedKeyCode = Object.hasOwn(NAMED_KEYS, lower) ? NAMED_KEYS[lower] : undefined;
     if (namedKeyCode == null) {
       // Well-typed but unusable input (the schema's `key` is a free string) — a
       // caller mistake, so InvalidToolInputError → HTTP 400, matching the Android
@@ -77,8 +72,43 @@ export async function typeSimulatorServer(
         }
       );
     }
+  }
+
+  // Clear before text: Cmd+A selects the field's whole contents, backspace
+  // deletes the selection. Verified on a UIKit `UITextField` (Safari address
+  // bar) and a React Native `TextInput` (Bluesky search) — on the latter the JS
+  // `onChangeText("")` fires, so native view and React state agree.
+  if (params.clear) {
+    await pressKeyCode(A_KEYCODE, LEFT_GUI_KEYCODE);
+    await sleep(delay);
+    await pressKeyCode(NAMED_KEYS.backspace);
+    await sleep(delay);
+  }
+
+  if (params.text) {
+    for (const char of params.text) {
+      const press = charToKeyPress(char);
+      // A character with no keycode can't be typed on this backend — a caller
+      // input error → 400, keeping the KEYBOARD_CHARACTER_UNSUPPORTED telemetry
+      // code (#420).
+      if (!press)
+        throw new InvalidToolInputError(`No keycode for character "${char}"`, {
+          error_code: FAILURE_CODES.KEYBOARD_CHARACTER_UNSUPPORTED,
+          failure_stage: "keyboard_char_simulator",
+          error_kind: "unsupported",
+        });
+      await pressKeyCode(press.keyCode, press.withShift ? SHIFT_KEYCODE : undefined);
+      await sleep(delay);
+    }
+  }
+
+  if (namedKeyCode != null) {
     await pressKeyCode(namedKeyCode);
   }
 
-  return { typed: params.text ?? params.key ?? "", keys: keysPressed };
+  return {
+    typed: params.text ?? params.key ?? "",
+    keys: keysPressed,
+    ...(params.clear ? { cleared: true } : {}),
+  };
 }

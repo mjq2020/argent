@@ -152,8 +152,66 @@ export async function injectAndroidKeycode(serial: string, keycode: number): Pro
   await adbShell(serial, `input keyevent ${keycode}`, { timeoutMs: ADB_INPUT_TIMEOUT_MS });
 }
 
-/** Press a named key (keyboard tool `key` vocabulary) on Android. */
-export async function injectAndroidNamedKey(serial: string, name: string): Promise<void> {
+// Keycodes used by the clear (select-all + delete) sequence.
+const KEYCODE_CTRL_LEFT = 113;
+const KEYCODE_A = 29;
+const KEYCODE_DEL = 67;
+const KEYCODE_MOVE_END = 123;
+
+// How many backspaces the fallback issues. `input keyevent` accepts a list of
+// keycodes in one invocation, so this is a single adb round trip regardless of
+// the count. Sized to comfortably exceed any realistic field a flow types into
+// (an over-count is harmless: backspace on an empty field is a no-op).
+const FALLBACK_DELETE_COUNT = 200;
+
+// The fallback drives FALLBACK_DELETE_COUNT key events through a single `input`
+// invocation, so it needs a longer budget than a one-event inject.
+const ADB_CLEAR_FALLBACK_TIMEOUT_MS = 60_000;
+
+/**
+ * Empty the focused text field: select its whole contents, then delete.
+ *
+ * Ctrl+A is the Android select-all chord (it is what a hardware keyboard sends),
+ * and `input keycombination` is the only `input` subcommand that can hold one
+ * key while pressing another. Verified on a native `EditText` (Settings search)
+ * and a React Native `TextInput` (Bluesky sign-in) — the field empties, the
+ * placeholder returns and focus is retained.
+ *
+ * `keycombination` is a recent `input` subcommand, so an older API level exits
+ * non-zero on it (`runAdb` surfaces that as a throw). Fall back to
+ * MOVE_END + a run of DELs: move the caret past the last character, then
+ * backspace over everything before it. That cannot use a selection, so it is
+ * bounded by FALLBACK_DELETE_COUNT rather than being exact — but it needs no
+ * knowledge of the field's length, which is the point (a password field reports
+ * empty `text` to uiautomator, so counting characters is not an option).
+ */
+export async function injectAndroidClear(serial: string): Promise<void> {
+  try {
+    await adbShell(serial, `input keycombination ${KEYCODE_CTRL_LEFT} ${KEYCODE_A}`, {
+      timeoutMs: ADB_INPUT_TIMEOUT_MS,
+    });
+  } catch {
+    // Older `input` has no `keycombination` subcommand. Deleting backwards from
+    // the end of the field is the portable equivalent.
+    const dels = Array.from({ length: FALLBACK_DELETE_COUNT }, () => KEYCODE_DEL).join(" ");
+    // One invocation, but FALLBACK_DELETE_COUNT events deep — give it more room
+    // than a single-event inject before declaring the adb child hung.
+    await adbShell(serial, `input keyevent ${KEYCODE_MOVE_END} ${dels}`, {
+      timeoutMs: ADB_CLEAR_FALLBACK_TIMEOUT_MS,
+    });
+    return;
+  }
+  await injectAndroidKeycode(serial, KEYCODE_DEL);
+}
+
+/**
+ * Resolve a named key (keyboard tool `key` vocabulary) to its
+ * android.view.KeyEvent keycode, or throw. Split out from the injection so a
+ * caller can validate a key name without pressing it — the keyboard backend does
+ * that before a `clear`, which must not empty a field for a request it then
+ * rejects. Mirrors `resolveVegaNamedKeycode`.
+ */
+export function resolveAndroidNamedKeycode(name: string): number {
   const lower = name.toLowerCase();
   // Own-property check: `key` is a free string, so a prototype key like
   // "constructor" would otherwise pass the nullish guard with a garbage value
