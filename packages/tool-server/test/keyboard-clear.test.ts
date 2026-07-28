@@ -259,65 +259,99 @@ describe("keyboard clear — Android (adb input)", () => {
     ]);
   });
 
-  it("rejects loudly when `keycombination` is unavailable", async () => {
-    // An older API level has no `keycombination` subcommand — and it still
-    // EXITS 0: `input` reports the unknown subcommand on stdout and BaseCommand
-    // swallows the exception. Measured on-device: `adb shell input bogussubcmd`
-    // prints "Unknown command: bogussubcmd" and returns 0. Detecting this by
-    // catching a throw would never fire, and the post-select DEL would then
-    // delete exactly ONE character while the tool reported `cleared: true`.
-    adbShell.mockImplementationOnce(async () => "Unknown command: keycombination");
+  // uiautomator dump for a focused EditText holding `text`. `password="true"`
+  // makes its contents unreadable, which is what forces the blind count.
+  const dumpWith = (text: string, password = false) =>
+    `<?xml version='1.0' encoding='UTF-8'?><hierarchy rotation="0">` +
+    `<node index="0" text="${text}" resource-id="email" class="android.widget.EditText" ` +
+    `password="${password}" focused="true" bounds="[0,0][100,50]" />` +
+    `</hierarchy>`;
 
-    await expect(
-      makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
-    ).rejects.toThrow(/not supported on this Android version/);
+  it("falls back to a measured delete run when `keycombination` is unavailable", async () => {
+    // An older level has no `keycombination` subcommand — and still EXITS 0,
+    // printing a usage dump (to stderr, hence the `2>&1` on the probe). The
+    // fallback measures the field instead of guessing: a fixed run would leave
+    // a longer field's head in place and append the new text to that residue.
+    adbShell.mockImplementationOnce(async () => "Usage: input [<source>] …");
+    adbShell.mockImplementationOnce(async () => dumpWith("abcdefghij")); // 10 chars
 
-    // The select-all probe ran; the post-select DEL did NOT. Letting it through
-    // is the silent one-character delete this guard exists to stop.
-    expect(adbShell.mock.calls.map((c) => c[1])).toEqual([SELECT_ALL_CMD]);
-  });
-
-  it("redirects stderr so an API 30 usage dump is visible at all", async () => {
-    // THE regression guard for the shape that shipped broken. On API 30 the
-    // complaint is a usage dump on STDERR and the exit code is 0, while
-    // `adbShell` returns stdout only — so without the `2>&1` the probe returns
-    // "" and looks exactly like success. The DEL then runs as a plain
-    // backspace: a real device went "wifi" -> "wif" and reported cleared: true.
-    // Asserting the command string is what pins the redirect; the marker test
-    // below cannot, since a stdout-only mock is indistinguishable either way.
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    expect(adbShell.mock.calls[0]![1]).toContain("2>&1");
+    const cmds = adbShell.mock.calls.map((c) => c[1]);
+    expect(cmds[0]).toBe(SELECT_ALL_CMD);
+    expect(cmds[1]).toBe("uiautomator dump /dev/tty");
+    // MOVE_END (123) so the caret is past the last character, then one DEL per
+    // measured character plus a small margin — all in ONE `input` invocation.
+    const dels = cmds[2]!.split(" ").slice(3);
+    expect(cmds[2]!.startsWith("input keyevent 123 ")).toBe(true);
+    expect(dels.every((d) => d === "67")).toBe(true);
+    expect(dels).toHaveLength(10 + 8);
+    // The standalone post-select DEL must NOT also fire on this path.
+    expect(cmds).not.toContain(DEL_CMD);
   });
 
-  it('rejects on the API 30 usage-dump wording, not just "Unknown command"', async () => {
-    // API 30 emits a `Usage: input …` block rather than "Unknown command: …",
-    // and it does not start at the beginning of the captured string once
-    // stderr is folded in — so the matcher must not be anchored.
-    adbShell.mockImplementationOnce(
-      async () =>
-        "Usage: input [<source>] [-d DISPLAY_ID] <command> [<arg>...]\n\nThe sources are: \n      dpad\n      keyboard\n"
+  it("scales the delete run to a long field rather than truncating it", async () => {
+    adbShell.mockImplementationOnce(async () => "Usage: input …");
+    adbShell.mockImplementationOnce(async () => dumpWith("x".repeat(300)));
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    const dels = adbShell.mock.calls[2]![1].split(" ").slice(3);
+    expect(dels).toHaveLength(308);
+  });
+
+  it("uses the blind count for a password field, whose text is unreadable", async () => {
+    // uiautomator reports empty text for password nodes, so a measured 0 would
+    // clear nothing at all — the one case where a fixed run is the right answer.
+    adbShell.mockImplementationOnce(async () => "Usage: input …");
+    adbShell.mockImplementationOnce(async () => dumpWith("", true));
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    const dels = adbShell.mock.calls[2]![1].split(" ").slice(3);
+    expect(dels).toHaveLength(160 + 8);
+  });
+
+  it("uses the blind count when the dump itself fails", async () => {
+    adbShell.mockImplementationOnce(async () => "Usage: input …");
+    adbShell.mockImplementationOnce(async () => {
+      throw new Error("uiautomator dump failed");
+    });
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    const dels = adbShell.mock.calls[2]![1].split(" ").slice(3);
+    expect(dels).toHaveLength(160 + 8);
+  });
+
+  it("decodes XML entities so the measured length is in real characters", async () => {
+    // `&amp;` is five characters in the dump and one on screen; measuring the
+    // raw attribute would over-count, which is harmless, but under-counting a
+    // decoded entity would not be — pin the decode either way.
+    adbShell.mockImplementationOnce(async () => "Usage: input …");
+    adbShell.mockImplementationOnce(async () => dumpWith("a&amp;b&lt;c"));
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    const dels = adbShell.mock.calls[2]![1].split(" ").slice(3);
+    expect(dels).toHaveLength(5 + 8); // "a&b<c"
+  });
+
+  it("clear+type on a legacy level types only after the delete run", async () => {
+    adbShell.mockImplementationOnce(async () => "Usage: input …");
+    adbShell.mockImplementationOnce(async () => dumpWith("old"));
+
+    await makeAndroidImpl(registryWith({})).handler(
+      {},
+      { udid: ANDROID.id, clear: true, text: "new" },
+      ANDROID
     );
 
-    await expect(
-      makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
-    ).rejects.toThrow(/not supported on this Android version/);
-    expect(adbShell.mock.calls.map((c) => c[1])).toEqual([SELECT_ALL_CMD]);
-  });
-
-  it("rejects before typing, so clear+type cannot append to the old value", async () => {
-    adbShell.mockImplementationOnce(async () => "Unknown command: keycombination");
-
-    await expect(
-      makeAndroidImpl(registryWith({})).handler(
-        {},
-        { udid: ANDROID.id, clear: true, text: "new@example.com" },
-        ANDROID
-      )
-    ).rejects.toThrow(/not supported on this Android version/);
-    // No `input text`: otherwise the field would end up
-    // "old@example.cnew@example.com" and the call would report success.
-    expect(adbShell.mock.calls.map((c) => c[1])).toEqual([SELECT_ALL_CMD]);
+    const cmds = adbShell.mock.calls.map((c) => c[1]);
+    expect(cmds[0]).toBe(SELECT_ALL_CMD);
+    expect(cmds[1]).toBe("uiautomator dump /dev/tty");
+    expect(cmds[2]!.startsWith("input keyevent 123 67")).toBe(true);
+    expect(cmds[3]).toBe("input text 'new'");
   });
 
   it("does NOT reject when `keycombination` is supported (exit 0, no marker)", async () => {
