@@ -4,6 +4,11 @@ export interface KeyboardParams {
   text?: string;
   /** Named key to press (enter, escape, arrow-*, f1–f12). Not valid on TV targets. */
   key?: string;
+  /**
+   * Empty the focused field (select-all, then delete) before typing `text`.
+   * Not valid on Vega or TV targets. Order within one call: clear → text → key.
+   */
+  clear?: boolean;
   /** Delay in ms between key presses (default 50). */
   delayMs?: number;
 }
@@ -11,4 +16,6 @@ export interface KeyboardParams {
 export interface KeyboardResult {
   typed: string;
   keys: number;
+  /** Present (and `true`) only when `clear` was requested and performed. */
+  cleared?: boolean;
 }

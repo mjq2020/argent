@@ -11,8 +11,10 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
   const delay = params.delayMs ?? 50;
   let keysPressed = 0;
 
-  // Resolve the named key before typing anything so an unknown name fails
-  // fast instead of after the text has already been typed.
+  // Resolve the named key BEFORE anything is dispatched: an unknown name has to
+  // fail fast rather than after the text has already been typed, and `clear`
+  // empties the field, so it must reject with the field still intact rather than
+  // emptied and then 400.
   let named: (typeof CHROMIUM_NAMED_KEYS)[string] | undefined;
   if (params.key) {
     const lower = params.key.toLowerCase();
@@ -33,6 +35,26 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
         }
       );
     }
+  }
+
+  // Clear before text, as `commands` on a rawKeyDown rather than a Ctrl/Cmd+A
+  // modifier chord — see the `commands` doc on KeyEventArgs for why the
+  // modifier form silently deletes a single character instead. Both editing
+  // commands ride the same event so Blink applies them in order; this fires
+  // `oninput` exactly once, so controlled/React inputs update correctly.
+  if (params.clear) {
+    const selectAllKey = {
+      key: "a",
+      code: "KeyA",
+      windowsVirtualKeyCode: 65,
+    };
+    await api.dispatchKeyEvent({
+      type: "rawKeyDown",
+      ...selectAllKey,
+      commands: ["selectAll", "deleteBackward"],
+    });
+    await api.dispatchKeyEvent({ type: "keyUp", ...selectAllKey });
+    await sleep(delay);
   }
 
   if (params.text) {
@@ -86,7 +108,11 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     keysPressed++;
   }
 
-  return { typed: params.text ?? params.key ?? "", keys: keysPressed };
+  return {
+    typed: params.text ?? params.key ?? "",
+    keys: keysPressed,
+    ...(params.clear ? { cleared: true } : {}),
+  };
 }
 
 export function makeChromiumImpl(

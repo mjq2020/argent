@@ -1,4 +1,6 @@
+import type { DeviceInfo } from "@argent/registry";
 import type { PlatformImpl } from "../../../utils/cross-platform-tool";
+import { UnsupportedOperationError } from "../../../utils/capability";
 import {
   injectVegaNamedKey,
   injectVegaText,
@@ -10,8 +12,23 @@ import type { KeyboardParams, KeyboardResult } from "../types";
 // `inputd-cli`). The `adb` dependency is declared on this branch's `requires`
 // and preflighted by dispatchByPlatform before the handler runs, so a missing
 // adb fails with a clean 424 install hint rather than a spawn ENOENT.
-async function runVega(params: KeyboardParams): Promise<KeyboardResult> {
+async function runVega(device: DeviceInfo, params: KeyboardParams): Promise<KeyboardResult> {
   let keysPressed = 0;
+  // Vega injects through `inputd-cli`, which exposes no modifier-combination
+  // primitive — there is no way to send the select-all chord every other
+  // backend's clear relies on. Reject explicitly rather than no-op: a silent
+  // no-op on an unsupported input path is exactly the failure mode of issue
+  // #449, which this tool has already shipped once. Checked BEFORE any
+  // injection so an unsupported request leaves the device untouched.
+  if (params.clear) {
+    throw new UnsupportedOperationError(
+      "keyboard",
+      device,
+      "`clear` is not supported on Vega — its `inputd-cli` transport cannot send the " +
+        "select-all modifier chord. Delete the field's contents with repeated " +
+        '`key: "backspace"` presses instead'
+    );
+  }
   // Resolve the named key before injecting text so an unknown name fails fast.
   if (params.key) resolveVegaNamedKeycode(params.key);
   if (params.text) {
@@ -29,5 +46,5 @@ async function runVega(params: KeyboardParams): Promise<KeyboardResult> {
 
 export const vegaImpl: PlatformImpl<Record<string, unknown>, KeyboardParams, KeyboardResult> = {
   requires: ["adb"],
-  handler: (_services, params) => runVega(params),
+  handler: (_services, params, device) => runVega(device, params),
 };

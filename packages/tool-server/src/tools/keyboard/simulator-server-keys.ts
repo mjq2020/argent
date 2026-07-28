@@ -1,7 +1,13 @@
 import { FAILURE_CODES } from "@argent/registry";
 import type { DeviceInfo, Registry } from "@argent/registry";
 import { simulatorServerRef, type SimulatorServerApi } from "../../blueprints/simulator-server";
-import { charToKeyPress, NAMED_KEYS, SHIFT_KEYCODE } from "./key-codes";
+import {
+  A_KEYCODE,
+  charToKeyPress,
+  LEFT_GUI_KEYCODE,
+  NAMED_KEYS,
+  SHIFT_KEYCODE,
+} from "./key-codes";
 import { InvalidToolInputError } from "../../utils/capability";
 import type { KeyboardParams, KeyboardResult } from "./types";
 
@@ -22,23 +28,28 @@ export async function typeSimulatorServer(
   const delay = params.delayMs ?? 50;
   let keysPressed = 0;
 
-  const pressKeyCode = async (keyCode: number, withShift = false) => {
-    if (withShift) {
-      api.pressKey("Down", SHIFT_KEYCODE);
+  // Press `keyCode`, optionally while holding a modifier (shift for a capital,
+  // Left GUI/Command for the select-all in a clear). The modifier is held across
+  // the whole down/up pair so the guest sees a real chord, not two taps.
+  const pressKeyCode = async (keyCode: number, modifierKeyCode?: number) => {
+    if (modifierKeyCode !== undefined) {
+      api.pressKey("Down", modifierKeyCode);
       await sleep(10);
     }
     api.pressKey("Down", keyCode);
     await sleep(delay);
     api.pressKey("Up", keyCode);
-    if (withShift) {
+    if (modifierKeyCode !== undefined) {
       await sleep(10);
-      api.pressKey("Up", SHIFT_KEYCODE);
+      api.pressKey("Up", modifierKeyCode);
     }
     keysPressed++;
   };
 
-  // Resolve the named key before typing anything so an unknown name fails
-  // fast instead of after the text has already been typed.
+  // Resolve the named key BEFORE anything is sent: an unknown name has to fail
+  // fast rather than after the text has already been typed, and `clear` empties
+  // the field, so it must reject with the field still intact rather than emptied
+  // and then 400.
   let namedKeyCode: number | undefined;
   if (params.key) {
     const lower = params.key.toLowerCase();
@@ -63,6 +74,17 @@ export async function typeSimulatorServer(
     }
   }
 
+  // Clear before text: Cmd+A selects the field's whole contents, backspace
+  // deletes the selection. Verified on a UIKit `UITextField` (Safari address
+  // bar) and a React Native `TextInput` (Bluesky search) — on the latter the JS
+  // `onChangeText("")` fires, so native view and React state agree.
+  if (params.clear) {
+    await pressKeyCode(A_KEYCODE, LEFT_GUI_KEYCODE);
+    await sleep(delay);
+    await pressKeyCode(NAMED_KEYS.backspace);
+    await sleep(delay);
+  }
+
   if (params.text) {
     for (const char of params.text) {
       const press = charToKeyPress(char);
@@ -75,7 +97,7 @@ export async function typeSimulatorServer(
           failure_stage: "keyboard_char_simulator",
           error_kind: "unsupported",
         });
-      await pressKeyCode(press.keyCode, press.withShift);
+      await pressKeyCode(press.keyCode, press.withShift ? SHIFT_KEYCODE : undefined);
       await sleep(delay);
     }
   }
@@ -88,5 +110,9 @@ export async function typeSimulatorServer(
     await pressKeyCode(namedKeyCode);
   }
 
-  return { typed: params.text ?? params.key ?? "", keys: keysPressed };
+  return {
+    typed: params.text ?? params.key ?? "",
+    keys: keysPressed,
+    ...(params.clear ? { cleared: true } : {}),
+  };
 }
