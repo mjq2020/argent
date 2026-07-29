@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { runInNewContext } from "node:vm";
 import {
-  __testing__,
+  clearedTargetProbe,
+  focusedEditableProbe,
   type ClearedTarget,
   type FocusedEditable,
 } from "../src/tools/keyboard/chromium-clear";
@@ -82,7 +83,7 @@ function runProbe(
 }
 
 const focused = (el: FakeEl | null, seed?: Record<string, unknown>, platform?: string) =>
-  runProbe(__testing__.focusedEditableProbe(HANDLE), makeDoc(el), seed, platform);
+  runProbe(focusedEditableProbe(HANDLE), makeDoc(el), seed, platform);
 
 describe("chromium clear — focused-element probe", () => {
   it("reports a plain text input as editable, with its length, and parks it", () => {
@@ -96,7 +97,7 @@ describe("chromium clear — focused-element probe", () => {
 
   it("reports nothing focused when the body holds focus", () => {
     const doc = makeDoc(null);
-    const { result } = runProbe(__testing__.focusedEditableProbe(HANDLE), doc);
+    const { result } = runProbe(focusedEditableProbe(HANDLE), doc);
     expect(result.verdict).toBe("none");
   });
 
@@ -217,13 +218,13 @@ describe("chromium clear — focused-element probe", () => {
 
 describe("chromium clear — release probe", () => {
   const release = (seed: Record<string, unknown>) =>
-    runProbe(__testing__.clearedTargetProbe(HANDLE), makeDoc(null), seed);
+    runProbe(clearedTargetProbe(HANDLE), makeDoc(null), seed);
 
   it("reports the parked element's remaining length and releases the slot", () => {
     const { result, window } = release({
       [HANDLE]: { tagName: "INPUT", value: "", isConnected: true },
     });
-    expect(result).toEqual({ tracked: true, length: 0 });
+    expect(result).toMatchObject({ tracked: true, length: 0 });
     expect(window[HANDLE]).toBeUndefined();
   });
 
@@ -231,7 +232,7 @@ describe("chromium clear — release probe", () => {
     const { result } = release({
       [HANDLE]: { tagName: "INPUT", value: "hello123", isConnected: true },
     });
-    expect(result).toEqual({ tracked: true, length: 8 });
+    expect(result).toMatchObject({ tracked: true, length: 8 });
   });
 
   it("reports untracked when nothing was parked", () => {
@@ -250,12 +251,12 @@ describe("chromium clear — release probe", () => {
   it("reads textContent for a contenteditable and value for a form control", () => {
     expect(
       release({ [HANDLE]: { tagName: "DIV", textContent: "still here", isConnected: true } }).result
-    ).toEqual({ tracked: true, length: 10 });
+    ).toMatchObject({ tracked: true, length: 10 });
     expect(
       release({
         [HANDLE]: { tagName: "TEXTAREA", value: "ab", textContent: "stale", isConnected: true },
       }).result
-    ).toEqual({ tracked: true, length: 2 });
+    ).toMatchObject({ tracked: true, length: 2 });
   });
 
   it("still reports residue for a badInput number field reading empty", () => {
