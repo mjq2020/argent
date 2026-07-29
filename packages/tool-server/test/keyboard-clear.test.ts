@@ -678,6 +678,24 @@ describe("keyboard clear — Chromium (CDP)", () => {
     ).rejects.toThrow(/still holds 8 character\(s\)/);
   });
 
+  it("does not fail when the field blurred or went away as a result of clearing", async () => {
+    // Only positively-observed residue counts as a failure. A page that drops
+    // focus once its field empties (or swaps the node out) is reacting to the
+    // clear, not ignoring it — failing there would break a working clear.
+    const { api } = recordingApi([
+      { verdict: "editable", label: "INPUT#q", length: 12, selection: 0 },
+      { verdict: "none", selection: 0 },
+    ]);
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(result.cleared).toBe(true);
+  });
+
   it("stays best-effort when the page cannot be read", async () => {
     // Focus inside a cross-origin iframe, or an `evaluate` that throws. There is
     // nothing to verify against, so refusing would break clears that work today.

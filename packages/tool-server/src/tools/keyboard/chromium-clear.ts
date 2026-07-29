@@ -195,15 +195,20 @@ export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
   // `unknown` before means the page was unreadable, so there is nothing to
   // verify against — stay best-effort rather than inventing a failure.
   if (before.verdict === "unknown") return;
-  const after = await readFocusedEditable(api);
-  if (after.verdict === "unknown") return;
-  if (after.verdict === "editable" && (after.length ?? 0) === 0) return;
 
-  // The dispatch resolved without a CDP error and the field still holds
-  // something. Reporting success here is what turns a combined
-  // `{ clear, text }` into an append onto the value that was meant to be gone.
+  // Only POSITIVELY observed residue is a failure. Any other after-state — the
+  // field blurred, was replaced, or became unreadable — is the page reacting to
+  // its own emptying, not evidence the clear was ignored, and failing on it
+  // would break clears that work. Every failure mode this check exists for
+  // (a cancelled keydown, a cancelled `beforeinput`, a Chromium that drops
+  // `commands`) leaves the same field focused and still holding its value.
+  const after = await readFocusedEditable(api);
+  if (after.verdict !== "editable") return;
+  const remaining = after.length ?? 0;
+  if (remaining === 0) return;
+
   throw new FailureError(
-    `keyboard clear: the field still holds ${after.length ?? "its"} character(s) after the ` +
+    `keyboard clear: the field still holds ${remaining} character(s) after the ` +
       `select-all + delete. The page most likely cancelled the key or the ` +
       `\`beforeinput\` (a rich-text editor does this), or this Chromium build ignores ` +
       `CDP editing commands. The field was NOT emptied — do not treat a following ` +
