@@ -336,11 +336,11 @@ describe("keyboard clear — Android (adb input)", () => {
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
     try {
       adbShell.mockImplementationOnce(async () => {
-        clock += 14_000; // a slow probe
+        clock += 3_000; // a slow probe
         return "Usage: input …";
       });
       adbExecOutBinary.mockImplementationOnce(async () => {
-        clock += 3_000; // a slow dump
+        clock += 4_000; // a slow dump
         return Buffer.from(dumpWith("abc"));
       });
 
@@ -352,14 +352,62 @@ describe("keyboard clear — Android (adb input)", () => {
 
       const timeoutOf = (call: [string, string, unknown?]) =>
         (call[2] as { timeoutMs: number }).timeoutMs;
-      // 17s of the 20s budget is gone, so the delete run gets what is left — not
-      // a fresh full-size cap.
-      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(3_000);
-      // And the dump, taken 14s in, was already shortened from its own 20s cap.
-      expect(timeoutOf(adbExecOutBinary.mock.calls[0]!)).toBe(6_000);
+      // The dump is a READ leg, so it is capped at what is left MINUS the
+      // reserve held back for the delete run: 20s budget − 3s spent − 8s
+      // reserved. Without that subtraction a slow dump can spend the whole
+      // budget and the run it measured for then starts with nothing left.
+      expect(timeoutOf(adbExecOutBinary.mock.calls[0]!)).toBe(9_000);
+      // The delete run is the MUTATING leg, so it gets everything remaining
+      // (20s − 7s) rather than a fresh full-size cap — being killed part-way
+      // through is what leaves a half-deleted field.
+      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(13_000);
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it("retries a dump the device refused before falling back to the blind count", async () => {
+    // The device serves one UiAutomation connection, so concurrent readers race
+    // and the loser gets a bare `Killed` with adb still exiting 0. Degrading
+    // straight to the blind count there truncates any field longer than it,
+    // while still reporting `cleared: true`.
+    seedLegacyLevel();
+    seedDump("Killed");
+    seedDump(dumpWith("abcdefghij")); // the retry succeeds
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(adbExecOutBinary).toHaveBeenCalledTimes(2);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(10 + 8);
+  });
+
+  it("gives up after one retry rather than dumping forever", async () => {
+    seedLegacyLevel();
+    seedDump("Killed");
+    seedDump("Killed");
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(adbExecOutBinary).toHaveBeenCalledTimes(2);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(160 + 8);
+  });
+
+  it("measures only a FOCUSED editable, ignoring other fields on screen", async () => {
+    // Every other fixture marks every node focused, so without this the focus
+    // test itself is unpinned: a screen with a longer unfocused EditText would
+    // be measured at that field's length — over-deleting, or tripping the
+    // length refusal on a clear that works today.
+    seedLegacyLevel();
+    seedDump(
+      `<?xml version='1.0' encoding='UTF-8'?><hierarchy rotation="0">` +
+        `<node index="0" text="${"u".repeat(120)}" class="android.widget.EditText" password="false" focused="false" />` +
+        `<node index="1" text="${"f".repeat(12)}" class="android.widget.EditText" password="false" focused="true" />` +
+        `</hierarchy>`
+    );
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(12 + 8);
   });
 
   it("scales the delete run to a long field rather than truncating it", async () => {

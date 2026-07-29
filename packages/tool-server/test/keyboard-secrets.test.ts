@@ -32,6 +32,7 @@ function registryWith(api: unknown) {
 function recordingCdpApi() {
   const chars: string[] = [];
   let cleared = false;
+  let probes = 0;
   return {
     chars,
     api: {
@@ -39,18 +40,19 @@ function recordingCdpApi() {
         if (event.commands) cleared = true;
         if (event.type === "char" && event.text) chars.push(event.text);
       },
-      // The chromium clear reads the focused field before and after dispatching
-      // and fails if it did not empty, so a stub without `evaluate` would send
-      // every clear down the best-effort "page unreadable" branch instead of the
-      // one production takes against a page it can read. Report a focused
-      // editable field that is populated until the clear runs.
-      evaluate: async () =>
-        JSON.stringify({
-          verdict: "editable",
-          label: "INPUT#pw",
-          length: cleared ? 0 : 8,
-          selection: 0,
-        }),
+      // The chromium clear issues TWO probes — resolve-and-park, then re-read
+      // the parked element — and a stub answering only the first sends every
+      // clear down the best-effort branch instead of the one production takes
+      // against a page it can read. Route by call order, and report a field that
+      // is populated until the clear runs.
+      evaluate: async () => {
+        probes++;
+        return JSON.stringify(
+          probes % 2 === 1
+            ? { verdict: "editable", label: "INPUT#pw", length: 8, mac: true, parked: true }
+            : { tracked: true, length: cleared ? 0 : 8 }
+        );
+      },
     },
   };
 }

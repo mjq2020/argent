@@ -186,15 +186,32 @@ const KEYCODE_DEL = 67;
 const ANDROID_CLEAR_BUDGET_MS = 20_000;
 
 /**
+ * Held back from the read legs (probe, dump) so the delete run always has time
+ * to finish once it starts.
+ *
+ * Without a reservation the dump's own cap is the whole remaining budget, so a
+ * slow `uiautomator` can spend all of it and the delete run then starts against
+ * a few hundred milliseconds — the half-deleted field this path exists to
+ * prevent. Reserving is the fix rather than estimating the run's cost: measured
+ * on device, one `input keyevent` invocation is dominated by a constant VM start
+ * (209 deletes took 505ms, and 608 deletes 0.8s against an idle field), so the
+ * count is a poor predictor of the time. 8s covers even the pathological case
+ * the file records — 150 keys taking 6.9s against a live-filtering search box on
+ * API 30, where the cost really is the app's per-keystroke work.
+ */
+const DELETE_RUN_RESERVE_MS = 8_000;
+
+/**
  * Timeout for the next leg of a clear: whatever is left of the shared budget,
  * capped at that leg's own natural maximum.
  *
- * Floored at 1s rather than 0 so an already-overrun budget still attempts the
- * call — a 0ms timeout would fail every time, turning a merely slow device into
- * a hard error.
+ * `reserveMs` is withheld from the cap so an earlier leg cannot consume what a
+ * later one needs. Floored at 1s rather than 0 so an already-overrun budget
+ * still attempts the call — a 0ms timeout would fail every time, turning a
+ * merely slow device into a hard error.
  */
-function clearLegTimeout(deadline: number, cap: number): number {
-  return Math.max(1_000, Math.min(cap, deadline - Date.now()));
+function clearLegTimeout(deadline: number, cap: number, reserveMs = 0): number {
+  return Math.max(1_000, Math.min(cap, deadline - Date.now() - reserveMs));
 }
 
 /**
@@ -248,7 +265,7 @@ export async function injectAndroidClear(serial: string): Promise<void> {
   const out = await adbShell(
     serial,
     `input keycombination ${KEYCODE_CTRL_LEFT} ${KEYCODE_A} 2>&1`,
-    { timeoutMs: clearLegTimeout(deadline, ADB_INPUT_TIMEOUT_MS) }
+    { timeoutMs: clearLegTimeout(deadline, ADB_INPUT_TIMEOUT_MS, DELETE_RUN_RESERVE_MS) }
   );
   if (/unknown command|usage: input/i.test(out)) {
     await clearByDeleting(serial, deadline);
@@ -300,15 +317,6 @@ const BLIND_DELETE_COUNT = 160;
 // login, a search box, a form field.
 const MAX_DELETE_COUNT = 200;
 
-// Per-delete cost used to decide whether the run fits in what is LEFT of the
-// budget. Deliberately the slow end of the measured range, not the average: the
-// cost is the app's per-keystroke work, which spans 16ms/key against an idle
-// native EditText to 69ms/key against a live-filtering field on API 30. Guessing
-// low would let a run start that cannot finish, which is the failure this
-// estimate exists to prevent — and guessing high only refuses a clear the caller
-// can retry or do another way.
-const SLOW_MS_PER_DELETE = 70;
-
 /**
  * Empty the focused field on an Android level whose `input` has no
  * `keycombination`: move the caret to the end of the line, then backspace over
@@ -340,22 +348,20 @@ const SLOW_MS_PER_DELETE = 70;
 async function clearByDeleting(serial: string, deadline: number): Promise<void> {
   const count = (await measureFocusedTextLength(serial, deadline)) ?? BLIND_DELETE_COUNT;
   const keys = count + DELETE_MARGIN;
-  // Refuse BEFORE touching the field, on BOTH grounds. A cap alone is not
-  // enough: it is static, while the time left to spend is not — a cold
-  // `uiautomator` on a busy emulator can take 10s of the 20s budget, and the
-  // largest run the cap allows would then abort part-way through. Both checks
-  // exist because they fail for different reasons: the cap says "no plausible
-  // budget covers this field", the deadline says "this particular call has
-  // already spent too much to start".
-  const remainingMs = deadline - Date.now();
-  const estimatedMs = keys * SLOW_MS_PER_DELETE;
-  if (count > MAX_DELETE_COUNT || estimatedMs > remainingMs) {
+  // Refuse BEFORE touching the field. Length is the only ground: the run's time
+  // is bounded by DELETE_RUN_RESERVE_MS, which the read legs above cannot spend,
+  // so "this call ran out of budget" is not a case that needs its own rejection.
+  // An earlier cut also refused on an estimated run time and got this wrong in
+  // both directions — it over-predicted a normal field by ~29x (turning working
+  // clears into hard 400s) while reporting a fabricated length for the blind
+  // path, where no length was ever measured.
+  if (count > MAX_DELETE_COUNT) {
     throw new InvalidToolInputError(
       `keyboard clear: the focused field holds ${count} characters, more than this Android ` +
-        `level can clear within the request budget. Without \`input keycombination\` (added ` +
-        `after API 30) the only available clear is one backspace per character, which is too ` +
-        `slow to finish reliably past ${MAX_DELETE_COUNT}. The field was NOT modified. Clear ` +
-        `it with the app's own affordance, or use an emulator on a newer API level.`,
+        `level can clear. Without \`input keycombination\` (added after API 30) the only ` +
+        `available clear is one backspace per character, which is too slow to finish ` +
+        `reliably past ${MAX_DELETE_COUNT}. The field was NOT modified. Clear it with the ` +
+        `app's own affordance, or use an emulator on a newer API level.`,
       {
         // Its own code rather than KEYBOARD_CLEAR_INEFFECTIVE: this is a
         // caller-fixable rejection (a 400) that changed nothing, whereas
@@ -375,8 +381,36 @@ async function clearByDeleting(serial: string, deadline: number): Promise<void> 
   // deletes already delivered to the device keep landing after the client gives
   // up.
   await adbShell(serial, `input keyevent ${KEYCODE_MOVE_END} ${dels}`, {
-    timeoutMs: Math.max(1, deadline - Date.now()),
+    timeoutMs: clearLegTimeout(deadline, ANDROID_CLEAR_BUDGET_MS),
   });
+}
+
+/**
+ * One `uiautomator dump`, retried once when the device returns no hierarchy.
+ *
+ * The device serves a single UiAutomation connection, so concurrent readers race
+ * — with three dumps in flight, two came back as a bare `Killed` (adb still
+ * exiting 0). `describe` reports that to the caller as a capture failure, but
+ * here a failed read is silent: it degrades to the blind delete count, and a
+ * field longer than that keeps its head while the tool reports `cleared: true`.
+ * That is the corruption the measurement exists to prevent, so it is worth one
+ * retry — a dump costs ~2s of a 20s budget, and the race is transient.
+ *
+ * Returns undefined when neither attempt produced a hierarchy.
+ */
+async function readHierarchy(serial: string, deadline: number): Promise<string | undefined> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // Withhold the delete run's reserve: a slow dump must not leave the run it
+    // is measuring for without time to finish.
+    const xml = await dumpAndroidUiXml(serial, {
+      timeoutMs: clearLegTimeout(deadline, ANDROID_UI_DUMP_TIMEOUT_MS, DELETE_RUN_RESERVE_MS),
+    });
+    // adb exits 0 even when the dump did not happen — a refused screen reports
+    // an in-band `ERROR:` line, a lost race reports `Killed`. Neither carries a
+    // hierarchy, which is the one test that covers both.
+    if (xml.includes("<hierarchy")) return xml;
+  }
+  return undefined;
 }
 
 /**
@@ -411,18 +445,13 @@ async function measureFocusedTextLength(
   serial: string,
   deadline: number
 ): Promise<number | undefined> {
-  let xml: string;
+  let xml: string | undefined;
   try {
-    xml = await dumpAndroidUiXml(serial, {
-      timeoutMs: clearLegTimeout(deadline, ANDROID_UI_DUMP_TIMEOUT_MS),
-    });
+    xml = await readHierarchy(serial, deadline);
   } catch {
     return undefined;
   }
-  // adb exits 0 even when uiautomator refused the screen; it reports that
-  // in-band as an `ERROR:` line instead of a hierarchy. Same check the describe
-  // path makes, minus the throw — here it just means "unmeasurable".
-  if (!xml.includes("<hierarchy")) return undefined;
+  if (xml === undefined) return undefined;
   const root = parseUiAutomatorXml(xml);
   if (!root) return undefined;
 

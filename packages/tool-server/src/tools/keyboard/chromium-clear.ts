@@ -335,3 +335,13 @@ export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
     }
   );
 }
+
+/**
+ * The probe sources, exported for `test/keyboard-clear-probe.test.ts`, which
+ * evals them against a mock DOM. They run inside the page, so the rest of the
+ * suite can only mock what they return — every verdict they compute would
+ * otherwise rest on a manual browser session alone.
+ */
+export const __testing__ = { focusedEditableProbe, clearedTargetProbe };
+
+export type { FocusedEditable, ClearedTarget };

@@ -179,7 +179,26 @@ describe("keyboard backends — input rejection is a 400 with a uniform telemetr
     const registry = new Registry();
     vi.spyOn(registry, "resolveService").mockResolvedValue({
       dispatchKeyEvent: vi.fn(async () => {}),
-      evaluate: vi.fn(async () => JSON.stringify({ verdict: "none", selection: 0 })),
+      evaluate: vi.fn(async () => JSON.stringify({ verdict: "none" })),
+    } as never);
+
+    await expectInvalidInput(
+      makeChromiumImpl(registry).handler(
+        {},
+        { udid: chromiumDevice.id, clear: true },
+        chromiumDevice
+      ),
+      FAILURE_CODES.KEYBOARD_CLEAR_NO_EDITABLE_FOCUS
+    );
+  });
+
+  it("chromium: clear of a readonly field → 400 + KEYBOARD_CLEAR_NO_EDITABLE_FOCUS", async () => {
+    const registry = new Registry();
+    vi.spyOn(registry, "resolveService").mockResolvedValue({
+      dispatchKeyEvent: vi.fn(async () => {}),
+      evaluate: vi.fn(async () =>
+        JSON.stringify({ verdict: "read-only", label: "INPUT#total", mac: true })
+      ),
     } as never);
 
     await expectInvalidInput(
