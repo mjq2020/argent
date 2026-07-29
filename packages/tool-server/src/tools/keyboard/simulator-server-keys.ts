@@ -31,26 +31,40 @@ export async function typeSimulatorServer(
   // Press `keyCode`, optionally while holding a modifier (shift for a capital,
   // Left GUI/Command for the select-all in a clear). The modifier is held across
   // the whole down/up pair so the guest sees a real chord, not two taps.
+  //
+  // The release is in a `finally` because modifier state lives in the GUEST, and
+  // nothing in the repo ever emits a "release everything": if control left
+  // between the two writes — the simulator-server child dying mid-chord, an
+  // aborted request — the modifier would stay latched with no recovery path, and
+  // every subsequent keystroke would become a chord. A stuck Shift only
+  // mis-cases text; a stuck Command turns the rest of the call into system
+  // shortcuts (Cmd+H backgrounds the app).
   const pressKeyCode = async (keyCode: number, modifierKeyCode?: number) => {
     if (modifierKeyCode !== undefined) {
       api.pressKey("Down", modifierKeyCode);
       await sleep(10);
     }
-    api.pressKey("Down", keyCode);
-    await sleep(delay);
-    api.pressKey("Up", keyCode);
-    if (modifierKeyCode !== undefined) {
-      await sleep(10);
-      api.pressKey("Up", modifierKeyCode);
+    try {
+      api.pressKey("Down", keyCode);
+      await sleep(delay);
+      api.pressKey("Up", keyCode);
+    } finally {
+      if (modifierKeyCode !== undefined) {
+        await sleep(10);
+        api.pressKey("Up", modifierKeyCode);
+      }
     }
   };
 
   // `keys` counts what the caller asked to be *entered* — one per character of
   // `text`, plus one for a named `key`. The clear's own presses are deliberately
-  // excluded: they are an implementation detail of emptying the field (two on
-  // this backend, zero adb keyevents' worth on Android, one CDP event on
-  // Chromium), and counting them would make the same call report a different
-  // `keys` per platform. The clear is reported by `cleared` instead.
+  // excluded: they are an implementation detail of emptying the field, and what
+  // that costs differs wildly per backend (two HID presses here; on Android one
+  // `input keycombination` plus a `KEYCODE_DEL`, or on a level without that
+  // subcommand a MOVE_END plus one delete per character — up to 168 key events;
+  // two CDP key events on Chromium). Counting them would make the same request
+  // report a different `keys` on every platform. The clear is reported by
+  // `cleared` instead.
   const pressAndCount = async (keyCode: number, modifierKeyCode?: number) => {
     await pressKeyCode(keyCode, modifierKeyCode);
     keysPressed++;

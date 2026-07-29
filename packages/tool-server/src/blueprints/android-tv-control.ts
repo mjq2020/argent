@@ -5,7 +5,8 @@ import {
   type ServiceInstance,
   type ServiceEvents,
 } from "@argent/registry";
-import { adbExecOutBinary, adbShell, getAndroidRuntimeKind } from "../utils/adb";
+import { adbShell, getAndroidRuntimeKind } from "../utils/adb";
+import { dumpAndroidUiXml } from "../utils/android-ui-dump";
 import { assertTypeableAndroidText, injectAndroidText } from "../utils/android-input";
 import { UnsupportedOperationError } from "../utils/capability";
 import {
@@ -202,19 +203,9 @@ export const androidTvControlBlueprint: ServiceBlueprint<TvControlApi, DeviceInf
     const events = new TypedEventEmitter<ServiceEvents>();
 
     async function dumpHierarchy(): Promise<string> {
-      // Per-call dump path so concurrent calls on the same serial don't race on
-      // a shared /sdcard file (one call's cat reading the other's mid-write).
-      // /data/local/tmp is world-writable on every Android we support; trailing
-      // `; rm -f` (not `&&`) so cleanup fires even when dump/cat fails.
-      const suffix = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
-      const dumpPath = `/data/local/tmp/argent-tv-dump-${suffix}.xml`;
-      const raw = (
-        await adbExecOutBinary(
-          serial,
-          `uiautomator dump --compressed ${dumpPath} >/dev/null && cat ${dumpPath}; rm -f ${dumpPath}`,
-          { timeoutMs: 20_000 }
-        )
-      ).toString("utf-8");
+      // Transport and dump-path handling live in `utils/android-ui-dump`, shared
+      // with the phone describe path and the keyboard clear's measurement.
+      const raw = await dumpAndroidUiXml(serial);
       if (!raw.includes("<hierarchy")) {
         throw new Error(
           `uiautomator could not capture the screen: ${raw.trim().slice(0, 200)}. ` +

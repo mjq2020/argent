@@ -71,15 +71,27 @@ export interface KeyEventArgs {
   /**
    * Blink editing commands to run for this key event, e.g. `["selectAll"]`.
    *
-   * This is the ONLY way to drive an editing chord over CDP. A modifier-only
-   * key event (`modifiers: 2` for Ctrl, `4` for Meta) never reaches Blink's
-   * editing layer: Ctrl/Cmd+A dispatched that way selects **zero** characters,
-   * so a Backspace after it deletes a single character while the call still
-   * reports success. Measured on Chrome 150 with a focused input seeded
-   * `hello123` — `modifiers` left `hello12`, `commands` left `""`.
+   * Names the editing action outright instead of relying on the renderer to
+   * derive one from a modifier chord, which is what makes an editing operation
+   * portable over CDP. A `modifiers`-only event is NOT portable: on a macOS
+   * Chrome 150 build, `modifiers: 4` (Meta) and `modifiers: 2` (Ctrl) with
+   * `KeyA` both select **zero** characters, so a Backspace after one deletes a
+   * single character while the call still reports success (measured against a
+   * focused input seeded `hello123`: `modifiers` left `hello12`, `commands`
+   * left `""`). On a Linux/Windows build `modifiers: 2` does select the field,
+   * because Ctrl+A is that platform's select-all binding — so which modifier
+   * works, if any, depends on the build. `commands` works on all of them.
+   *
+   * `modifiers` is still worth setting ALONGSIDE it: the two are orthogonal and
+   * combine (verified — the field clears identically), and without it the page
+   * receives a bare unmodified letter, which fires any shortcut the app binds to
+   * that key and lets an app-level `preventDefault` cancel the edit outright.
    *
    * Only meaningful on `rawKeyDown` (the type Blink routes through its editor
-   * command handler). This is what Playwright uses internally.
+   * command handler); on `keyDown`/`keyUp` it is silently ignored. CDP also
+   * ignores unknown parameters silently, so on a Chromium old enough to predate
+   * this field the commands are dropped with no error — a caller that needs to
+   * know the edit happened has to observe the page, not the CDP reply.
    */
   commands?: string[];
 }

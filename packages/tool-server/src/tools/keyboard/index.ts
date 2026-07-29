@@ -37,9 +37,10 @@ const zodSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Empty the focused text field before typing (select-all, then delete). Use this whenever a field may already hold a value — typing alone APPENDS, it does not replace. " +
+      "Empty the focused text field before typing. Use this whenever a field may already hold a value — typing alone APPENDS, it does not replace. " +
         '`{ clear: true, text: "new@example.com" }` replaces a field\'s contents in one call; `{ clear: true }` alone just empties it. ' +
-        "Supported on iOS, Android and Chromium; rejected on Vega and TV targets, whose input transports cannot send the select-all chord."
+        "Does not count towards `keys`, which reports only what you asked to be entered; a performed clear is reported by `cleared`. " +
+        "Supported on iOS, Android and Chromium; rejected on Vega and TV targets, which have no clear primitive — delete the value with repeated backspaces there instead."
     ),
   delayMs: z
     .number()
@@ -109,7 +110,7 @@ Use when you need to enter text or trigger a named key such as enter, escape, or
 Returns { typed: string, keys: number, cleared?: boolean }. Fails if both text and key are given in one call (rejected before anything is typed), if an unsupported key name is provided, if \`clear\` is used on a platform that cannot do it, or if the device's input backend is not reachable.
 - text: types a string (supports uppercase, digits, common punctuation). To type a credential, use \`{{secret:<NAME>}}\` — resolved server-side from the \`ARGENT_SECRET_<NAME>\` env var (prefix mandatory; \`{{secret:APP_PASSWORD}}\` ↔ \`ARGENT_SECRET_APP_PASSWORD\`), so the plaintext never enters agent context; the result echoes the placeholder, not the value, and the after-typing auto-screenshot is skipped. To submit after typing a secret, put both steps in ONE \`run-sequence\` — that keeps the skip covering the Enter, which a second bare \`keyboard\` call would not.
 - key: presses a single named key (enter, escape, backspace, tab, arrow-up/down/left/right, f1–f12) — NOT supported on TV targets; move focus with \`tv-remote\` instead.
-- clear: empties the focused field before typing. Typing alone APPENDS — against a field that already holds a value (a remembered login, a restored draft, a re-run step) the old text stays and the new text lands after it. Use \`{ clear: true, text: "…" }\` to replace a value, \`{ clear: true }\` alone to just empty it. iOS, Android and Chromium; rejected on Vega and TV targets.
+- clear: empties the focused field before typing. Typing alone APPENDS — against a field that already holds a value (a remembered login, a restored draft, a re-run step) the old text stays and the new text lands after it. Use \`{ clear: true, text: "…" }\` to replace a value, \`{ clear: true }\` alone to just empty it. iOS, Android and Chromium; rejected on Vega and TV targets. Focus a text field first — clearing fails if nothing editable has focus. On Android levels older than \`input keycombination\` the clear deletes backwards from end-of-LINE, so a multi-line field keeps what sits below the caret; single-line inputs are emptied exactly.
 On a TV target (runtimeKind 'tv') only \`text\` applies — focus a text field first (with \`tv-remote\`), then type into it (injected HID keyboard on Apple TV, \`adb input text\` on Android TV).
 Provide text OR key, never both. \`clear\` may accompany either, and always runs first: { clear: true, text: "hello" } replaces a field's value. To type and then submit, use two calls, or two \`keyboard\` steps in one \`run-sequence\`: { clear: true, text: "hello" } then { key: "enter" }.`,
     zodSchema,

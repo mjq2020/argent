@@ -4,7 +4,6 @@ import { typeSimulatorServer } from "../src/tools/keyboard/simulator-server-keys
 import { makeChromiumImpl } from "../src/tools/keyboard/platforms/chromium";
 import { vegaImpl } from "../src/tools/keyboard/platforms/vega";
 import { typeTv } from "../src/tools/keyboard/platforms/tv";
-import { A_KEYCODE, LEFT_GUI_KEYCODE, NAMED_KEYS } from "../src/tools/keyboard/key-codes";
 import { UnsupportedOperationError } from "../src/utils/capability";
 import type { KeyEventArgs } from "../src/blueprints/chromium-cdp";
 
@@ -19,24 +18,48 @@ vi.mock("../src/utils/vega-input", async (importOriginal) => {
 
 // Android's clear is observable as the `adb shell input` command sequence.
 // `shellQuote` stays real so the asserted strings are the real command lines.
-const { adbShell, isAndroidTv } = vi.hoisted(() => ({
+//
+// `adbExecOutBinary` is mocked separately because the hierarchy dump does NOT
+// go through `adbShell`: `adb shell` gives the device no usable controlling
+// terminal, so uiautomator's XML never comes back over it (33 bytes of status
+// line, exit 0). The dump therefore rides `exec-out` — which returns a Buffer,
+// hence the Buffer-shaped mock — and it is a separate call from the `input`
+// commands rather than another entry in `adbShell.mock.calls`.
+const { adbShell, adbExecOutBinary, isAndroidTv } = vi.hoisted(() => ({
   adbShell: vi.fn(async (_serial: string, _cmd: string, _opts?: unknown): Promise<string> => ""),
+  adbExecOutBinary: vi.fn(
+    async (_serial: string, _cmd: string, _opts?: unknown): Promise<Buffer> => Buffer.from("")
+  ),
   isAndroidTv: vi.fn(async (_serial: string): Promise<boolean> => false),
 }));
 vi.mock("../src/utils/adb", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/utils/adb")>()),
   adbShell,
+  adbExecOutBinary,
   isAndroidTv,
+}));
+
+// The tvOS probe is what stops an Apple TV udid reaching the HID chord; stub it
+// so both sides of that fork are reachable without a booted tvOS simulator.
+const { isTvOsSimulator } = vi.hoisted(() => ({
+  isTvOsSimulator: vi.fn(async (_udid: string): Promise<boolean> => false),
+}));
+vi.mock("../src/utils/ios-devices", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/utils/ios-devices")>()),
+  isTvOsSimulator,
 }));
 
 import { injectVegaNamedKey, injectVegaText } from "../src/utils/vega-input";
 import { makeAndroidImpl } from "../src/tools/keyboard/platforms/android";
+import { makeIosImpl, makeIosRemoteImpl } from "../src/tools/keyboard/platforms/ios";
+import { createKeyboardTool } from "../src/tools/keyboard";
 
 const IOS_SIM: DeviceInfo = { id: "TEST-UDID", platform: "ios", kind: "simulator" };
 const CHROMIUM: DeviceInfo = { id: "chromium-cdp-9222", platform: "chromium", kind: "app" };
 const VEGA: DeviceInfo = { id: "vega-serial", platform: "vega", kind: "vvd" };
 const ANDROID: DeviceInfo = { id: "emulator-5554", platform: "android", kind: "emulator" };
 const APPLE_TV: DeviceInfo = { id: "TV-UDID", platform: "ios", kind: "simulator" };
+const IOS_REMOTE: DeviceInfo = { id: "remote-udid", platform: "ios-remote", kind: "simulator" };
 
 // `2>&1` folds the device's stderr into the stream `adbShell` returns: API 30
 // writes its usage dump to stderr while API 34/36 write "Unknown command" to
@@ -73,17 +96,15 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     });
 
     // Cmd must go down before A and come up after it — a chord, not two taps.
-    expect(events.slice(0, 4)).toEqual([
-      `Down:${LEFT_GUI_KEYCODE}`,
-      `Down:${A_KEYCODE}`,
-      `Up:${A_KEYCODE}`,
-      `Up:${LEFT_GUI_KEYCODE}`,
-    ]);
-    // Then the delete that removes the now-selected contents…
-    expect(events.slice(4, 6)).toEqual([
-      `Down:${NAMED_KEYS.backspace}`,
-      `Up:${NAMED_KEYS.backspace}`,
-    ]);
+    // The usages are written out rather than imported from the module under
+    // test: 227 is Left GUI and 4 is `a` in the USB HID usage tables, and
+    // comparing the recorded traffic against the module's own constants would
+    // make any value it declared correct by construction — a wrong one (Cmd+B,
+    // RightCtrl+A) selects nothing, the backspace then removes a single
+    // character, and the tool still reports `cleared: true`.
+    expect(events.slice(0, 4)).toEqual(["Down:227", "Down:4", "Up:4", "Up:227"]);
+    // Then the delete that removes the now-selected contents (usage 42).
+    expect(events.slice(4, 6)).toEqual(["Down:42", "Up:42"]);
     // …and only then the text. Clear-after-text would empty the field the tool
     // just populated, so the ordering is the whole contract.
     expect(events.slice(6)).toEqual(["Down:4", "Up:4"]);
@@ -99,14 +120,7 @@ describe("keyboard clear — iOS (simulator-server)", () => {
       delayMs: 0,
     });
 
-    expect(events).toEqual([
-      `Down:${LEFT_GUI_KEYCODE}`,
-      `Down:${A_KEYCODE}`,
-      `Up:${A_KEYCODE}`,
-      `Up:${LEFT_GUI_KEYCODE}`,
-      `Down:${NAMED_KEYS.backspace}`,
-      `Up:${NAMED_KEYS.backspace}`,
-    ]);
+    expect(events).toEqual(["Down:227", "Down:4", "Up:4", "Up:227", "Down:42", "Up:42"]);
     // `keys` counts what the caller asked to ENTER, so a clear contributes 0 —
     // the same number Android and Chromium report for the same call. Counting
     // the clear's own presses here would make one request report a different
@@ -149,14 +163,10 @@ describe("keyboard clear — iOS (simulator-server)", () => {
       delayMs: 0,
     });
 
+    // Left GUI, `a`, backspace, the typed `a`, enter — HID usages spelled out
+    // for the same reason as above.
     const downs = events.filter((e) => e.startsWith("Down:"));
-    expect(downs).toEqual([
-      `Down:${LEFT_GUI_KEYCODE}`,
-      `Down:${A_KEYCODE}`,
-      `Down:${NAMED_KEYS.backspace}`,
-      "Down:4",
-      `Down:${NAMED_KEYS.enter}`,
-    ]);
+    expect(downs).toEqual(["Down:227", "Down:4", "Down:42", "Down:4", "Down:40"]);
   });
 
   it("rejects an unknown key before clearing anything", async () => {
@@ -225,9 +235,24 @@ describe("keyboard clear — Android (adb input)", () => {
   beforeEach(() => {
     adbShell.mockReset();
     adbShell.mockImplementation(async () => "");
+    adbExecOutBinary.mockReset();
+    adbExecOutBinary.mockImplementation(async () => Buffer.from(""));
     isAndroidTv.mockReset();
     isAndroidTv.mockImplementation(async () => false);
   });
+
+  /** The `input` command lines, in order. The dump is not one of them. */
+  const inputCmds = () => adbShell.mock.calls.map((c) => c[1]);
+  /** Keycodes of the fallback's single `input keyevent <MOVE_END> <DEL>…` run. */
+  const deleteRun = (cmd: string) => {
+    expect(cmd.startsWith("input keyevent 123 ")).toBe(true);
+    const dels = cmd.split(" ").slice(3);
+    expect(dels.every((d) => d === "67")).toBe(true);
+    return dels;
+  };
+  const seedLegacyLevel = () => adbShell.mockImplementationOnce(async () => "Usage: input …");
+  const seedDump = (xml: string) =>
+    adbExecOutBinary.mockImplementationOnce(async () => Buffer.from(xml));
 
   it("selects all then deletes, before typing any text", async () => {
     const result = await makeAndroidImpl(registryWith({})).handler(
@@ -272,74 +297,178 @@ describe("keyboard clear — Android (adb input)", () => {
     // printing a usage dump (to stderr, hence the `2>&1` on the probe). The
     // fallback measures the field instead of guessing: a fixed run would leave
     // a longer field's head in place and append the new text to that residue.
-    adbShell.mockImplementationOnce(async () => "Usage: input [<source>] …");
-    adbShell.mockImplementationOnce(async () => dumpWith("abcdefghij")); // 10 chars
+    seedLegacyLevel();
+    seedDump(dumpWith("abcdefghij")); // 10 chars
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    const cmds = adbShell.mock.calls.map((c) => c[1]);
+    const cmds = inputCmds();
     expect(cmds[0]).toBe(SELECT_ALL_CMD);
-    expect(cmds[1]).toBe("uiautomator dump /dev/tty");
     // MOVE_END (123) so the caret is past the last character, then one DEL per
     // measured character plus a small margin — all in ONE `input` invocation.
-    const dels = cmds[2]!.split(" ").slice(3);
-    expect(cmds[2]!.startsWith("input keyevent 123 ")).toBe(true);
-    expect(dels.every((d) => d === "67")).toBe(true);
-    expect(dels).toHaveLength(10 + 8);
+    expect(deleteRun(cmds[1]!)).toHaveLength(10 + 8);
     // The standalone post-select DEL must NOT also fire on this path.
     expect(cmds).not.toContain(DEL_CMD);
   });
 
-  it("scales the delete run to a long field rather than truncating it", async () => {
-    adbShell.mockImplementationOnce(async () => "Usage: input …");
-    adbShell.mockImplementationOnce(async () => dumpWith("x".repeat(300)));
+  it("reads the hierarchy over exec-out, never over `adb shell`", async () => {
+    // `adb shell 'uiautomator dump /dev/tty'` exits 0 and returns only a status
+    // line, so a dump read that way measures every field as unreadable and the
+    // run silently degrades to the blind count. Pin the transport, not just the
+    // resulting number.
+    seedLegacyLevel();
+    seedDump(dumpWith("abcdefghij"));
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    const dels = adbShell.mock.calls[2]![1].split(" ").slice(3);
-    expect(dels).toHaveLength(308);
+    expect(adbExecOutBinary).toHaveBeenCalledTimes(1);
+    expect(adbExecOutBinary.mock.calls[0]![1]).toMatch(/^uiautomator dump /);
+    expect(inputCmds().some((c) => c.includes("uiautomator"))).toBe(false);
+  });
+
+  it("shares one deadline across the clear's legs instead of a timeout each", async () => {
+    // `keyboard` is not `longRunning`, so the MCP adapter abandons the request
+    // at 30s. Sizing each leg against 30s independently is what produced a 60s
+    // worst case — the client giving up while adb kept deleting on the device.
+    // Time spent on an earlier leg has to come off the next one's budget.
+    let clock = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      adbShell.mockImplementationOnce(async () => {
+        clock += 14_000; // a slow probe
+        return "Usage: input …";
+      });
+      adbExecOutBinary.mockImplementationOnce(async () => {
+        clock += 3_000; // a slow dump
+        return Buffer.from(dumpWith("abc"));
+      });
+
+      await makeAndroidImpl(registryWith({})).handler(
+        {},
+        { udid: ANDROID.id, clear: true },
+        ANDROID
+      );
+
+      const timeoutOf = (call: [string, string, unknown?]) =>
+        (call[2] as { timeoutMs: number }).timeoutMs;
+      // 17s of the 20s budget is gone, so the delete run gets what is left — not
+      // a fresh full-size cap.
+      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(3_000);
+      // And the dump, taken 14s in, was already shortened from its own 20s cap.
+      expect(timeoutOf(adbExecOutBinary.mock.calls[0]!)).toBe(6_000);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("scales the delete run to a long field rather than truncating it", async () => {
+    seedLegacyLevel();
+    seedDump(dumpWith("x".repeat(300)));
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(300 + 8);
+  });
+
+  it("refuses a field too long to delete instead of half-deleting it", async () => {
+    // Every DEL is delivered to the app, so a very long field's run overruns the
+    // budget mid-way and leaves a partly-deleted value — the corruption this
+    // path exists to prevent. Refuse before touching the field instead.
+    seedLegacyLevel();
+    seedDump(dumpWith("x".repeat(1200)));
+
+    await expect(
+      makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
+    ).rejects.toThrow(/1200 characters.*NOT modified/s);
+    // Probe only — no delete run was issued.
+    expect(inputCmds()).toEqual([SELECT_ALL_CMD]);
   });
 
   it("uses the blind count for a password field, whose text is unreadable", async () => {
     // uiautomator reports empty text for password nodes, so a measured 0 would
     // clear nothing at all — the one case where a fixed run is the right answer.
-    adbShell.mockImplementationOnce(async () => "Usage: input …");
-    adbShell.mockImplementationOnce(async () => dumpWith("", true));
+    seedLegacyLevel();
+    seedDump(dumpWith("", true));
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    const dels = adbShell.mock.calls[2]![1].split(" ").slice(3);
-    expect(dels).toHaveLength(160 + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(160 + 8);
   });
 
   it("uses the blind count when the dump itself fails", async () => {
-    adbShell.mockImplementationOnce(async () => "Usage: input …");
-    adbShell.mockImplementationOnce(async () => {
+    seedLegacyLevel();
+    adbExecOutBinary.mockImplementationOnce(async () => {
       throw new Error("uiautomator dump failed");
     });
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    const dels = adbShell.mock.calls[2]![1].split(" ").slice(3);
-    expect(dels).toHaveLength(160 + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(160 + 8);
+  });
+
+  it("uses the blind count when the device refused the dump", async () => {
+    // adb exits 0 and uiautomator reports the refusal in-band, so this arrives
+    // as a successful call carrying no hierarchy.
+    seedLegacyLevel();
+    seedDump("ERROR: could not get idle state.");
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(160 + 8);
+  });
+
+  it("measures the focused EDITABLE node, not a focused container above it", async () => {
+    // A dump carries every window, so more than one node can be `focused` — an
+    // IME or overlay contributes its own. Taking the first in document order
+    // reads that container's empty `text` as "the field is empty" and issues
+    // only the margin, leaving the real value almost intact while reporting
+    // `cleared: true`.
+    seedLegacyLevel();
+    seedDump(
+      `<?xml version='1.0' encoding='UTF-8'?><hierarchy rotation="0">` +
+        `<node index="0" text="" class="android.webkit.WebView" password="false" focused="true" />` +
+        `<node index="1" text="${"y".repeat(42)}" class="android.widget.EditText" password="false" focused="true" />` +
+        `</hierarchy>`
+    );
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(42 + 8);
+  });
+
+  it("measures a field whose text contains a double quote", async () => {
+    // uiautomator switches the attribute delimiter to single quotes when the
+    // value contains a `"`. A double-quote-only attribute matcher skips the
+    // attribute entirely, reads the field as unmeasurable, and degrades to the
+    // blind count — which truncates anything longer than it.
+    seedLegacyLevel();
+    seedDump(
+      `<?xml version='1.0' encoding='UTF-8'?><hierarchy rotation="0">` +
+        `<node index="0" text='say "hi"' class="android.widget.EditText" password="false" focused="true" />` +
+        `</hierarchy>`
+    );
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(8 + 8); // `say "hi"`
   });
 
   it("decodes XML entities so the measured length is in real characters", async () => {
     // `&amp;` is five characters in the dump and one on screen; measuring the
     // raw attribute would over-count, which is harmless, but under-counting a
-    // decoded entity would not be — pin the decode either way.
-    adbShell.mockImplementationOnce(async () => "Usage: input …");
-    adbShell.mockImplementationOnce(async () => dumpWith("a&amp;b&lt;c"));
+    // decoded entity would not be — pin the decode either way. `&#8230;` covers
+    // the numeric references a chained per-entity decoder misses.
+    seedLegacyLevel();
+    seedDump(dumpWith("a&amp;b&lt;c&#8230;"));
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    const dels = adbShell.mock.calls[2]![1].split(" ").slice(3);
-    expect(dels).toHaveLength(5 + 8); // "a&b<c"
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(6 + 8); // "a&b<c…"
   });
 
   it("clear+type on a legacy level types only after the delete run", async () => {
-    adbShell.mockImplementationOnce(async () => "Usage: input …");
-    adbShell.mockImplementationOnce(async () => dumpWith("old"));
+    seedLegacyLevel();
+    seedDump(dumpWith("old"));
 
     await makeAndroidImpl(registryWith({})).handler(
       {},
@@ -347,11 +476,25 @@ describe("keyboard clear — Android (adb input)", () => {
       ANDROID
     );
 
-    const cmds = adbShell.mock.calls.map((c) => c[1]);
+    const cmds = inputCmds();
     expect(cmds[0]).toBe(SELECT_ALL_CMD);
-    expect(cmds[1]).toBe("uiautomator dump /dev/tty");
-    expect(cmds[2]!.startsWith("input keyevent 123 67")).toBe(true);
-    expect(cmds[3]).toBe("input text 'new'");
+    expect(cmds[1]!.startsWith("input keyevent 123 67")).toBe(true);
+    expect(cmds[2]).toBe("input text 'new'");
+  });
+
+  it("takes the fallback on a level that words the complaint as `Unknown command`", async () => {
+    // The other wording `input` uses for a subcommand it does not have. Only the
+    // `Usage:` form is exercised elsewhere, so without this the alternative could
+    // be dropped from the matcher and `clear` would silently degrade to a
+    // one-character backspace on any level that phrases it this way.
+    adbShell.mockImplementationOnce(async () => "Unknown command: keycombination");
+    seedDump(dumpWith("abc"));
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    const cmds = inputCmds();
+    expect(deleteRun(cmds[1]!)).toHaveLength(3 + 8);
+    expect(cmds).not.toContain(DEL_CMD);
   });
 
   it("does NOT reject when `keycombination` is supported (exit 0, no marker)", async () => {
@@ -400,13 +543,63 @@ describe("keyboard clear — Android (adb input)", () => {
   });
 });
 
+describe("keyboard clear — tool schema", () => {
+  // Every real call is dispatched with the PARSED params (`http.ts` and the
+  // registry both replace the raw body with `parseResult.data`), and a zod
+  // object strips keys it does not declare. So a `clear` missing from the schema
+  // is silently dropped on every device while the backends — which the rest of
+  // this file calls directly — keep working. Nothing else in the suite crosses
+  // the schema, and TypeScript cannot catch it either: `clear` is optional on
+  // `KeyboardParams`, so a schema without it still type-checks.
+  const tool = createKeyboardTool({ resolveService: vi.fn() } as never);
+
+  it("carries `clear` through the parse the dispatcher actually uses", () => {
+    const parsed = tool.zodSchema!.safeParse({ udid: ANDROID.id, text: "abc", clear: true });
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.data).toEqual({ udid: ANDROID.id, text: "abc", clear: true });
+  });
+
+  it("accepts `clear` on its own, with no text or key", () => {
+    const parsed = tool.zodSchema!.safeParse({ udid: ANDROID.id, clear: true });
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.data).toEqual({ udid: ANDROID.id, clear: true });
+  });
+
+  it("rejects a non-boolean `clear` rather than coercing it", () => {
+    expect(tool.zodSchema!.safeParse({ udid: ANDROID.id, clear: "yes" }).success).toBe(false);
+  });
+});
+
 describe("keyboard clear — Chromium (CDP)", () => {
-  function recordingApi() {
+  // The clear reads the focused element before and after dispatching, so a
+  // Chromium stub has to answer `evaluate`. Default: a focused, editable field
+  // that is empty afterwards — i.e. a clear that worked.
+  function recordingApi(
+    verdicts: Array<Record<string, unknown>> = [
+      { verdict: "editable", label: "INPUT#email", length: 8, selection: 0 },
+      { verdict: "editable", label: "INPUT#email", length: 0, selection: 0 },
+    ]
+  ) {
     const events: KeyEventArgs[] = [];
-    return { events, api: { dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e) } };
+    const probes: string[] = [];
+    let probeCount = 0;
+    return {
+      events,
+      probes,
+      api: {
+        dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
+        evaluate: async (expression: string) => {
+          probes.push(expression);
+          const verdict = verdicts[Math.min(probeCount++, verdicts.length - 1)];
+          return JSON.stringify(verdict);
+        },
+      },
+    };
   }
 
-  it("dispatches selectAll+deleteBackward as `commands`, never as `modifiers`", async () => {
+  it("dispatches selectAll+deleteBackward as `commands`, with a real modifier", async () => {
     const { events, api } = recordingApi();
 
     const result = await makeChromiumImpl(registryWith(api)).handler(
@@ -415,19 +608,107 @@ describe("keyboard clear — Chromium (CDP)", () => {
       CHROMIUM
     );
 
-    const down = events[0];
+    const down = events[0]!;
     expect(down.type).toBe("rawKeyDown");
-    // THE regression guard: the clear must be expressed as editing `commands`.
-    // A modifier-only Ctrl/Cmd+A never reaches Blink's editing layer — measured
-    // on Chrome 150, `modifiers: 2` and `modifiers: 4` each select ZERO
-    // characters, so the delete that follows removes exactly one while the tool
-    // still reports success. An implementation that swapped `commands` for
-    // `modifiers` fails on this line.
+    // THE regression guard: the edit must be named as `commands`. Which
+    // modifier reaches Blink's editing layer is build-dependent — on a macOS
+    // Chrome 150, Meta+A and Ctrl+A each select ZERO characters, so a delete
+    // after one removes a single character while the tool reports success. An
+    // implementation that swapped `commands` for `modifiers` fails here.
     expect(down.commands).toEqual(["selectAll", "deleteBackward"]);
-    // Secondary: rules out a hybrid that also sets `modifiers`. Weaker than the
-    // line above (which already rejects the broken form), kept because a stray
-    // modifier changes what the page's own keydown handlers observe.
-    expect(events.every((e) => e.modifiers === undefined)).toBe(true);
+    // …and the modifier is set as well. Without it the page receives a bare
+    // unmodified `a`, which fires whatever the app binds to that key and lets an
+    // app-level preventDefault cancel the clear outright — measured on Chrome
+    // 150: the field kept its value and the call still reported success.
+    expect(down.modifiers).toBe(process.platform === "darwin" ? 4 : 2);
+    expect(events.every((e) => e.modifiers === down.modifiers)).toBe(true);
+    // `commands` belongs only on the rawKeyDown; Blink ignores it elsewhere.
+    expect(events.filter((e) => e.commands !== undefined)).toHaveLength(1);
+    expect(result.cleared).toBe(true);
+  });
+
+  it("refuses before dispatching when nothing editable has focus", async () => {
+    // Blink's selectAll is not scoped to a field: with focus on the body it
+    // selects the whole document and the delete no-ops, so the page is left with
+    // a document-wide selection and the field untouched — reported as success.
+    const { events, api } = recordingApi([{ verdict: "none", selection: 0 }]);
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: "new@example.com", delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/no editable element has focus/);
+    // Nothing dispatched at all — not the clear, and not the text either.
+    expect(events).toEqual([]);
+  });
+
+  it("refuses when focus is on a non-editable element", async () => {
+    const { events, api } = recordingApi([
+      { verdict: "not-editable", label: "BUTTON#submit", selection: 0 },
+    ]);
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/BUTTON#submit/);
+    expect(events).toEqual([]);
+  });
+
+  it("fails loudly when the field still holds text afterwards", async () => {
+    // A page that cancels the keydown, a rich-text editor that cancels the
+    // `beforeinput`, or a Chromium too old to know `commands` all produce a
+    // successful CDP reply and an unchanged field. Reporting `cleared: true`
+    // there is what turns `{ clear, text }` into an append onto the old value.
+    const { api } = recordingApi([
+      { verdict: "editable", label: "INPUT#email", length: 8, selection: 0 },
+      { verdict: "editable", label: "INPUT#email", length: 8, selection: 0 },
+    ]);
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/still holds 8 character\(s\)/);
+  });
+
+  it("stays best-effort when the page cannot be read", async () => {
+    // Focus inside a cross-origin iframe, or an `evaluate` that throws. There is
+    // nothing to verify against, so refusing would break clears that work today.
+    const { events, api } = recordingApi([{ verdict: "unknown" }]);
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(events.map((e) => e.type)).toEqual(["rawKeyDown", "keyUp"]);
+    expect(result.cleared).toBe(true);
+  });
+
+  it("treats an unreadable page as unknown rather than failing the call", async () => {
+    const events: KeyEventArgs[] = [];
+    const api = {
+      dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
+      evaluate: async () => {
+        throw new Error("Runtime.evaluate: main world detached");
+      },
+    };
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(events.map((e) => e.type)).toEqual(["rawKeyDown", "keyUp"]);
     expect(result.cleared).toBe(true);
   });
 
@@ -552,5 +833,66 @@ describe("keyboard clear — unsupported platforms", () => {
       )
     ).rejects.toBeInstanceOf(UnsupportedOperationError);
     expect(adbShell).not.toHaveBeenCalled();
+  });
+
+  it("an Apple TV udid routes clear to the TV rejection, not to the HID chord", async () => {
+    // The tvOS mirror of the case above, and the reason the iOS dispatcher is
+    // exercised at all: a tvOS sim classifies as platform "ios" by udid shape,
+    // so without the `isTvOsSimulator` probe an Apple TV would reach
+    // `typeSimulatorServer` and fire Cmd+A at a device whose focus-driven
+    // backend cannot use it.
+    isTvOsSimulator.mockResolvedValueOnce(true);
+    const pressKey = vi.fn();
+    const type = vi.fn(async () => {});
+
+    await expect(
+      makeIosImpl(registryWith({ pressKey, type })).handler(
+        {},
+        { udid: APPLE_TV.id, clear: true, text: "hi" },
+        APPLE_TV
+      )
+    ).rejects.toBeInstanceOf(UnsupportedOperationError);
+    expect(pressKey).not.toHaveBeenCalled();
+    expect(type).not.toHaveBeenCalled();
+  });
+
+  it("an iPhone udid routes clear to the simulator-server chord", async () => {
+    // The other side of the same probe — the routing has to send a non-TV iOS
+    // target to the HID transport, or `clear` would be rejected on the platform
+    // the tool description says supports it.
+    isTvOsSimulator.mockResolvedValueOnce(false);
+    const events: string[] = [];
+    const pressKey = (direction: "Down" | "Up", keyCode: number) =>
+      events.push(`${direction}:${keyCode}`);
+
+    const result = await makeIosImpl(registryWith({ pressKey })).handler(
+      {},
+      { udid: IOS_SIM.id, clear: true, delayMs: 0 },
+      IOS_SIM
+    );
+
+    expect(events.slice(0, 4)).toEqual(["Down:227", "Down:4", "Up:4", "Up:227"]);
+    expect(result.cleared).toBe(true);
+  });
+
+  it("a remote iOS sim clears over the same transport, without a tvOS probe", async () => {
+    // `makeIosRemoteImpl` deliberately skips the probe (remote sims are never
+    // tvOS, and the probe shells out to local `xcrun`). Nothing else asserts
+    // what `clear` does over the sim-remote transport, which the tool
+    // description presents as supported without qualification.
+    isTvOsSimulator.mockClear();
+    const events: string[] = [];
+    const pressKey = (direction: "Down" | "Up", keyCode: number) =>
+      events.push(`${direction}:${keyCode}`);
+
+    const result = await makeIosRemoteImpl(registryWith({ pressKey })).handler(
+      {},
+      { udid: IOS_REMOTE.id, clear: true, delayMs: 0 },
+      IOS_REMOTE
+    );
+
+    expect(events.slice(0, 4)).toEqual(["Down:227", "Down:4", "Up:4", "Up:227"]);
+    expect(isTvOsSimulator).not.toHaveBeenCalled();
+    expect(result.cleared).toBe(true);
   });
 });
