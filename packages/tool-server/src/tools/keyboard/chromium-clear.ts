@@ -35,14 +35,26 @@
  * there would break clears that work today for the sake of a check that is
  * merely blind.
  */
+import { randomUUID } from "node:crypto";
 import { FAILURE_CODES, FailureError } from "@argent/registry";
 import type { ChromiumCdpApi } from "../../blueprints/chromium-cdp";
 import { InvalidToolInputError } from "../../utils/capability";
 
-// Where the probe parks the element it resolved, so the re-read afterwards can
-// measure THAT element rather than whatever holds focus by then. Namespaced
-// because it lives on the page's own `window`.
-const TARGET_HANDLE = "__argentKeyboardClearTarget";
+// The probe parks the element it resolved on `window` so the re-read afterwards
+// can measure THAT element rather than whatever holds focus by then.
+//
+// The slot name is generated per call, not fixed. Two reasons, both measured:
+// nothing serializes tool calls against a device (the CDP client writes
+// immediately and the registry hands concurrent calls the same session), so two
+// clears sharing one slot interleave — B's probe overwrites A's element, or B's
+// release deletes the slot before A reads it and A reports a silent success. And
+// a fixed name is a slot the page can squat on: a non-writable decoy property
+// made every clear on that page report success forever. A fresh name per call
+// makes both far harder to hit. (`crypto.randomUUID` is the same shape
+// `cdp-client`'s `evaluateWithBinding` uses to key its own callbacks.)
+function newTargetHandle(): string {
+  return `__argentKeyboardClearTarget_${randomUUID().replace(/-/g, "")}`;
+}
 
 /**
  * Resolves the editable element that holds focus — across shadow roots and
@@ -70,7 +82,7 @@ const TARGET_HANDLE = "__argentKeyboardClearTarget";
  * Returns a JSON string (not an object) so the value crosses `Runtime.evaluate`
  * as a primitive, the same way the chromium clipboard and storage helpers do.
  */
-const FOCUSED_EDITABLE_PROBE = `(() => {
+const focusedEditableProbe = (handle: string) => `(() => {
   try {
     const docProto = typeof Document === "undefined" ? {} : Document.prototype;
     const activeOf = (Object.getOwnPropertyDescriptor(docProto, "activeElement") || {}).get;
@@ -119,21 +131,31 @@ const FOCUSED_EDITABLE_PROBE = `(() => {
         return JSON.stringify({ verdict: "not-editable", label, mac });
       }
       if (el.readOnly === true) return JSON.stringify({ verdict: "read-only", label, mac });
-      window[${JSON.stringify(TARGET_HANDLE)}] = el;
-      return JSON.stringify({ verdict: "editable", label, length: (el.value || "").length, mac });
-    }
-    if (el.isContentEditable === true) {
-      window[${JSON.stringify(TARGET_HANDLE)}] = el;
+      // A number input the user typed garbage into reports value "" while
+      // visibly holding it, so \`value.length\` alone would call the field empty
+      // and make the verification pass vacuously.
+      const bad = !!(el.validity && el.validity.badInput);
+      window[${JSON.stringify(handle)}] = el;
       return JSON.stringify({
-        verdict: "editable", label, length: (el.textContent || "").length, mac,
+        verdict: "editable", label, mac, parked: window[${JSON.stringify(handle)}] === el,
+        length: bad ? Math.max(1, (el.value || "").length) : (el.value || "").length,
       });
     }
-    // A custom element with a CLOSED shadow root is indistinguishable from an
-    // ordinary non-editable node — \`shadowRoot\` is null either way — but the
-    // clear works against one (verified: a closed-shadow <input> cleared
-    // normally). Refusing would be a hard regression for design-system
-    // components, so report "can't tell" and let the caller stay best-effort.
-    if (tag.indexOf("-") !== -1) return JSON.stringify({ verdict: "unknown", mac });
+    if (el.isContentEditable === true) {
+      window[${JSON.stringify(handle)}] = el;
+      return JSON.stringify({
+        verdict: "editable", label, mac, parked: window[${JSON.stringify(handle)}] === el,
+        length: (el.textContent || "").length,
+      });
+    }
+    // Anything else is refused, INCLUDING a custom element whose shadow root is
+    // closed and might hold an editable inside. That case is real, but a closed
+    // root is indistinguishable from a plain focusable custom element holding
+    // nothing editable (\`shadowRoot\` is null for both), and treating the whole
+    // class as "can't tell" was measurably worse: the chord then no-ops, leaves
+    // a document-wide selection, and the tool reports \`cleared: true\` with the
+    // accompanying text unwritten — issue #449 exactly. Refusing costs a working
+    // clear on closed-shadow components; guessing costs silent data corruption.
     return JSON.stringify({ verdict: "not-editable", label, mac });
   } catch (e) {
     return JSON.stringify({ verdict: "unknown" });
@@ -146,14 +168,21 @@ const FOCUSED_EDITABLE_PROBE = `(() => {
  * `tracked: false` means the element is gone — the page navigated, or the probe
  * never parked one — which is not evidence either way.
  */
-const CLEARED_TARGET_PROBE = `(() => {
+const clearedTargetProbe = (handle: string) => `(() => {
   try {
-    const el = window[${JSON.stringify(TARGET_HANDLE)}];
-    delete window[${JSON.stringify(TARGET_HANDLE)}];
+    const el = window[${JSON.stringify(handle)}];
+    delete window[${JSON.stringify(handle)}];
     if (!el) return JSON.stringify({ tracked: false });
+    // A page that replaces the field on edit (the React remount pattern) leaves
+    // this node detached and holding its OLD value forever, while the live field
+    // really was cleared. A stale read there is a false failure, so a detached
+    // node counts as "cannot tell" rather than as residue.
+    if (el.isConnected === false) return JSON.stringify({ tracked: false });
     const tag = (el.tagName || "").toUpperCase();
-    const value = tag === "INPUT" || tag === "TEXTAREA" ? (el.value || "") : (el.textContent || "");
-    return JSON.stringify({ tracked: true, length: value.length });
+    const form = tag === "INPUT" || tag === "TEXTAREA";
+    const bad = form && !!(el.validity && el.validity.badInput);
+    const value = form ? (el.value || "") : (el.textContent || "");
+    return JSON.stringify({ tracked: true, length: bad ? Math.max(1, value.length) : value.length });
   } catch (e) {
     return JSON.stringify({ tracked: false });
   }
@@ -164,6 +193,8 @@ interface FocusedEditable {
   label?: string;
   length?: number;
   mac?: boolean;
+  /** False when the page refused the slot assignment — then nothing was parked. */
+  parked?: boolean;
 }
 
 interface ClearedTarget {
@@ -187,9 +218,11 @@ async function evaluateJson<T>(api: ChromiumCdpApi, expression: string): Promise
 }
 
 /** Never throws: an unreadable page is reported as `unknown`, not as a failure. */
-async function readFocusedEditable(api: ChromiumCdpApi): Promise<FocusedEditable> {
+async function readFocusedEditable(api: ChromiumCdpApi, handle: string): Promise<FocusedEditable> {
   return (
-    (await evaluateJson<FocusedEditable>(api, FOCUSED_EDITABLE_PROBE)) ?? { verdict: "unknown" }
+    (await evaluateJson<FocusedEditable>(api, focusedEditableProbe(handle))) ?? {
+      verdict: "unknown",
+    }
   );
 }
 
@@ -217,16 +250,25 @@ const CDP_MODIFIER_META = 4;
  * letting a following `text` append to the surviving value.
  */
 export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
-  const before = await readFocusedEditable(api);
+  const handle = newTargetHandle();
+  const before = await readFocusedEditable(api, handle);
   if (before.verdict === "none" || before.verdict === "not-editable") {
     // Well-formed request against a page that cannot serve it — a 400, the same
     // treatment the un-typeable-character rejections get, and thrown before any
     // dispatch so no document-wide selection is left behind.
+    //
+    // The two halves get different advice: with nothing focused, tapping the
+    // field fixes it; with a non-text element focused (a <select>, a date
+    // picker, a custom element) tapping again will not, and saying so avoids
+    // sending the caller into a retry loop.
     throw new InvalidToolInputError(
-      `keyboard clear: no editable element has focus` +
-        (before.label ? ` (focus is on ${before.label})` : "") +
-        `. Blink's select-all is not scoped to a field, so clearing here would select the ` +
-        `page instead of emptying an input. Tap the field first, then clear.`,
+      before.label
+        ? `keyboard clear: the focused element ${before.label} is not a text field, so there ` +
+            `is nothing to empty. Blink's select-all is not scoped to a field, so clearing here ` +
+            `would select the page instead. Focus a text input, or use the element's own control.`
+        : `keyboard clear: no editable element has focus. Blink's select-all is not scoped to ` +
+            `a field, so clearing here would select the page instead of emptying an input. Tap ` +
+            `the field first, then clear.`,
       {
         error_code: FAILURE_CODES.KEYBOARD_CLEAR_NO_EDITABLE_FOCUS,
         failure_stage: "keyboard_clear_focus_chromium",
@@ -248,24 +290,33 @@ export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
 
   const modifiers = before.mac ? CDP_MODIFIER_META : CDP_MODIFIER_CTRL;
   const selectAllKey = { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers };
-  await api.dispatchKeyEvent({
-    type: "rawKeyDown",
-    ...selectAllKey,
-    commands: ["selectAll", "deleteBackward"],
-  });
-  await api.dispatchKeyEvent({ type: "keyUp", ...selectAllKey });
+  // The release runs in a `finally` so a parked node is never left pinning a
+  // detached subtree when the dispatch throws — the handle is the sole retainer
+  // (confirmed with a WeakRef + forced GC), and a per-call slot name means a
+  // leaked one is never overwritten by the next clear.
+  let after: ClearedTarget | undefined;
+  try {
+    await api.dispatchKeyEvent({
+      type: "rawKeyDown",
+      ...selectAllKey,
+      commands: ["selectAll", "deleteBackward"],
+    });
+    await api.dispatchKeyEvent({ type: "keyUp", ...selectAllKey });
+  } finally {
+    after = await evaluateJson<ClearedTarget>(api, clearedTargetProbe(handle));
+  }
 
   // `unknown` before means the page was unreadable, so no element was parked and
-  // there is nothing to verify against — stay best-effort rather than inventing
-  // a failure.
-  if (before.verdict === "unknown") return;
+  // there is nothing to verify against; `parked: false` means the assignment
+  // itself did not take (a page can pre-define the slot non-writable). Either
+  // way, stay best-effort rather than inventing a failure.
+  if (before.verdict !== "editable" || before.parked === false) return;
 
-  // Re-read the element the probe parked, NOT whatever holds focus now. Clearing
-  // routinely moves focus (a page that blurs on empty, a re-render, an app
-  // shortcut), so `activeElement` afterwards cannot tell "emptied, then focus
-  // moved" from "never emptied, and focus moved" — and the second is exactly
-  // what an app cancelling the chord produces.
-  const after = await evaluateJson<ClearedTarget>(api, CLEARED_TARGET_PROBE);
+  // The re-read measures the element the probe parked, NOT whatever holds focus
+  // now. Clearing routinely moves focus (a page that blurs on empty, a
+  // re-render, an app shortcut), so `activeElement` afterwards cannot tell
+  // "emptied, then focus moved" from "never emptied, and focus moved" — and the
+  // second is exactly what an app cancelling the chord produces.
   if (!after?.tracked) return;
   const remaining = after.length ?? 0;
   if (remaining === 0) return;

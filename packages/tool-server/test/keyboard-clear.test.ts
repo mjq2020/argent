@@ -636,13 +636,30 @@ describe("keyboard clear — Chromium (CDP)", () => {
       probes,
       api: {
         dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
+        // Routed by CALL ORDER, not by matching text in the expression: the two
+        // probes are always issued resolve-then-release, and keying off a
+        // substring of the production source would let a reworded probe keep
+        // every test green while answering the wrong one.
         evaluate: async (expression: string) => {
           probes.push(expression);
-          return JSON.stringify(expression.includes("delete window[") ? after : before);
+          return JSON.stringify(probes.length === 1 ? before : after);
         },
       },
     };
   }
+
+  it("issues two DISTINCT probes — resolve, then release", () => {
+    // Guards the routing the rest of this block depends on. If both probes were
+    // the same expression, every "after" case here would silently be testing the
+    // "before" one.
+    const { probes, api } = recordingApi();
+    return makeChromiumImpl(registryWith(api))
+      .handler({}, { udid: CHROMIUM.id, clear: true, delayMs: 0 }, CHROMIUM)
+      .then(() => {
+        expect(probes).toHaveLength(2);
+        expect(probes[0]).not.toBe(probes[1]);
+      });
+  });
 
   it("dispatches selectAll+deleteBackward as `commands`, with a real modifier", async () => {
     const { events, api } = recordingApi();
@@ -761,6 +778,71 @@ describe("keyboard clear — Chromium (CDP)", () => {
         CHROMIUM
       )
     ).rejects.toThrow(/still holds 8 character\(s\)/);
+  });
+
+  it("does not fail on a stale read of a node the page detached", async () => {
+    // A page that replaces the field on edit (the React remount pattern) leaves
+    // the parked node detached and holding its OLD value, while the live field
+    // really was cleared. The release probe reports that as untracked; treating
+    // it as residue would fail a clear that worked.
+    const { api } = recordingApi(
+      { verdict: "editable", label: "INPUT#q", length: 8, mac: true },
+      { tracked: false }
+    );
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(result.cleared).toBe(true);
+  });
+
+  it("stays best-effort when the page refused the parked handle", async () => {
+    // A page can pre-define the slot non-writable; the assignment then fails
+    // silently and the release probe would read the page's decoy instead of the
+    // field. The probe reports the failed park, and nothing is verified against.
+    const { api } = recordingApi(
+      { verdict: "editable", label: "INPUT#q", length: 8, mac: true, parked: false },
+      { tracked: true, length: 8 }
+    );
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(result.cleared).toBe(true);
+  });
+
+  it("releases the parked element even when the dispatch throws", async () => {
+    // The handle is the sole retainer of the node, so a dispatch failure must
+    // not leave it pinning a detached subtree on the page.
+    const probes: string[] = [];
+    const api = {
+      dispatchKeyEvent: async () => {
+        throw new Error("CDP socket closed");
+      },
+      evaluate: async (expression: string) => {
+        probes.push(expression);
+        return JSON.stringify(
+          probes.length === 1
+            ? { verdict: "editable", label: "INPUT#q", length: 8, mac: true }
+            : { tracked: false }
+        );
+      },
+    };
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/CDP socket closed/);
+    expect(probes).toHaveLength(2);
   });
 
   it("does not fail when the field blurred or went away as a result of clearing", async () => {
