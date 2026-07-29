@@ -32,9 +32,11 @@ export interface KeyboardResult {
    * How much that is worth depends on what the backend can observe, and only
    * one of them can observe anything:
    *
-   * - Chromium reads the field before and after. A clear that cannot take
-   *   effect throws rather than returning, so `cleared: true` there means the
-   *   field was seen empty.
+   * - Chromium reads the field before and after, and throws when it observes
+   *   the value survive. It cannot always observe: a page it can't read (a
+   *   cross-origin iframe), a field the page detached, or a slot assignment the
+   *   page refused all fall back to best-effort, so `cleared: true` there means
+   *   "seen empty, or not observable" — never "seen NOT empty".
    * - Android parses the `input keycombination` output, so a level without the
    *   subcommand takes the measured delete path instead of silently degrading
    *   to a one-character backspace. It does not read the field back, so a

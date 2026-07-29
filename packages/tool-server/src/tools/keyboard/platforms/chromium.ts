@@ -61,8 +61,10 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
   }
 
   // Clear before text. `clearChromiumField` refuses up front if nothing
-  // editable holds focus, and throws if the field is not empty afterwards, so
-  // reaching the typing loop below means the field really was emptied.
+  // editable holds focus, and throws when it OBSERVES the value survive — so
+  // reaching the typing loop means the field was either seen empty or could not
+  // be read at all (a cross-origin iframe, a detached node). It never means the
+  // field was seen to still hold its value.
   if (params.clear) {
     await clearChromiumField(api);
     await sleep(delay);
