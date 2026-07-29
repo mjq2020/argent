@@ -32,13 +32,13 @@ export async function typeSimulatorServer(
   // Left GUI/Command for the select-all in a clear). The modifier is held across
   // the whole down/up pair so the guest sees a real chord, not two taps.
   //
-  // The release is in a `finally` because modifier state lives in the GUEST, and
-  // nothing in the repo ever emits a "release everything": if control left
-  // between the two writes — the simulator-server child dying mid-chord, an
-  // aborted request — the modifier would stay latched with no recovery path, and
-  // every subsequent keystroke would become a chord. A stuck Shift only
-  // mis-cases text; a stuck Command turns the rest of the call into system
-  // shortcuts (Cmd+H backgrounds the app).
+  // The release is in a `finally` because modifier state lives in the GUEST and
+  // nothing in the repo ever emits a "release everything": a modifier left down
+  // stays down, turning every subsequent keystroke into a chord — a stuck Shift
+  // only mis-cases text, a stuck Command runs system shortcuts (Cmd+H
+  // backgrounds the app). Neither transport currently throws from `pressKey`
+  // (the local one writes to a pipe, the remote one is fire-and-forget), so this
+  // is a guard against a future one that does, not a fix for a reachable bug.
   const pressKeyCode = async (keyCode: number, modifierKeyCode?: number) => {
     if (modifierKeyCode !== undefined) {
       api.pressKey("Down", modifierKeyCode);
@@ -61,7 +61,7 @@ export async function typeSimulatorServer(
   // excluded: they are an implementation detail of emptying the field, and what
   // that costs differs wildly per backend (two HID presses here; on Android one
   // `input keycombination` plus a `KEYCODE_DEL`, or on a level without that
-  // subcommand a MOVE_END plus one delete per character — up to 168 key events;
+  // subcommand a MOVE_END plus one delete per character — up to 209 key events;
   // two CDP key events on Chromium). Counting them would make the same request
   // report a different `keys` on every platform. The clear is reported by
   // `cleared` instead.

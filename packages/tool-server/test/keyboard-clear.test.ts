@@ -62,8 +62,9 @@ const APPLE_TV: DeviceInfo = { id: "TV-UDID", platform: "ios", kind: "simulator"
 const IOS_REMOTE: DeviceInfo = { id: "remote-udid", platform: "ios-remote", kind: "simulator" };
 
 // `2>&1` folds the device's stderr into the stream `adbShell` returns: API 30
-// writes its usage dump to stderr while API 34/36 write "Unknown command" to
-// stdout, and without the redirect the API 30 case is invisible.
+// writes its usage dump to stderr, and without the redirect that case looks
+// exactly like a success. (`Unknown command: …` is the other wording `input`
+// uses for a subcommand it does not have, on stdout — see the test for it.)
 const SELECT_ALL_CMD = "input keycombination 113 29 2>&1"; // KEYCODE_CTRL_LEFT + KEYCODE_A
 const DEL_CMD = "input keyevent 67"; // KEYCODE_DEL
 
@@ -363,11 +364,11 @@ describe("keyboard clear — Android (adb input)", () => {
 
   it("scales the delete run to a long field rather than truncating it", async () => {
     seedLegacyLevel();
-    seedDump(dumpWith("x".repeat(300)));
+    seedDump(dumpWith("x".repeat(180)));
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    expect(deleteRun(inputCmds()[1]!)).toHaveLength(300 + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(180 + 8);
   });
 
   it("refuses a field too long to delete instead of half-deleting it", async () => {
@@ -419,21 +420,62 @@ describe("keyboard clear — Android (adb input)", () => {
 
   it("measures the focused EDITABLE node, not a focused container above it", async () => {
     // A dump carries every window, so more than one node can be `focused` — an
-    // IME or overlay contributes its own. Taking the first in document order
-    // reads that container's empty `text` as "the field is empty" and issues
-    // only the margin, leaving the real value almost intact while reporting
-    // `cleared: true`.
+    // IME or overlay contributes its own, and a focused non-text container
+    // reports its own `text`.
+    //
+    // Node order and lengths are chosen so that BOTH rules are load-bearing:
+    // the WebView's text is the longest, so dropping the `EditText` filter
+    // measures 90 rather than 42; and the short EditText is last in document
+    // order, so it is the first one the walk reaches — taking "the first
+    // focused match" instead of the longest measures 10. Only filtering to
+    // editable nodes AND taking the longest yields 42.
     seedLegacyLevel();
     seedDump(
       `<?xml version='1.0' encoding='UTF-8'?><hierarchy rotation="0">` +
-        `<node index="0" text="" class="android.webkit.WebView" password="false" focused="true" />` +
-        `<node index="1" text="${"y".repeat(42)}" class="android.widget.EditText" password="false" focused="true" />` +
+        `<node index="0" text="${"y".repeat(42)}" class="android.widget.EditText" password="false" focused="true" />` +
+        `<node index="1" text="${"w".repeat(90)}" class="android.webkit.WebView" password="false" focused="true" />` +
+        `<node index="2" text="${"z".repeat(10)}" class="android.widget.EditText" password="false" focused="true" />` +
         `</hierarchy>`
     );
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
     expect(deleteRun(inputCmds()[1]!)).toHaveLength(42 + 8);
+  });
+
+  it("treats a focused editable with no `text` attribute as unmeasurable", async () => {
+    // Absent is not empty. Reading a missing attribute as 0 would issue only
+    // the margin against a field that may be full — the silent half-clear the
+    // measurement exists to prevent.
+    seedLegacyLevel();
+    seedDump(
+      `<?xml version='1.0' encoding='UTF-8'?><hierarchy rotation="0">` +
+        `<node index="0" class="android.widget.EditText" password="false" focused="true" />` +
+        `</hierarchy>`
+    );
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(160 + 8);
+  });
+
+  it("clears a field exactly at the length limit, and refuses one past it", async () => {
+    // Pins the boundary itself: without this the limit is only constrained to
+    // sit somewhere below the over-length test's value, so it could be lowered
+    // to reject fields that work today.
+    seedLegacyLevel();
+    seedDump(dumpWith("x".repeat(200)));
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(200 + 8);
+
+    adbShell.mockClear();
+    adbExecOutBinary.mockClear();
+    seedLegacyLevel();
+    seedDump(dumpWith("x".repeat(201)));
+    await expect(
+      makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
+    ).rejects.toThrow(/201 characters/);
+    expect(inputCmds()).toEqual([SELECT_ALL_CMD]);
   });
 
   it("measures a field whose text contains a double quote", async () => {
@@ -573,18 +615,22 @@ describe("keyboard clear — tool schema", () => {
 });
 
 describe("keyboard clear — Chromium (CDP)", () => {
-  // The clear reads the focused element before and after dispatching, so a
-  // Chromium stub has to answer `evaluate`. Default: a focused, editable field
-  // that is empty afterwards — i.e. a clear that worked.
+  // The clear runs two different probes: one resolving the focused editable
+  // (and parking it on `window`), then one re-reading THAT parked element. The
+  // stub answers them separately, keyed off the handle release the second one
+  // does, so a test can make the field's before/after states disagree.
+  // Defaults describe a clear that worked.
   function recordingApi(
-    verdicts: Array<Record<string, unknown>> = [
-      { verdict: "editable", label: "INPUT#email", length: 8, selection: 0 },
-      { verdict: "editable", label: "INPUT#email", length: 0, selection: 0 },
-    ]
+    before: Record<string, unknown> = {
+      verdict: "editable",
+      label: "INPUT#email",
+      length: 8,
+      mac: true,
+    },
+    after: Record<string, unknown> = { tracked: true, length: 0 }
   ) {
     const events: KeyEventArgs[] = [];
     const probes: string[] = [];
-    let probeCount = 0;
     return {
       events,
       probes,
@@ -592,8 +638,7 @@ describe("keyboard clear — Chromium (CDP)", () => {
         dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
         evaluate: async (expression: string) => {
           probes.push(expression);
-          const verdict = verdicts[Math.min(probeCount++, verdicts.length - 1)];
-          return JSON.stringify(verdict);
+          return JSON.stringify(expression.includes("delete window[") ? after : before);
         },
       },
     };
@@ -620,18 +665,43 @@ describe("keyboard clear — Chromium (CDP)", () => {
     // unmodified `a`, which fires whatever the app binds to that key and lets an
     // app-level preventDefault cancel the clear outright — measured on Chrome
     // 150: the field kept its value and the call still reported success.
-    expect(down.modifiers).toBe(process.platform === "darwin" ? 4 : 2);
+    expect(down.modifiers).toBe(4); // Meta — the probe reported a mac renderer
     expect(events.every((e) => e.modifiers === down.modifiers)).toBe(true);
-    // `commands` belongs only on the rawKeyDown; Blink ignores it elsewhere.
+    // `commands` belongs only on the rawKeyDown. Blink honours it on `keyDown`
+    // and `char` too, but not `keyUp` — and rawKeyDown is the type a real
+    // chord's first event carries, delivering no character of its own.
     expect(events.filter((e) => e.commands !== undefined)).toHaveLength(1);
     expect(result.cleared).toBe(true);
+  });
+
+  it("takes the chord's modifier from the RENDERER's platform, not the host's", async () => {
+    // The tool-server can reach a renderer running elsewhere — `adb forward` and
+    // an SSH tunnel both present as a local CDP port — so the host's own
+    // platform is not evidence of which chord that page's users press. The
+    // modifier decides which app shortcuts fire, so it has to match the page.
+    const { events } = await (async () => {
+      const { events, api } = recordingApi({
+        verdict: "editable",
+        label: "INPUT#email",
+        length: 8,
+        mac: false,
+      });
+      await makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+        CHROMIUM
+      );
+      return { events };
+    })();
+
+    expect(events[0]!.modifiers).toBe(2); // Ctrl
   });
 
   it("refuses before dispatching when nothing editable has focus", async () => {
     // Blink's selectAll is not scoped to a field: with focus on the body it
     // selects the whole document and the delete no-ops, so the page is left with
     // a document-wide selection and the field untouched — reported as success.
-    const { events, api } = recordingApi([{ verdict: "none", selection: 0 }]);
+    const { events, api } = recordingApi({ verdict: "none" });
 
     await expect(
       makeChromiumImpl(registryWith(api)).handler(
@@ -645,9 +715,7 @@ describe("keyboard clear — Chromium (CDP)", () => {
   });
 
   it("refuses when focus is on a non-editable element", async () => {
-    const { events, api } = recordingApi([
-      { verdict: "not-editable", label: "BUTTON#submit", selection: 0 },
-    ]);
+    const { events, api } = recordingApi({ verdict: "not-editable", label: "BUTTON#submit" });
 
     await expect(
       makeChromiumImpl(registryWith(api)).handler(
@@ -659,15 +727,32 @@ describe("keyboard clear — Chromium (CDP)", () => {
     expect(events).toEqual([]);
   });
 
+  it("refuses a readonly field instead of selecting the page around it", async () => {
+    // Measured on Chrome 150: the dispatch succeeds against a readonly input,
+    // deletes nothing, and leaves the whole field selected. Without this guard
+    // the call would fall through to the post-check and be reported as an
+    // ineffective clear (a 500) rather than the un-clearable target it is.
+    const { events, api } = recordingApi({ verdict: "read-only", label: "INPUT#total" });
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/INPUT#total is read-only/);
+    expect(events).toEqual([]);
+  });
+
   it("fails loudly when the field still holds text afterwards", async () => {
     // A page that cancels the keydown, a rich-text editor that cancels the
     // `beforeinput`, or a Chromium too old to know `commands` all produce a
     // successful CDP reply and an unchanged field. Reporting `cleared: true`
     // there is what turns `{ clear, text }` into an append onto the old value.
-    const { api } = recordingApi([
-      { verdict: "editable", label: "INPUT#email", length: 8, selection: 0 },
-      { verdict: "editable", label: "INPUT#email", length: 8, selection: 0 },
-    ]);
+    const { api } = recordingApi(
+      { verdict: "editable", label: "INPUT#email", length: 8 },
+      { tracked: true, length: 8 }
+    );
 
     await expect(
       makeChromiumImpl(registryWith(api)).handler(
@@ -682,10 +767,10 @@ describe("keyboard clear — Chromium (CDP)", () => {
     // Only positively-observed residue counts as a failure. A page that drops
     // focus once its field empties (or swaps the node out) is reacting to the
     // clear, not ignoring it — failing there would break a working clear.
-    const { api } = recordingApi([
-      { verdict: "editable", label: "INPUT#q", length: 12, selection: 0 },
-      { verdict: "none", selection: 0 },
-    ]);
+    const { api } = recordingApi(
+      { verdict: "editable", label: "INPUT#q", length: 12 },
+      { tracked: true, length: 0 }
+    );
 
     const result = await makeChromiumImpl(registryWith(api)).handler(
       {},
@@ -699,7 +784,7 @@ describe("keyboard clear — Chromium (CDP)", () => {
   it("stays best-effort when the page cannot be read", async () => {
     // Focus inside a cross-origin iframe, or an `evaluate` that throws. There is
     // nothing to verify against, so refusing would break clears that work today.
-    const { events, api } = recordingApi([{ verdict: "unknown" }]);
+    const { events, api } = recordingApi({ verdict: "unknown" });
 
     const result = await makeChromiumImpl(registryWith(api)).handler(
       {},
@@ -837,9 +922,11 @@ describe("keyboard clear — unsupported platforms", () => {
 
   it("an Android TV target routes clear to the TV rejection, not to adb", async () => {
     // Joins the two halves the other tests check separately: `makeAndroidImpl`
-    // routes a TV target to `typeTv`, and `typeTv` rejects clear. Without this,
-    // an Android TV serial could reach `typeAndroidPhone` and silently run the
-    // select-all chord against a device that cannot use it.
+    // routes a TV target to `typeTv`, and `typeTv` rejects clear. Without it an
+    // Android TV serial reaches `typeAndroidPhone` instead — where the chord
+    // would in fact go over the wire, since Android TV shares the phone's
+    // on-device `input` sink. That is exactly why routing is what has to be
+    // pinned: nothing downstream would refuse the call.
     adbShell.mockClear();
     isAndroidTv.mockResolvedValueOnce(true);
 

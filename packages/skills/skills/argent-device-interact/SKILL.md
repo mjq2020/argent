@@ -180,11 +180,11 @@ Special keys: `enter`, `escape`, `backspace`, `tab`, `space`, `arrow-up`, `arrow
 
 - Order within one call is always **clear → text → key**, so the call above replaces the value and submits in a single tool call.
 - `{ "udid": "<UDID>", "clear": true }` alone just empties the field.
-- **Focus a text field first.** A clear with nothing editable focused is an error, not a no-op — on Chromium it is refused outright, since a select-all there would select the page rather than empty an input.
-- Supported on iOS, Android and Chromium. Rejected — before anything is typed — on Vega and on TV targets, which have no clear primitive; a silent no-op would be worse than an error.
-- The result reports `"cleared": true`. A clear that could not take effect **throws** instead of returning, so a `{ clear, text }` call never reports success having appended to a value that survived.
+- **Focus a text field first.** On Chromium a clear with nothing editable focused is refused outright, since a select-all there would select the page rather than empty an input. On iOS and Android it is dispatched blind, so an unfocused clear does nothing and still reports success.
+- Supported on iOS, Android and Chromium. Rejected — before anything is typed — on Vega and on TV targets; a silent no-op would be worse than an error.
+- The result reports `"cleared": true`, but only Chromium reads the field back and **throws** when the clear did not take effect. On iOS and Android it means the clear was dispatched, not that the field was seen empty — `describe` the field if that matters.
 - The clear does not count towards `keys` — that reports only the characters and named key you asked to be entered, so `{ "clear": true }` alone returns `"keys": 0`.
-- On older Android levels (those whose `input` has no `keycombination` subcommand) the clear falls back to deleting backwards from the end of the line, sized to the field's measured contents. Single-line fields are emptied exactly, but **a multi-line field keeps whatever sits below the caret** — assert the result if you are clearing a multi-line input on an old device. A field longer than 400 characters is refused on those levels rather than partly deleted.
+- On older Android levels (those whose `input` has no `keycombination` subcommand) the clear falls back to deleting backwards from the end of the line, sized to the field's measured contents. Single-line fields are emptied exactly, but **a multi-line field keeps whatever sits below the caret** — assert the result if you are clearing a multi-line input on an old device. A field longer than 200 characters is refused there rather than partly deleted; a **password** field is the exception, since its length is unreadable, so it gets a fixed 160 backspaces and a longer value would keep its head.
 
 **Typing secrets.** To enter a credential without its plaintext ever entering your context, transcript, or logs, use a secret placeholder in `text` (works in `keyboard`, `paste`, `run-sequence` keyboard steps, and flow `type` steps):
 

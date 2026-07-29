@@ -87,11 +87,13 @@ export interface KeyEventArgs {
    * receives a bare unmodified letter, which fires any shortcut the app binds to
    * that key and lets an app-level `preventDefault` cancel the edit outright.
    *
-   * Only meaningful on `rawKeyDown` (the type Blink routes through its editor
-   * command handler); on `keyDown`/`keyUp` it is silently ignored. CDP also
-   * ignores unknown parameters silently, so on a Chromium old enough to predate
-   * this field the commands are dropped with no error — a caller that needs to
-   * know the edit happened has to observe the page, not the CDP reply.
+   * Honoured on `rawKeyDown`, `keyDown` and `char`, but NOT on `keyUp` (Chrome
+   * 150, 3/3 runs each). `rawKeyDown` is what this repo sends — it is the type
+   * a real chord's first event carries, and it delivers no character of its
+   * own. CDP also ignores unknown parameters silently, so on a Chromium old
+   * enough to predate this field the commands are dropped with no error — a
+   * caller that needs to know the edit happened has to observe the page, not
+   * the CDP reply.
    */
   commands?: string[];
 }

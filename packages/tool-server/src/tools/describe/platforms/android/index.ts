@@ -78,10 +78,19 @@ export async function describeAndroid(
   // for why `adb shell` cannot be used for this.
   const [size, raw] = await Promise.all([getAndroidScreenSize(serial), dumpAndroidUiXml(serial)]);
   const trimmed = raw.trim();
-  if (/^ERROR:/i.test(trimmed) || (!trimmed.includes("<hierarchy") && /error/i.test(trimmed))) {
+  // No `<hierarchy>` means the capture did not happen, whatever the device said
+  // about it. `ERROR: …` is the usual wording, but not the only one: a dump that
+  // loses the race for the device's single UiAutomation connection comes back as
+  // a bare `Killed` (adb still exits 0) — measured by running three concurrent
+  // dumps, and now reachable more often because the keyboard clear is a third
+  // caller. Testing for the hierarchy instead of for error wording covers both,
+  // and keeps this from falling through to the parser, which would report the
+  // far less actionable "failed to parse" for what is really "try again".
+  if (!trimmed.includes("<hierarchy")) {
     throw new FailureError(
-      `uiautomator could not capture the screen: ${trimmed}. ` +
-        `Common causes: device locked / keyguard, DRM or secure overlay, Play Integrity screen. ` +
+      `uiautomator could not capture the screen: ${trimmed || "(no output)"}. ` +
+        `Common causes: device locked / keyguard, DRM or secure overlay, Play Integrity screen, ` +
+        `or another uiautomator dump holding the device. ` +
         `Unlock the device or take a screenshot as a fallback.`,
       {
         // The adb wrapper exits 0, but the uiautomator tool it ran reported an

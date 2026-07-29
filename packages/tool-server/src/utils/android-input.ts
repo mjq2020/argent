@@ -271,19 +271,43 @@ const DELETE_MARGIN = 8;
 
 // Used when the focused field's contents cannot be measured: no focused
 // *editable* node in the dump, a password field (whose text uiautomator refuses
-// to report), or a dump that failed outright. Comfortably covers a credential or
-// a single-line form field. Against an idle field the run costs ~0.8s, since the
+// to report), or a dump that failed outright. Covers any credential or
+// single-line form field. Against an idle field the run costs ~0.8s, since the
 // cost is dominated by one `input` VM start; against a field that does work per
-// keystroke (a live-filtering search box) budget several seconds — which is what
-// ANDROID_CLEAR_BUDGET_MS is sized for.
+// keystroke (a live-filtering search box) budget several seconds.
+//
+// This IS the fixed run the measurement exists to avoid, so it carries that
+// shape's failure with it: a field longer than this keeps its head, and — unlike
+// a measured field — there is no length to compare against MAX_DELETE_COUNT, so
+// it cannot be refused either. It is accepted only because the cases that reach
+// it are ones where nothing longer is plausible (a password field is the main
+// one, and 160 is far past any credential).
 const BLIND_DELETE_COUNT = 160;
 
-// Longest field this path will attempt. Sized so the run fits inside
-// ANDROID_CLEAR_BUDGET_MS even at the slow end of the measured per-keystroke
-// cost, and comfortably above the single-line inputs this fallback exists for
-// (a login, a search box, a form field). Beyond it the clear is refused rather
+// Longest field this path will attempt; beyond it the clear is refused rather
 // than started — see clearByDeleting.
-const MAX_DELETE_COUNT = 400;
+//
+// Sized from the delete leg's actual share of ANDROID_CLEAR_BUDGET_MS at the
+// SLOWEST rate measured on device. Every key is delivered to the app, so the
+// cost is the app's per-keystroke work: 608 deletes took 42s against one live
+// field (~69ms/key) versus 0.8s against an idle one. The probe and dump spend
+// ~3s of the 20s budget, leaving ~17s; at 69ms/key that affords ~245 keys, so
+// 200 (+ DELETE_MARGIN = 208 keys ≈ 14s at that rate) stays inside it with room
+// to spare. Anything larger could time out mid-run and leave the partly-deleted
+// field this refusal exists to prevent.
+//
+// 200 characters is well past the single-line inputs this fallback serves — a
+// login, a search box, a form field.
+const MAX_DELETE_COUNT = 200;
+
+// Per-delete cost used to decide whether the run fits in what is LEFT of the
+// budget. Deliberately the slow end of the measured range, not the average: the
+// cost is the app's per-keystroke work, which spans 16ms/key against an idle
+// native EditText to 69ms/key against a live-filtering field on API 30. Guessing
+// low would let a run start that cannot finish, which is the failure this
+// estimate exists to prevent — and guessing high only refuses a clear the caller
+// can retry or do another way.
+const SLOW_MS_PER_DELETE = 70;
 
 /**
  * Empty the focused field on an Android level whose `input` has no
@@ -315,32 +339,43 @@ const MAX_DELETE_COUNT = 400;
  */
 async function clearByDeleting(serial: string, deadline: number): Promise<void> {
   const count = (await measureFocusedTextLength(serial, deadline)) ?? BLIND_DELETE_COUNT;
-  if (count > MAX_DELETE_COUNT) {
-    // Refuse BEFORE touching the field. Every delete is delivered to the app, so
-    // a long field's run is slow enough to overrun the budget mid-way (measured
-    // on a live emulator: 608 deletes took 14s against one field and 42s against
-    // another, versus 0.8s against an already-empty one — the cost is the app's
-    // per-keystroke work, not adb's). Letting it start and time out would leave a
-    // partly-deleted field behind, which is the corruption this whole path is
-    // built to avoid; refusing up front leaves the value intact.
+  const keys = count + DELETE_MARGIN;
+  // Refuse BEFORE touching the field, on BOTH grounds. A cap alone is not
+  // enough: it is static, while the time left to spend is not — a cold
+  // `uiautomator` on a busy emulator can take 10s of the 20s budget, and the
+  // largest run the cap allows would then abort part-way through. Both checks
+  // exist because they fail for different reasons: the cap says "no plausible
+  // budget covers this field", the deadline says "this particular call has
+  // already spent too much to start".
+  const remainingMs = deadline - Date.now();
+  const estimatedMs = keys * SLOW_MS_PER_DELETE;
+  if (count > MAX_DELETE_COUNT || estimatedMs > remainingMs) {
     throw new InvalidToolInputError(
       `keyboard clear: the focused field holds ${count} characters, more than this Android ` +
-        `level can clear. Without \`input keycombination\` (added after API 30) the only ` +
-        `available clear is one backspace per character, which is too slow to finish ` +
-        `reliably past ${MAX_DELETE_COUNT}. The field was NOT modified. Clear it with the ` +
-        `app's own affordance, or use an emulator on a newer API level.`,
+        `level can clear within the request budget. Without \`input keycombination\` (added ` +
+        `after API 30) the only available clear is one backspace per character, which is too ` +
+        `slow to finish reliably past ${MAX_DELETE_COUNT}. The field was NOT modified. Clear ` +
+        `it with the app's own affordance, or use an emulator on a newer API level.`,
       {
-        error_code: FAILURE_CODES.KEYBOARD_CLEAR_INEFFECTIVE,
+        // Its own code rather than KEYBOARD_CLEAR_INEFFECTIVE: this is a
+        // caller-fixable rejection (a 400) that changed nothing, whereas
+        // INEFFECTIVE is an internal fault (a 500) after the edit was attempted.
+        // Sharing one code would mix the two in any dashboard slicing on it.
+        error_code: FAILURE_CODES.KEYBOARD_CLEAR_FIELD_TOO_LONG,
         failure_stage: "keyboard_clear_too_long_android",
         error_kind: "unsupported",
       }
     );
   }
-  const dels = Array.from({ length: count + DELETE_MARGIN }, () => KEYCODE_DEL).join(" ");
-  // One invocation for the whole run: `input keyevent` accepts a keycode list,
-  // and the per-key cost is negligible next to starting the app-process VM.
+  const dels = Array.from({ length: keys }, () => KEYCODE_DEL).join(" ");
+  // One invocation for the whole run: `input keyevent` accepts a keycode list.
+  // No floor on this timeout, unlike the read legs: the check above already
+  // established the remaining budget covers the run, and killing adb part-way
+  // through would leave exactly the half-deleted field this path avoids —
+  // deletes already delivered to the device keep landing after the client gives
+  // up.
   await adbShell(serial, `input keyevent ${KEYCODE_MOVE_END} ${dels}`, {
-    timeoutMs: clearLegTimeout(deadline, ANDROID_CLEAR_BUDGET_MS),
+    timeoutMs: Math.max(1, deadline - Date.now()),
   });
 }
 

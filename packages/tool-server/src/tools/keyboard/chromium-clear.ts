@@ -39,9 +39,14 @@ import { FAILURE_CODES, FailureError } from "@argent/registry";
 import type { ChromiumCdpApi } from "../../blueprints/chromium-cdp";
 import { InvalidToolInputError } from "../../utils/capability";
 
+// Where the probe parks the element it resolved, so the re-read afterwards can
+// measure THAT element rather than whatever holds focus by then. Namespaced
+// because it lives on the page's own `window`.
+const TARGET_HANDLE = "__argentKeyboardClearTarget";
+
 /**
- * Reads whatever editable element holds focus, across shadow roots and
- * same-origin iframes.
+ * Resolves the editable element that holds focus — across shadow roots and
+ * same-origin iframes — and remembers it on `window` for the re-read.
  *
  * `activeElement` alone is both too weak and too strong as a focus test
  * (measured on Chrome 150): with focus inside an open shadow root the top-level
@@ -50,6 +55,12 @@ import { InvalidToolInputError } from "../../utils/capability";
  * focused `<button>` is a perfectly good `activeElement` and produces the same
  * useless document-wide selection as body focus. So the probe descends to the
  * innermost active element and then asks whether THAT one is a text field.
+ *
+ * Parking the element is what makes the verification unambiguous. Clearing a
+ * field routinely moves focus — a page that blurs on empty, a node replaced by
+ * a re-render, an app shortcut that jumps elsewhere — so re-reading
+ * `activeElement` afterwards cannot tell "emptied, then focus moved" from
+ * "never emptied, and focus moved". Re-reading the SAME element can.
  *
  * `activeElement` is read through the `Document.prototype` accessor because the
  * document's named getter is `[LegacyOverrideBuiltIns]`: a `<form
@@ -64,6 +75,10 @@ const FOCUSED_EDITABLE_PROBE = `(() => {
     const docProto = typeof Document === "undefined" ? {} : Document.prototype;
     const activeOf = (Object.getOwnPropertyDescriptor(docProto, "activeElement") || {}).get;
     const active = (d) => (activeOf ? activeOf.call(d) : d.activeElement);
+    // What a user pressing "select all" on THIS machine would send, so the page
+    // sees the real chord. Read from the renderer, not the tool-server host —
+    // CDP reaches remote renderers through a forwarded local port.
+    const mac = /Mac|iPhone|iPad/i.test((navigator && navigator.platform) || "");
     let doc = document;
     let el = active(doc);
     // Bounded: a malformed page could otherwise cycle host → shadow → host.
@@ -74,7 +89,7 @@ const FOCUSED_EDITABLE_PROBE = `(() => {
         try { inner = el.contentDocument; } catch (e) { inner = null; }
         // Cross-origin: unreadable by design, so report "can't tell" rather
         // than a wrong verdict.
-        if (!inner) return JSON.stringify({ verdict: "unknown" });
+        if (!inner) return JSON.stringify({ verdict: "unknown", mac });
         doc = inner;
         el = active(inner);
         continue;
@@ -83,28 +98,64 @@ const FOCUSED_EDITABLE_PROBE = `(() => {
       if (shadow && shadow.activeElement) { el = shadow.activeElement; continue; }
       break;
     }
-    const selection = String((doc.getSelection && doc.getSelection()) || "").length;
     if (!el || el === doc.body || el === doc.documentElement) {
-      return JSON.stringify({ verdict: "none", selection });
+      return JSON.stringify({ verdict: "none", mac });
     }
     const tag = (el.tagName || "").toUpperCase();
     const label = tag + (el.id ? "#" + el.id : "");
-    const contentEditable = el.isContentEditable === true;
-    // Every <input> type that holds no user-editable text: a clear against one
-    // is meaningless, and dispatching would select the document instead.
-    const opaqueInput = /^(button|submit|reset|checkbox|radio|file|image|range|color|hidden)$/i;
-    const editable =
-      contentEditable ||
-      tag === "TEXTAREA" ||
-      (tag === "INPUT" && !opaqueInput.test(el.type || "text"));
-    if (!editable) return JSON.stringify({ verdict: "not-editable", label, selection });
-    if (el.readOnly === true || el.disabled === true) {
-      return JSON.stringify({ verdict: "read-only", label, selection });
+    // Form controls first: \`isContentEditable\` is INHERITED, so an <input>
+    // inside a contenteditable host reports true, and reading its textContent
+    // (always "") would make every verification pass vacuously. A <textarea>
+    // there is worse — textContent is its DEFAULT value and never tracks
+    // \`value\`, so a clear that worked would look like a failure.
+    const formControl = tag === "INPUT" || tag === "TEXTAREA";
+    // Every <input> type that holds no user-editable text. The temporal types
+    // are in here because the chord no-ops against them and leaves a selection
+    // behind — measured on Chrome 150.
+    const opaqueInput =
+      /^(button|submit|reset|checkbox|radio|file|image|range|color|hidden|date|time|datetime-local|month|week)$/i;
+    if (formControl) {
+      if (tag === "INPUT" && opaqueInput.test(el.type || "text")) {
+        return JSON.stringify({ verdict: "not-editable", label, mac });
+      }
+      if (el.readOnly === true) return JSON.stringify({ verdict: "read-only", label, mac });
+      window[${JSON.stringify(TARGET_HANDLE)}] = el;
+      return JSON.stringify({ verdict: "editable", label, length: (el.value || "").length, mac });
     }
-    const value = contentEditable ? (el.textContent || "") : (el.value || "");
-    return JSON.stringify({ verdict: "editable", label, length: value.length, selection });
+    if (el.isContentEditable === true) {
+      window[${JSON.stringify(TARGET_HANDLE)}] = el;
+      return JSON.stringify({
+        verdict: "editable", label, length: (el.textContent || "").length, mac,
+      });
+    }
+    // A custom element with a CLOSED shadow root is indistinguishable from an
+    // ordinary non-editable node — \`shadowRoot\` is null either way — but the
+    // clear works against one (verified: a closed-shadow <input> cleared
+    // normally). Refusing would be a hard regression for design-system
+    // components, so report "can't tell" and let the caller stay best-effort.
+    if (tag.indexOf("-") !== -1) return JSON.stringify({ verdict: "unknown", mac });
+    return JSON.stringify({ verdict: "not-editable", label, mac });
   } catch (e) {
     return JSON.stringify({ verdict: "unknown" });
+  }
+})()`;
+
+/**
+ * Re-reads the element the probe parked, and releases it.
+ *
+ * `tracked: false` means the element is gone — the page navigated, or the probe
+ * never parked one — which is not evidence either way.
+ */
+const CLEARED_TARGET_PROBE = `(() => {
+  try {
+    const el = window[${JSON.stringify(TARGET_HANDLE)}];
+    delete window[${JSON.stringify(TARGET_HANDLE)}];
+    if (!el) return JSON.stringify({ tracked: false });
+    const tag = (el.tagName || "").toUpperCase();
+    const value = tag === "INPUT" || tag === "TEXTAREA" ? (el.value || "") : (el.textContent || "");
+    return JSON.stringify({ tracked: true, length: value.length });
+  } catch (e) {
+    return JSON.stringify({ tracked: false });
   }
 })()`;
 
@@ -112,35 +163,39 @@ interface FocusedEditable {
   verdict: "editable" | "not-editable" | "read-only" | "none" | "unknown";
   label?: string;
   length?: number;
-  selection?: number;
+  mac?: boolean;
+}
+
+interface ClearedTarget {
+  tracked: boolean;
+  length?: number;
+}
+
+async function evaluateJson<T>(api: ChromiumCdpApi, expression: string): Promise<T | undefined> {
+  let raw: unknown;
+  try {
+    raw = await api.evaluate(expression, { returnByValue: true });
+  } catch {
+    return undefined;
+  }
+  if (typeof raw !== "string") return undefined;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Never throws: an unreadable page is reported as `unknown`, not as a failure. */
 async function readFocusedEditable(api: ChromiumCdpApi): Promise<FocusedEditable> {
-  let raw: unknown;
-  try {
-    raw = await api.evaluate(FOCUSED_EDITABLE_PROBE, { returnByValue: true });
-  } catch {
-    return { verdict: "unknown" };
-  }
-  if (typeof raw !== "string") return { verdict: "unknown" };
-  try {
-    return JSON.parse(raw) as FocusedEditable;
-  } catch {
-    return { verdict: "unknown" };
-  }
+  return (
+    (await evaluateJson<FocusedEditable>(api, FOCUSED_EDITABLE_PROBE)) ?? { verdict: "unknown" }
+  );
 }
 
-// CDP's `Input.dispatchKeyEvent` modifier bitmask: 2 = Ctrl, 4 = Meta. Send the
-// chord the host's own users press, so the event the page sees is the real one.
+// CDP's `Input.dispatchKeyEvent` modifier bitmask: 2 = Ctrl, 4 = Meta.
 const CDP_MODIFIER_CTRL = 2;
 const CDP_MODIFIER_META = 4;
-
-function selectAllModifier(): number {
-  // A Chromium target is discovered by probing CDP ports on this machine, so
-  // the app runs on this platform and its key bindings are this platform's.
-  return process.platform === "darwin" ? CDP_MODIFIER_META : CDP_MODIFIER_CTRL;
-}
 
 /**
  * Empty the focused field. Resolves when the field was observed empty
@@ -152,6 +207,14 @@ function selectAllModifier(): number {
  * and not a bare `a` keypress. Both editing commands ride the same event so
  * Blink applies them in order, which fires `oninput` once (`deleteContentBackward`)
  * and leaves a controlled/React input correctly updated.
+ *
+ * Neither form of the key is universally safe from the page, which is why the
+ * result is verified rather than assumed: unmodified, any shortcut bound to a
+ * bare `a` fires and can cancel the edit; modified, an app that binds the
+ * platform select-all chord can cancel it instead. The modifier is the one a
+ * real user would send, so it is what an app is entitled to intercept — and if
+ * it does, the check below reports the clear as the failure it is instead of
+ * letting a following `text` append to the surviving value.
  */
 export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
   const before = await readFocusedEditable(api);
@@ -183,7 +246,7 @@ export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
     );
   }
 
-  const modifiers = selectAllModifier();
+  const modifiers = before.mac ? CDP_MODIFIER_META : CDP_MODIFIER_CTRL;
   const selectAllKey = { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers };
   await api.dispatchKeyEvent({
     type: "rawKeyDown",
@@ -192,27 +255,27 @@ export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
   });
   await api.dispatchKeyEvent({ type: "keyUp", ...selectAllKey });
 
-  // `unknown` before means the page was unreadable, so there is nothing to
-  // verify against — stay best-effort rather than inventing a failure.
+  // `unknown` before means the page was unreadable, so no element was parked and
+  // there is nothing to verify against — stay best-effort rather than inventing
+  // a failure.
   if (before.verdict === "unknown") return;
 
-  // Only POSITIVELY observed residue is a failure. Any other after-state — the
-  // field blurred, was replaced, or became unreadable — is the page reacting to
-  // its own emptying, not evidence the clear was ignored, and failing on it
-  // would break clears that work. Every failure mode this check exists for
-  // (a cancelled keydown, a cancelled `beforeinput`, a Chromium that drops
-  // `commands`) leaves the same field focused and still holding its value.
-  const after = await readFocusedEditable(api);
-  if (after.verdict !== "editable") return;
+  // Re-read the element the probe parked, NOT whatever holds focus now. Clearing
+  // routinely moves focus (a page that blurs on empty, a re-render, an app
+  // shortcut), so `activeElement` afterwards cannot tell "emptied, then focus
+  // moved" from "never emptied, and focus moved" — and the second is exactly
+  // what an app cancelling the chord produces.
+  const after = await evaluateJson<ClearedTarget>(api, CLEARED_TARGET_PROBE);
+  if (!after?.tracked) return;
   const remaining = after.length ?? 0;
   if (remaining === 0) return;
 
   throw new FailureError(
-    `keyboard clear: the field still holds ${remaining} character(s) after the ` +
-      `select-all + delete. The page most likely cancelled the key or the ` +
-      `\`beforeinput\` (a rich-text editor does this), or this Chromium build ignores ` +
-      `CDP editing commands. The field was NOT emptied — do not treat a following ` +
-      `\`text\` as a replacement.`,
+    `keyboard clear: ${before.label ?? "the field"} still holds ${remaining} character(s) ` +
+      `after the select-all + delete. The page most likely cancelled the key or the ` +
+      `\`beforeinput\` (a rich-text editor, or an app that binds the select-all chord, does ` +
+      `this), or this Chromium build ignores CDP editing commands. The field was NOT ` +
+      `emptied — do not treat a following \`text\` as a replacement.`,
     {
       error_code: FAILURE_CODES.KEYBOARD_CLEAR_INEFFECTIVE,
       failure_stage: "keyboard_clear_verify_chromium",

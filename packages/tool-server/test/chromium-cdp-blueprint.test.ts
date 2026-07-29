@@ -206,10 +206,11 @@ describe("chromiumCdpBlueprint (smoke)", () => {
     }
   });
 
-  // `commands` is the only way to drive a Blink editing chord over CDP — the
-  // `modifiers` form does not reach the editing layer, so a Ctrl/Cmd+A sent
-  // that way selects nothing and a following delete removes ONE character
-  // while the call still reports success. The keyboard tool's `clear` depends
+  // `commands` names the editing action outright, which is what makes it work
+  // across Chromium builds — whether a `modifiers` chord reaches the editing
+  // layer is build-dependent (on a macOS Chrome 150 neither Ctrl+A nor Cmd+A
+  // selects anything, so a following delete removes ONE character while the
+  // call still reports success). The keyboard tool's `clear` depends
   // on this field surviving the payload builder; if it is silently dropped
   // here, `clear` degrades into a single-character backspace with no error.
   it("forwards `commands` on a key event to Input.dispatchKeyEvent", async () => {

@@ -31,12 +31,26 @@ function registryWith(api: unknown) {
 
 function recordingCdpApi() {
   const chars: string[] = [];
+  let cleared = false;
   return {
     chars,
     api: {
-      dispatchKeyEvent: async (event: { type: string; text?: string }) => {
+      dispatchKeyEvent: async (event: { type: string; text?: string; commands?: string[] }) => {
+        if (event.commands) cleared = true;
         if (event.type === "char" && event.text) chars.push(event.text);
       },
+      // The chromium clear reads the focused field before and after dispatching
+      // and fails if it did not empty, so a stub without `evaluate` would send
+      // every clear down the best-effort "page unreadable" branch instead of the
+      // one production takes against a page it can read. Report a focused
+      // editable field that is populated until the clear runs.
+      evaluate: async () =>
+        JSON.stringify({
+          verdict: "editable",
+          label: "INPUT#pw",
+          length: cleared ? 0 : 8,
+          selection: 0,
+        }),
     },
   };
 }
