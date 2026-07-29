@@ -2,6 +2,7 @@ import { FAILURE_CODES, type Registry } from "@argent/registry";
 import { chromiumCdpRef, type ChromiumCdpApi } from "../../../blueprints/chromium-cdp";
 import type { PlatformImpl } from "../../../utils/cross-platform-tool";
 import { InvalidToolInputError } from "../../../utils/capability";
+import { clearChromiumField } from "../chromium-clear";
 import { CHROMIUM_NAMED_KEYS, charToChromiumKey } from "../chromium-keys";
 import type { KeyboardParams, KeyboardResult } from "../types";
 
@@ -59,23 +60,11 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     }
   }
 
-  // Clear before text, as `commands` on a rawKeyDown rather than a Ctrl/Cmd+A
-  // modifier chord — see the `commands` doc on KeyEventArgs for why the
-  // modifier form silently deletes a single character instead. Both editing
-  // commands ride the same event so Blink applies them in order; this fires
-  // `oninput` exactly once, so controlled/React inputs update correctly.
+  // Clear before text. `clearChromiumField` refuses up front if nothing
+  // editable holds focus, and throws if the field is not empty afterwards, so
+  // reaching the typing loop below means the field really was emptied.
   if (params.clear) {
-    const selectAllKey = {
-      key: "a",
-      code: "KeyA",
-      windowsVirtualKeyCode: 65,
-    };
-    await api.dispatchKeyEvent({
-      type: "rawKeyDown",
-      ...selectAllKey,
-      commands: ["selectAll", "deleteBackward"],
-    });
-    await api.dispatchKeyEvent({ type: "keyUp", ...selectAllKey });
+    await clearChromiumField(api);
     await sleep(delay);
   }
 

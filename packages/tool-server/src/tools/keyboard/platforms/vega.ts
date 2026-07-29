@@ -15,10 +15,12 @@ import type { KeyboardParams, KeyboardResult } from "../types";
 async function runVega(device: DeviceInfo, params: KeyboardParams): Promise<KeyboardResult> {
   let keysPressed = 0;
   // Vega injects through `inputd-cli`, which exposes no modifier-combination
-  // primitive — there is no way to send the select-all chord every other
-  // backend's clear relies on. Reject explicitly rather than no-op: a silent
-  // no-op on an unsupported input path is exactly the failure mode of issue
-  // #449, which this tool has already shipped once. Checked BEFORE any
+  // primitive, so the select-all chord the iOS/Chromium clears use cannot be
+  // sent here. (The count-and-backspace shape the Android legacy path uses would
+  // be expressible, but it needs a way to read the focused field's length, which
+  // this transport has no equivalent of.) Reject explicitly rather than no-op: a
+  // silent no-op on an unsupported input path is exactly the failure mode of
+  // issue #449, which this tool has already shipped once. Checked BEFORE any
   // injection so an unsupported request leaves the device untouched.
   if (params.clear) {
     throw new UnsupportedOperationError(

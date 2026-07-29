@@ -20,16 +20,22 @@ export async function typeTv(
         "(up/down/left/right/select) instead"
     );
   }
-  // The TV backends type whole strings through the focus daemon and have no
-  // modifier-chord primitive, so the select-all a clear depends on cannot be
-  // sent. Reject rather than silently no-op (issue #449), and do it up front so
+  // `clear` is not implemented for either TV family, and the reason differs by
+  // family — so the message states the outcome rather than a cause that would be
+  // wrong for one of them. Apple TV genuinely cannot: its typing backend sends
+  // whole strings through the focus daemon and has no modifier-chord primitive.
+  // Android TV could — `androidTvControlBlueprint.type()` reaches the same
+  // on-device `input` binary as the phone path, so `input keycombination` is
+  // available to it — but routing a clear through it is unverified on a TV, and
+  // half-supporting `clear` across the two families would be worse than not
+  // supporting it. Reject rather than silently no-op (issue #449), up front so
   // nothing is typed before the rejection.
   if (params.clear) {
     throw new UnsupportedOperationError(
       "keyboard",
       device,
-      "`clear` is not supported on a TV target — its typing backend cannot send the " +
-        "select-all modifier chord"
+      "`clear` is not supported on a TV target — delete the existing value with " +
+        "repeated backspaces on the on-screen keyboard, or use the field's own clear affordance"
     );
   }
   const text = params.text ?? "";
