@@ -367,9 +367,11 @@ describe("keyboard clear — Android (adb input)", () => {
   });
 
   it("keeps the blind delete count under the length limit", () => {
-    // The blind run has no measured length, so it can never be refused — if it
-    // sat above the limit, every unmeasurable field (every password field on
-    // these levels) would be rejected instead of cleared.
+    // An unmeasurable field floors the measurement to the blind count, so the
+    // blind count IS what the length refusal compares. Above the limit, every
+    // unmeasurable field (every password field on these levels) would be
+    // rejected instead of cleared — and the error would quote this constant as
+    // a length that was never measured.
     expect(BLIND_DELETE_COUNT).toBeLessThanOrEqual(MAX_DELETE_COUNT);
   });
 
@@ -1001,6 +1003,27 @@ describe("keyboard clear — Chromium (CDP)", () => {
 
     expect(events.map((e) => e.type)).toEqual(["rawKeyDown", "keyUp"]);
     expect(result.cleared).toBe(true);
+  });
+
+  it("still sends the host's native chord when `evaluate` itself fails", async () => {
+    // The probe's own catch carries `mac`, but a failed `evaluate` never runs
+    // it. The chord is dispatched on that path regardless, so it should still be
+    // the one that machine's users press rather than defaulting to Ctrl.
+    const events: KeyEventArgs[] = [];
+    const api = {
+      dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
+      evaluate: async () => {
+        throw new Error("Runtime.evaluate: main world detached");
+      },
+    };
+
+    await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(events[0]!.modifiers).toBe(process.platform === "darwin" ? 4 : 2);
   });
 
   it("treats an unreadable page as unknown rather than failing the call", async () => {
