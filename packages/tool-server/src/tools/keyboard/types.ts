@@ -27,16 +27,23 @@ export interface KeyboardResult {
   keys: number;
   /**
    * Present (and `true`) only when `clear` was requested and the clear
-   * completed without error. It never appears on a failed clear: a clear that
-   * cannot take effect throws instead of returning, so `{ clear, text }` can
-   * never report success having appended to a value that survived.
+   * completed without error.
    *
-   * How strongly it is evidenced varies with what the backend can observe.
-   * Chromium reads the field back and fails if it is not empty; Android parses
-   * the `input keycombination` output so a level without the subcommand takes
-   * the delete path rather than a one-character backspace; the iOS HID
-   * transport is fire-and-forget and cannot read the field at all, so there it
-   * means the chord was dispatched to a focused field.
+   * How much that is worth depends on what the backend can observe, and only
+   * one of them can observe anything:
+   *
+   * - Chromium reads the field before and after. A clear that cannot take
+   *   effect throws rather than returning, so `cleared: true` there means the
+   *   field was seen empty.
+   * - Android parses the `input keycombination` output, so a level without the
+   *   subcommand takes the measured delete path instead of silently degrading
+   *   to a one-character backspace. It does not read the field back, so a
+   *   widget that ignores the select-all chord still reports `cleared: true`.
+   * - The iOS HID transport is fire-and-forget and cannot read the field at
+   *   all: `cleared: true` means the chord was dispatched, nothing more.
+   *
+   * So this is not a cross-platform guarantee that the field is empty. Assert
+   * the value if that matters.
    */
   cleared?: boolean;
 }
