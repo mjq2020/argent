@@ -532,6 +532,42 @@ describe("keyboard clear — Android (adb input)", () => {
     expect(deleteRun(inputCmds()[1]!)).toHaveLength(42 + 8);
   });
 
+  it("does not let a short focused sibling downgrade an unmeasurable field", async () => {
+    // A focused password field beside a shorter focused EditText. Skipping the
+    // unmeasurable one entirely measures 2 and issues ten backspaces, where the
+    // password field alone correctly gets the blind count — so a 100-character
+    // password would keep 90 characters and still report `cleared: true`. An
+    // unmeasurable node has to FLOOR the count, not vanish from it.
+    seedLegacyLevel();
+    seedDump(
+      `<?xml version='1.0' encoding='UTF-8'?><hierarchy rotation="0">` +
+        `<node index="0" text="" class="android.widget.EditText" password="true" focused="true" />` +
+        `<node index="1" text="ab" class="android.widget.EditText" password="false" focused="true" />` +
+        `</hierarchy>`
+    );
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+  });
+
+  it("still prefers a longer measurable field over an unmeasurable one", async () => {
+    // The other direction, and the reason the unmeasurable branch cannot simply
+    // return: a measurable field longer than the blind count must still drive
+    // the run — here past the limit, so the call refuses rather than truncating.
+    seedLegacyLevel();
+    seedDump(
+      `<?xml version='1.0' encoding='UTF-8'?><hierarchy rotation="0">` +
+        `<node index="0" text="${"x".repeat(300)}" class="android.widget.EditText" password="false" focused="true" />` +
+        `<node index="1" text="" class="android.widget.EditText" password="true" focused="true" />` +
+        `</hierarchy>`
+    );
+
+    await expect(
+      makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
+    ).rejects.toThrow(/300 characters/);
+  });
+
   it("treats a focused editable with no `text` attribute as unmeasurable", async () => {
     // Absent is not empty. Reading a missing attribute as 0 would issue only
     // the margin against a field that may be full — the silent half-clear the
