@@ -290,8 +290,8 @@ const KEYCODE_MOVE_END = 123;
 const DELETE_MARGIN = 8;
 
 // Used when the focused field's contents cannot be measured: no focused
-// *editable* node in the dump, a password field (whose text uiautomator refuses
-// to report), or a dump that failed outright. Covers any credential or
+// *editable* node in the dump, a password field (whose reported text is the
+// mask, not the value), or a dump that failed outright. Covers any credential or
 // single-line form field.
 //
 // This IS the fixed run the measurement exists to avoid, so it carries that
@@ -441,9 +441,15 @@ async function readHierarchy(serial: string, deadline: number): Promise<string |
  * — in which case {@link clearByDeleting} uses BLIND_DELETE_COUNT.
  *
  * Undefined is returned when the dump fails or the device refuses it (locked
- * screen, secure overlay), when no focused node is an `EditText`, and when the
- * focused field is a password (uiautomator reports those empty regardless of
- * contents, so a measured 0 would clear nothing).
+ * screen, secure overlay) or when no focused node is an `EditText`. A focused
+ * password field is not measured either, but it does not make the whole result
+ * undefined — it contributes BLIND_DELETE_COUNT, see below.
+ *
+ * Password fields are skipped because what uiautomator reports for them is not
+ * the value: on API 36 it is the masked rendering (a 35-character password dumps
+ * as 35 bullets), and on other levels it can be empty. The bullet count happens
+ * to match the length there, but nothing guarantees a 1:1 mask, so it is treated
+ * as unreadable rather than trusted.
  *
  * Restricting the measurement to `EditText` nodes is what makes a measured `0`
  * trustworthy. A dump can carry several `focused="true"` nodes — uiautomator
@@ -488,16 +494,19 @@ async function measureFocusedTextLength(
     // Same `EditText` test the TV focus walk uses for `isEditable`, so the two
     // agree on what counts as a text field.
     if (!/EditText/.test(attrs.class ?? "")) continue;
-    // A password field's text is unreadable, and an absent `text` is
-    // "unreadable" rather than "empty" — reading either as 0 would issue only
-    // DELETE_MARGIN backspaces against a field that may be full. Note this does
-    // NOT abandon a length already found: a dump carrying both a measurable
-    // 300-character field and an unreadable one would otherwise fall to the
-    // blind run and truncate the first, where keeping the longest instead
-    // refuses loudly.
+    // An unmeasurable focused editable — a password field, or one with no `text`
+    // attribute — contributes the BLIND count rather than nothing.
+    //
+    // Both weaker rules are wrong, in opposite directions. Returning undefined
+    // on sight abandons a length already found, so a dump carrying a measurable
+    // 300-character field alongside an unreadable one falls to the blind run and
+    // truncates the first. Merely skipping it is worse: a focused password field
+    // beside a short focused sibling (`text="ab"`) would measure 2, issuing ten
+    // backspaces where the field alone would have got the blind 128. Flooring
+    // keeps `longest` monotonic, which is what makes the "over-deleting is a
+    // no-op, under-deleting truncates" rule above actually hold.
     const text = attrIsTrue(attrs, "password") ? undefined : attrs.text;
-    if (text === undefined) continue;
-    longest = Math.max(longest ?? 0, [...text].length);
+    longest = Math.max(longest ?? 0, text === undefined ? BLIND_DELETE_COUNT : [...text].length);
   }
   return longest;
 }
