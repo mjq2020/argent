@@ -82,7 +82,11 @@ function newTargetHandle(): string {
  * Returns a JSON string (not an object) so the value crosses `Runtime.evaluate`
  * as a primitive, the same way the chromium clipboard and storage helpers do.
  */
-const focusedEditableProbe = (handle: string) => `(() => {
+// Exported for test/keyboard-clear-probe.test.ts, which evals it against a mock
+// DOM: it runs inside the page, so the rest of the suite can only mock what it
+// returns and every verdict it computes would otherwise rest on a manual
+// browser session alone.
+export const focusedEditableProbe = (handle: string) => `(() => {
   try {
     const docProto = typeof Document === "undefined" ? {} : Document.prototype;
     const activeOf = (Object.getOwnPropertyDescriptor(docProto, "activeElement") || {}).get;
@@ -114,7 +118,10 @@ const focusedEditableProbe = (handle: string) => `(() => {
       return JSON.stringify({ verdict: "none", mac });
     }
     const tag = (el.tagName || "").toUpperCase();
-    const label = tag + (el.id ? "#" + el.id : "");
+    // The id is page-controlled and unbounded, and this string reaches the
+    // agent's context in an error message — cap it the way the TV blueprint caps
+    // device-supplied text.
+    const label = (tag + (el.id ? "#" + el.id : "")).slice(0, 60);
     // Form controls first: \`isContentEditable\` is INHERITED, so an <input>
     // inside a contenteditable host reports true, and reading its textContent
     // (always "") would make every verification pass vacuously. A <textarea>
@@ -138,6 +145,10 @@ const focusedEditableProbe = (handle: string) => `(() => {
       window[${JSON.stringify(handle)}] = el;
       return JSON.stringify({
         verdict: "editable", label, mac, parked: window[${JSON.stringify(handle)}] === el,
+        // A password field is cleared like any other, but its LENGTH is
+        // credential material and this number reaches the agent's context in
+        // the failure message. Report only whether it holds anything.
+        secret: (el.type || "") === "password",
         length: bad ? Math.max(1, (el.value || "").length) : (el.value || "").length,
       });
     }
@@ -168,7 +179,8 @@ const focusedEditableProbe = (handle: string) => `(() => {
  * `tracked: false` means the element is gone — the page navigated, or the probe
  * never parked one — which is not evidence either way.
  */
-const clearedTargetProbe = (handle: string) => `(() => {
+// Exported for test/keyboard-clear-probe.test.ts — see focusedEditableProbe.
+export const clearedTargetProbe = (handle: string) => `(() => {
   try {
     const el = window[${JSON.stringify(handle)}];
     delete window[${JSON.stringify(handle)}];
@@ -182,23 +194,30 @@ const clearedTargetProbe = (handle: string) => `(() => {
     const form = tag === "INPUT" || tag === "TEXTAREA";
     const bad = form && !!(el.validity && el.validity.badInput);
     const value = form ? (el.value || "") : (el.textContent || "");
-    return JSON.stringify({ tracked: true, length: bad ? Math.max(1, value.length) : value.length });
+    return JSON.stringify({
+      tracked: true,
+      secret: (el.type || "") === "password",
+      length: bad ? Math.max(1, value.length) : value.length,
+    });
   } catch (e) {
     return JSON.stringify({ tracked: false });
   }
 })()`;
 
-interface FocusedEditable {
+export interface FocusedEditable {
   verdict: "editable" | "not-editable" | "read-only" | "none" | "unknown";
   label?: string;
   length?: number;
   mac?: boolean;
+  /** True for a password input, whose length must not be echoed back. */
+  secret?: boolean;
   /** False when the page refused the slot assignment — then nothing was parked. */
   parked?: boolean;
 }
 
-interface ClearedTarget {
+export interface ClearedTarget {
   tracked: boolean;
+  secret?: boolean;
   length?: number;
 }
 
@@ -321,8 +340,9 @@ export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
   const remaining = after.length ?? 0;
   if (remaining === 0) return;
 
+  const held = after.secret || before.secret ? "its contents" : `${remaining} character(s)`;
   throw new FailureError(
-    `keyboard clear: ${before.label ?? "the field"} still holds ${remaining} character(s) ` +
+    `keyboard clear: ${before.label ?? "the field"} still holds ${held} ` +
       `after the select-all + delete. The page most likely cancelled the key or the ` +
       `\`beforeinput\` (a rich-text editor, or an app that binds the select-all chord, does ` +
       `this), or this Chromium build ignores CDP editing commands. The field was NOT ` +
@@ -335,13 +355,3 @@ export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
     }
   );
 }
-
-/**
- * The probe sources, exported for `test/keyboard-clear-probe.test.ts`, which
- * evals them against a mock DOM. They run inside the page, so the rest of the
- * suite can only mock what they return — every verdict they compute would
- * otherwise rest on a manual browser session alone.
- */
-export const __testing__ = { focusedEditableProbe, clearedTargetProbe };
-
-export type { FocusedEditable, ClearedTarget };

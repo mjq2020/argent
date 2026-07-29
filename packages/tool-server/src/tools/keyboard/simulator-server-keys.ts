@@ -61,7 +61,7 @@ export async function typeSimulatorServer(
   // excluded: they are an implementation detail of emptying the field, and what
   // that costs differs wildly per backend (two HID presses here; on Android one
   // `input keycombination` plus a `KEYCODE_DEL`, or on a level without that
-  // subcommand a MOVE_END plus one delete per character — up to 209 key events;
+  // subcommand a MOVE_END plus one delete per character — up to 159 key events;
   // two CDP key events on Chromium). Counting them would make the same request
   // report a different `keys` on every platform. The clear is reported by
   // `cleared` instead.

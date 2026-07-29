@@ -22,7 +22,7 @@ import {
   parseUiAutomatorXml,
 } from "../tools/describe/platforms/android/uiautomator-parser";
 import { adbShell, shellQuote } from "./adb";
-import { ANDROID_UI_DUMP_TIMEOUT_MS, dumpAndroidUiXml } from "./android-ui-dump";
+import { dumpAndroidUiXml } from "./android-ui-dump";
 import { InvalidToolInputError } from "./capability";
 
 // android.view.KeyEvent keycodes for the keyboard tool's named-`key` vocabulary
@@ -192,26 +192,27 @@ const ANDROID_CLEAR_BUDGET_MS = 20_000;
  * Without a reservation the dump's own cap is the whole remaining budget, so a
  * slow `uiautomator` can spend all of it and the delete run then starts against
  * a few hundred milliseconds — the half-deleted field this path exists to
- * prevent. Reserving is the fix rather than estimating the run's cost: measured
- * on device, one `input keyevent` invocation is dominated by a constant VM start
- * (209 deletes took 505ms, and 608 deletes 0.8s against an idle field), so the
- * count is a poor predictor of the time. 8s covers even the pathological case
- * the file records — 150 keys taking 6.9s against a live-filtering search box on
- * API 30, where the cost really is the app's per-keystroke work.
+ * prevent. Which leg to starve is not symmetric: a squeezed dump degrades to
+ * BLIND_DELETE_COUNT, which is merely less exact, while a squeezed delete run
+ * corrupts the field.
+ *
+ * Sized to cover the largest run MAX_DELETE_COUNT permits at the worst rate ever
+ * measured — see there for the cost model. The read legs keep the remaining ~9s,
+ * which covers a warm probe plus a cold dump.
  */
-const DELETE_RUN_RESERVE_MS = 8_000;
+const DELETE_RUN_RESERVE_MS = 11_000;
 
 /**
- * Timeout for the next leg of a clear: whatever is left of the shared budget,
- * capped at that leg's own natural maximum.
+ * Timeout for the next leg of a clear: whatever is left of the shared budget.
  *
- * `reserveMs` is withheld from the cap so an earlier leg cannot consume what a
- * later one needs. Floored at 1s rather than 0 so an already-overrun budget
- * still attempts the call — a 0ms timeout would fail every time, turning a
- * merely slow device into a hard error.
+ * `reserveMs` is withheld so an earlier leg cannot consume what a later one
+ * needs. There is no per-leg cap: the shared budget is smaller than any of them,
+ * so a cap could never bind. Floored at 1s rather than 0 so an already-overrun
+ * budget still attempts the call — a 0ms timeout would fail every time, turning
+ * a merely slow device into a hard error.
  */
-function clearLegTimeout(deadline: number, cap: number, reserveMs = 0): number {
-  return Math.max(1_000, Math.min(cap, deadline - Date.now() - reserveMs));
+function clearLegTimeout(deadline: number, reserveMs = 0): number {
+  return Math.max(1_000, deadline - Date.now() - reserveMs);
 }
 
 /**
@@ -265,14 +266,14 @@ export async function injectAndroidClear(serial: string): Promise<void> {
   const out = await adbShell(
     serial,
     `input keycombination ${KEYCODE_CTRL_LEFT} ${KEYCODE_A} 2>&1`,
-    { timeoutMs: clearLegTimeout(deadline, ADB_INPUT_TIMEOUT_MS, DELETE_RUN_RESERVE_MS) }
+    { timeoutMs: clearLegTimeout(deadline, DELETE_RUN_RESERVE_MS) }
   );
   if (/unknown command|usage: input/i.test(out)) {
     await clearByDeleting(serial, deadline);
     return;
   }
   await adbShell(serial, `input keyevent ${KEYCODE_DEL}`, {
-    timeoutMs: clearLegTimeout(deadline, ADB_INPUT_TIMEOUT_MS),
+    timeoutMs: clearLegTimeout(deadline),
   });
 }
 
@@ -289,33 +290,32 @@ const DELETE_MARGIN = 8;
 // Used when the focused field's contents cannot be measured: no focused
 // *editable* node in the dump, a password field (whose text uiautomator refuses
 // to report), or a dump that failed outright. Covers any credential or
-// single-line form field. Against an idle field the run costs ~0.8s, since the
-// cost is dominated by one `input` VM start; against a field that does work per
-// keystroke (a live-filtering search box) budget several seconds.
+// single-line form field.
 //
 // This IS the fixed run the measurement exists to avoid, so it carries that
-// shape's failure with it: a field longer than this keeps its head, and — unlike
-// a measured field — there is no length to compare against MAX_DELETE_COUNT, so
-// it cannot be refused either. It is accepted only because the cases that reach
-// it are ones where nothing longer is plausible (a password field is the main
-// one, and 160 is far past any credential).
-const BLIND_DELETE_COUNT = 160;
+// shape's failure with it: a field longer than this keeps its head. It also
+// cannot be refused — there is no measured length to compare against
+// MAX_DELETE_COUNT — which is exactly why it MUST stay below that limit. If it
+// did not, every unmeasurable field (every password field on these levels) would
+// be rejected out of hand. `blind_delete_count_fits_the_limit` in
+// test/keyboard-clear.test.ts pins the relationship.
+export const BLIND_DELETE_COUNT = 120;
 
 // Longest field this path will attempt; beyond it the clear is refused rather
 // than started — see clearByDeleting.
 //
-// Sized from the delete leg's actual share of ANDROID_CLEAR_BUDGET_MS at the
-// SLOWEST rate measured on device. Every key is delivered to the app, so the
-// cost is the app's per-keystroke work: 608 deletes took 42s against one live
-// field (~69ms/key) versus 0.8s against an idle one. The probe and dump spend
-// ~3s of the 20s budget, leaving ~17s; at 69ms/key that affords ~245 keys, so
-// 200 (+ DELETE_MARGIN = 208 keys ≈ 14s at that rate) stays inside it with room
-// to spare. Anything larger could time out mid-run and leave the partly-deleted
-// field this refusal exists to prevent.
+// The cost model, from the measurements recorded in this file: one `input`
+// invocation is dominated by a constant VM start (~0.8s, and 209 deletes took
+// 505ms on a live RN field), plus per-keystroke work that is near zero on an
+// ordinary field but reaches ~69ms/key on a pathological one — a live-filtering
+// search box on API 30, where 150 keys took 6.9s. So the count barely predicts
+// the time on a normal field and dominates it on the worst one, and the limit
+// has to be sized against the worst.
 //
-// 200 characters is well past the single-line inputs this fallback serves — a
-// login, a search box, a form field.
-const MAX_DELETE_COUNT = 200;
+// 150 (+ DELETE_MARGIN = 158 keys) is ~10.9s at that worst rate, inside the
+// DELETE_RUN_RESERVE_MS the run is guaranteed. It is still well past the
+// single-line inputs this fallback serves — a login, a search box, a form field.
+export const MAX_DELETE_COUNT = 150;
 
 /**
  * Empty the focused field on an Android level whose `input` has no
@@ -380,8 +380,9 @@ async function clearByDeleting(serial: string, deadline: number): Promise<void> 
   // through would leave exactly the half-deleted field this path avoids —
   // deletes already delivered to the device keep landing after the client gives
   // up.
+  // No reserve withheld here — this IS the leg the reserve was held for.
   await adbShell(serial, `input keyevent ${KEYCODE_MOVE_END} ${dels}`, {
-    timeoutMs: clearLegTimeout(deadline, ANDROID_CLEAR_BUDGET_MS),
+    timeoutMs: clearLegTimeout(deadline),
   });
 }
 
@@ -403,7 +404,7 @@ async function readHierarchy(serial: string, deadline: number): Promise<string |
     // Withhold the delete run's reserve: a slow dump must not leave the run it
     // is measuring for without time to finish.
     const xml = await dumpAndroidUiXml(serial, {
-      timeoutMs: clearLegTimeout(deadline, ANDROID_UI_DUMP_TIMEOUT_MS, DELETE_RUN_RESERVE_MS),
+      timeoutMs: clearLegTimeout(deadline, DELETE_RUN_RESERVE_MS),
     });
     // adb exits 0 even when the dump did not happen — a refused screen reports
     // an in-band `ERROR:` line, a lost race reports `Killed`. Neither carries a

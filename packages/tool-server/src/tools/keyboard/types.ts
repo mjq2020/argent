@@ -39,8 +39,11 @@ export interface KeyboardResult {
    *   "seen empty, or not observable" — never "seen NOT empty".
    * - Android parses the `input keycombination` output, so a level without the
    *   subcommand takes the measured delete path instead of silently degrading
-   *   to a one-character backspace. It does not read the field back, so a
-   *   widget that ignores the select-all chord still reports `cleared: true`.
+   *   to a one-character backspace. It does not read the field back, though, so
+   *   a widget that swallows the select-all chord on a level that HAS the
+   *   subcommand leaves the following delete acting as a plain backspace: the
+   *   field is left one character shorter and reported as cleared. That is a
+   *   mutated field, not a no-op.
    * - The iOS HID transport is fire-and-forget and cannot read the field at
    *   all: `cleared: true` means the chord was dispatched, nothing more.
    *
