@@ -388,6 +388,40 @@ describe("keyboard clear — Android (adb input)", () => {
     expect(deleteRun(inputCmds()[1]!)).toHaveLength(10 + 8);
   });
 
+  it("does not spend the retry backoff when the budget cannot fit another dump", async () => {
+    // The backoff has to be counted BEFORE it is slept, not after: sleeping and
+    // then discovering there is no budget left spends the wait out of the delete
+    // run's reserve, which is the one thing the reserve exists to stop. Both
+    // orderings decline the retry here — the difference is only whether 2.5s of
+    // the reserve is burned first, so this measures real elapsed time.
+    let clock = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      adbShell.mockImplementationOnce(async () => "Usage: input …");
+      adbExecOutBinary.mockImplementationOnce(async () => {
+        clock += 5_000; // leaves too little for a backoff plus another dump
+        return Buffer.from("Killed");
+      });
+
+      const startedAt = process.hrtime.bigint();
+      await makeAndroidImpl(registryWith({})).handler(
+        {},
+        { udid: ANDROID.id, clear: true },
+        ANDROID
+      );
+      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+
+      expect(adbExecOutBinary).toHaveBeenCalledTimes(1);
+      // Generous, but still well under DUMP_RETRY_BACKOFF_MS, so a loaded box
+      // cannot flake this while a real backoff would still fail it.
+      expect(elapsedMs).toBeLessThan(2_000);
+      // …and it still clears, blind, rather than failing.
+      expect(deleteRun(inputCmds()[1]!)).toHaveLength(120 + 8);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it("gives up after one retry rather than dumping forever", async () => {
     seedLegacyLevel();
     seedDump("Killed");
