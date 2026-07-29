@@ -295,12 +295,16 @@ const DELETE_MARGIN = 8;
 // single-line form field.
 //
 // This IS the fixed run the measurement exists to avoid, so it carries that
-// shape's failure with it: a field longer than this keeps its head. It also
-// cannot be refused — there is no measured length to compare against
-// MAX_DELETE_COUNT — which is exactly why it MUST stay below that limit. If it
-// did not, every unmeasurable field (every password field on these levels) would
-// be rejected out of hand. `blind_delete_count_fits_the_limit` in
-// test/keyboard-clear.test.ts pins the relationship.
+// shape's failure with it: a field longer than this keeps its head.
+//
+// It MUST stay below MAX_DELETE_COUNT. An unmeasurable focused editable floors
+// the measurement to this value rather than vanishing from it (see
+// measureFocusedTextLength), so the blind count is what the length refusal
+// compares — and if it sat above the limit, every unmeasurable field (every
+// password field on these levels) would be refused, quoting this constant as
+// though it were a length that had been measured. `blind_delete_count_fits_the_limit`
+// in test/keyboard-clear.test.ts pins the relationship, because the two
+// constants are otherwise edited independently and nothing else connects them.
 export const BLIND_DELETE_COUNT = 120;
 
 // Longest field this path will attempt; beyond it the clear is refused rather

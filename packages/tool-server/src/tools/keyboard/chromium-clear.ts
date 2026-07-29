@@ -234,11 +234,14 @@ async function evaluateJson<T>(api: ChromiumCdpApi, expression: string): Promise
 
 /** Never throws: an unreadable page is reported as `unknown`, not as a failure. */
 async function readFocusedEditable(api: ChromiumCdpApi, handle: string): Promise<FocusedEditable> {
-  return (
-    (await evaluateJson<FocusedEditable>(api, focusedEditableProbe(handle))) ?? {
-      verdict: "unknown",
-    }
-  );
+  const read = await evaluateJson<FocusedEditable>(api, focusedEditableProbe(handle));
+  if (read) return read;
+  // `evaluate` itself failed, so the renderer never got to report its platform.
+  // The chord is still dispatched on this path, so it should still be the native
+  // one; the host is the best remaining proxy, since a Chromium target is found
+  // by probing CDP ports on this machine. (The probe's own catch carries `mac`,
+  // so this covers only the case where the call never returned a value at all.)
+  return { verdict: "unknown", mac: process.platform === "darwin" };
 }
 
 // CDP's `Input.dispatchKeyEvent` modifier bitmask: 2 = Ctrl, 4 = Meta.
