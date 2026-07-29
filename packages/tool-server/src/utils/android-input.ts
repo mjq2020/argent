@@ -25,6 +25,8 @@ import { adbShell, shellQuote } from "./adb";
 import { dumpAndroidUiXml } from "./android-ui-dump";
 import { InvalidToolInputError } from "./capability";
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 // android.view.KeyEvent keycodes for the keyboard tool's named-`key` vocabulary
 // (must cover every key in ../tools/keyboard/key-codes.ts NAMED_KEYS).
 export const ANDROID_NAMED_KEYCODES: Record<string, number> = {
@@ -191,14 +193,13 @@ const ANDROID_CLEAR_BUDGET_MS = 20_000;
  *
  * Without a reservation the dump's own cap is the whole remaining budget, so a
  * slow `uiautomator` can spend all of it and the delete run then starts against
- * a few hundred milliseconds — the half-deleted field this path exists to
- * prevent. Which leg to starve is not symmetric: a squeezed dump degrades to
- * BLIND_DELETE_COUNT, which is merely less exact, while a squeezed delete run
- * corrupts the field.
+ * a few hundred milliseconds. Which leg to starve is not symmetric: a squeezed
+ * dump degrades to BLIND_DELETE_COUNT, which is merely less exact, while a
+ * squeezed delete run risks a partly-deleted field.
  *
  * Sized to cover the largest run MAX_DELETE_COUNT permits at the worst rate ever
- * measured — see there for the cost model. The read legs keep the remaining ~9s,
- * which covers a warm probe plus a cold dump.
+ * measured (~7.3s — see there), with headroom. The read legs keep the remaining
+ * ~9s, which covers a warm probe plus two dumps.
  */
 const DELETE_RUN_RESERVE_MS = 11_000;
 
@@ -206,10 +207,11 @@ const DELETE_RUN_RESERVE_MS = 11_000;
  * Timeout for the next leg of a clear: whatever is left of the shared budget.
  *
  * `reserveMs` is withheld so an earlier leg cannot consume what a later one
- * needs. There is no per-leg cap: the shared budget is smaller than any of them,
- * so a cap could never bind. Floored at 1s rather than 0 so an already-overrun
- * budget still attempts the call — a 0ms timeout would fail every time, turning
- * a merely slow device into a hard error.
+ * needs. The shared deadline is deliberately the only bound — per-leg caps were
+ * removed because the budget is what actually has to hold, and two of them could
+ * never bind anyway. Floored at 1s rather than 0 so an already-overrun budget
+ * still attempts the call: a 0ms timeout would fail every time, turning a merely
+ * slow device into a hard error.
  */
 function clearLegTimeout(deadline: number, reserveMs = 0): number {
   return Math.max(1_000, deadline - Date.now() - reserveMs);
@@ -305,14 +307,15 @@ export const BLIND_DELETE_COUNT = 120;
 // than started — see clearByDeleting.
 //
 // The cost model, from the measurements recorded in this file: one `input`
-// invocation is dominated by a constant VM start (~0.8s, and 209 deletes took
-// 505ms on a live RN field), plus per-keystroke work that is near zero on an
-// ordinary field but reaches ~69ms/key on a pathological one — a live-filtering
-// search box on API 30, where 150 keys took 6.9s. So the count barely predicts
-// the time on a normal field and dominates it on the worst one, and the limit
-// has to be sized against the worst.
+// invocation carries a constant VM start, plus per-keystroke work that is
+// near-zero against an already-empty field (608 no-op deletes in 0.8s) and real
+// against a field that reacts to every keystroke. The worst case measured is the
+// live-filtering Settings search box on API 30 — 150 keys in 6.9s, i.e. ~46ms
+// per key including the constant. So the count barely predicts the time on an
+// ordinary field and dominates it on the worst one, and the limit has to be
+// sized against the worst.
 //
-// 150 (+ DELETE_MARGIN = 158 keys) is ~10.9s at that worst rate, inside the
+// 150 (+ DELETE_MARGIN = 158 keys) is ~7.3s at that rate, comfortably inside the
 // DELETE_RUN_RESERVE_MS the run is guaranteed. It is still well past the
 // single-line inputs this fallback serves — a login, a search box, a form field.
 export const MAX_DELETE_COUNT = 150;
@@ -331,9 +334,9 @@ export const MAX_DELETE_COUNT = 150;
  * IS such a fixed run: see {@link measureFocusedTextLength} for exactly when,
  * and BLIND_DELETE_COUNT for what it covers.
  *
- * Note the dump reports an EMPTY field's hint in the same `text` attribute on
- * older levels, so a measurement can be the placeholder rather than real
- * content. That is harmless in this direction: it only ever makes the run
+ * Note the dump reports an EMPTY field's hint in the same `text` attribute (on
+ * every level tested, including API 36), so a measurement can be the placeholder
+ * rather than real content. That is harmless in this direction: it only ever makes the run
  * slightly longer than needed, and backspace on an empty field does nothing.
  *
  * Known limit, and the reason this is the fallback rather than the primary path:
@@ -375,34 +378,49 @@ async function clearByDeleting(serial: string, deadline: number): Promise<void> 
   }
   const dels = Array.from({ length: keys }, () => KEYCODE_DEL).join(" ");
   // One invocation for the whole run: `input keyevent` accepts a keycode list.
-  // No floor on this timeout, unlike the read legs: the check above already
-  // established the remaining budget covers the run, and killing adb part-way
-  // through would leave exactly the half-deleted field this path avoids —
-  // deletes already delivered to the device keep landing after the client gives
-  // up.
-  // No reserve withheld here — this IS the leg the reserve was held for.
+  // No reserve withheld — this IS the leg the reserve was held for, so it gets
+  // everything remaining. (Killing adb part-way does NOT stop the device:
+  // measured on API 36, deletes already handed over keep landing, so an
+  // interrupted run finishes anyway and the caller merely sees a spurious
+  // error. The reserve is what keeps that from being the normal outcome.)
   await adbShell(serial, `input keyevent ${KEYCODE_MOVE_END} ${dels}`, {
     timeoutMs: clearLegTimeout(deadline),
   });
 }
 
+// The winner of a UiAutomation race holds the connection for the whole dump
+// (measured 1.97-2.06s, 5/5), while the loser is rejected in ~0.27s. So an
+// immediate retry re-races the same holder and fails too — measured 3/3, both
+// attempts refused. Waiting out the holder first succeeded 3/3.
+const DUMP_RETRY_BACKOFF_MS = 2_500;
+
+// A dump takes ~2s, so a leg with less than this cannot produce one; attempting
+// it anyway would spend the 1s floor out of the delete run's reserve for a
+// result that cannot arrive.
+const MIN_USEFUL_DUMP_MS = 2_500;
+
 /**
- * One `uiautomator dump`, retried once when the device returns no hierarchy.
+ * One `uiautomator dump`, retried once after a backoff when the device returns
+ * no hierarchy.
  *
  * The device serves a single UiAutomation connection, so concurrent readers race
  * — with three dumps in flight, two came back as a bare `Killed` (adb still
  * exiting 0). `describe` reports that to the caller as a capture failure, but
  * here a failed read is silent: it degrades to the blind delete count, and a
  * field longer than that keeps its head while the tool reports `cleared: true`.
- * That is the corruption the measurement exists to prevent, so it is worth one
- * retry — a dump costs ~2s of a 20s budget, and the race is transient.
+ * That is the corruption the measurement exists to prevent, so it is worth
+ * waiting out the holder — two dumps plus the backoff still fit the read legs'
+ * share of the budget.
  *
- * Returns undefined when neither attempt produced a hierarchy.
+ * Returns undefined when neither attempt produced a hierarchy, or when there is
+ * not enough budget left to try.
  */
 async function readHierarchy(serial: string, deadline: number): Promise<string | undefined> {
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await sleep(DUMP_RETRY_BACKOFF_MS);
     // Withhold the delete run's reserve: a slow dump must not leave the run it
     // is measuring for without time to finish.
+    if (deadline - Date.now() - DELETE_RUN_RESERVE_MS < MIN_USEFUL_DUMP_MS) return undefined;
     const xml = await dumpAndroidUiXml(serial, {
       timeoutMs: clearLegTimeout(deadline, DELETE_RUN_RESERVE_MS),
     });
@@ -466,12 +484,15 @@ async function measureFocusedTextLength(
     // Same `EditText` test the TV focus walk uses for `isEditable`, so the two
     // agree on what counts as a text field.
     if (!/EditText/.test(attrs.class ?? "")) continue;
-    if (attrIsTrue(attrs, "password")) return undefined;
-    // An absent `text` is "unreadable", not "empty" — treating it as 0 would
-    // issue DELETE_MARGIN backspaces against a field that may be full. An empty
-    // field dumps `text=""`, which is present and correctly measures 0.
-    const text = attrs.text;
-    if (text === undefined) return undefined;
+    // A password field's text is unreadable, and an absent `text` is
+    // "unreadable" rather than "empty" — reading either as 0 would issue only
+    // DELETE_MARGIN backspaces against a field that may be full. Note this does
+    // NOT abandon a length already found: a dump carrying both a measurable
+    // 300-character field and an unreadable one would otherwise fall to the
+    // blind run and truncate the first, where keeping the longest instead
+    // refuses loudly.
+    const text = attrIsTrue(attrs, "password") ? undefined : attrs.text;
+    if (text === undefined) continue;
     longest = Math.max(longest ?? 0, [...text].length);
   }
   return longest;

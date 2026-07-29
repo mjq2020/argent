@@ -87,14 +87,17 @@ function newTargetHandle(): string {
 // returns and every verdict it computes would otherwise rest on a manual
 // browser session alone.
 export const focusedEditableProbe = (handle: string) => `(() => {
+  // What a user pressing "select all" on THIS machine would send, so the page
+  // sees the real chord. Read from the renderer, not the tool-server host — CDP
+  // reaches remote renderers through a forwarded local port. Resolved OUTSIDE
+  // the try so the catch below can still report it: the chord is dispatched even
+  // when the page could not be read, and it should still be the native one.
+  let mac = false;
+  try { mac = /Mac|iPhone|iPad/i.test((navigator && navigator.platform) || ""); } catch (e) {}
   try {
     const docProto = typeof Document === "undefined" ? {} : Document.prototype;
     const activeOf = (Object.getOwnPropertyDescriptor(docProto, "activeElement") || {}).get;
     const active = (d) => (activeOf ? activeOf.call(d) : d.activeElement);
-    // What a user pressing "select all" on THIS machine would send, so the page
-    // sees the real chord. Read from the renderer, not the tool-server host —
-    // CDP reaches remote renderers through a forwarded local port.
-    const mac = /Mac|iPhone|iPad/i.test((navigator && navigator.platform) || "");
     let doc = document;
     let el = active(doc);
     // Bounded: a malformed page could otherwise cycle host → shadow → host.
@@ -138,25 +141,19 @@ export const focusedEditableProbe = (handle: string) => `(() => {
         return JSON.stringify({ verdict: "not-editable", label, mac });
       }
       if (el.readOnly === true) return JSON.stringify({ verdict: "read-only", label, mac });
-      // A number input the user typed garbage into reports value "" while
-      // visibly holding it, so \`value.length\` alone would call the field empty
-      // and make the verification pass vacuously.
-      const bad = !!(el.validity && el.validity.badInput);
       window[${JSON.stringify(handle)}] = el;
       return JSON.stringify({
         verdict: "editable", label, mac, parked: window[${JSON.stringify(handle)}] === el,
         // A password field is cleared like any other, but its LENGTH is
-        // credential material and this number reaches the agent's context in
-        // the failure message. Report only whether it holds anything.
+        // credential material and would otherwise reach the agent's context in
+        // the failure message. Flag it so that message reports no count.
         secret: (el.type || "") === "password",
-        length: bad ? Math.max(1, (el.value || "").length) : (el.value || "").length,
       });
     }
     if (el.isContentEditable === true) {
       window[${JSON.stringify(handle)}] = el;
       return JSON.stringify({
         verdict: "editable", label, mac, parked: window[${JSON.stringify(handle)}] === el,
-        length: (el.textContent || "").length,
       });
     }
     // Anything else is refused, INCLUDING a custom element whose shadow root is
@@ -169,7 +166,7 @@ export const focusedEditableProbe = (handle: string) => `(() => {
     // clear on closed-shadow components; guessing costs silent data corruption.
     return JSON.stringify({ verdict: "not-editable", label, mac });
   } catch (e) {
-    return JSON.stringify({ verdict: "unknown" });
+    return JSON.stringify({ verdict: "unknown", mac });
   }
 })()`;
 
@@ -207,7 +204,6 @@ export const clearedTargetProbe = (handle: string) => `(() => {
 export interface FocusedEditable {
   verdict: "editable" | "not-editable" | "read-only" | "none" | "unknown";
   label?: string;
-  length?: number;
   mac?: boolean;
   /** True for a password input, whose length must not be echoed back. */
   secret?: boolean;
