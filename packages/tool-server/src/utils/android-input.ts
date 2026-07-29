@@ -417,10 +417,14 @@ const MIN_USEFUL_DUMP_MS = 2_500;
  */
 async function readHierarchy(serial: string, deadline: number): Promise<string | undefined> {
   for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) await sleep(DUMP_RETRY_BACKOFF_MS);
-    // Withhold the delete run's reserve: a slow dump must not leave the run it
-    // is measuring for without time to finish.
-    if (deadline - Date.now() - DELETE_RUN_RESERVE_MS < MIN_USEFUL_DUMP_MS) return undefined;
+    const waitMs = attempt > 0 ? DUMP_RETRY_BACKOFF_MS : 0;
+    // Withhold the delete run's reserve, and count the backoff BEFORE spending
+    // it: sleeping first and checking after would let the wait itself come out
+    // of the reserve, which is the one thing the reserve exists to stop.
+    if (deadline - Date.now() - waitMs - DELETE_RUN_RESERVE_MS < MIN_USEFUL_DUMP_MS) {
+      return undefined;
+    }
+    if (waitMs > 0) await sleep(waitMs);
     const xml = await dumpAndroidUiXml(serial, {
       timeoutMs: clearLegTimeout(deadline, DELETE_RUN_RESERVE_MS),
     });
