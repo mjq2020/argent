@@ -176,8 +176,12 @@ const KEYCODE_DEL = 67;
  * device. So they share one deadline instead.
  *
  * 20s covers the slowest path measured on API 30 (a ~2s dump plus 6.9s of
- * deletes against the live-filtering Settings search box) with room to spare,
- * and leaves the rest of the 30s for the text/key legs that follow.
+ * deletes against the live-filtering Settings search box) with room to spare.
+ * It bounds the CLEAR only: `text` and `key` keep their own ADB_INPUT_TIMEOUT_MS
+ * caps, which is the pre-existing budget for a call without a clear. So this
+ * stops the clear from blowing the request budget on its own; it does not turn
+ * the whole tool call into one deadline, which would mean threading it through
+ * the text/key injectors the Android-TV blueprint shares.
  */
 const ANDROID_CLEAR_BUDGET_MS = 20_000;
 
