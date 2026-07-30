@@ -69,8 +69,24 @@ run_phase() {
   # fail boot-device on a missing X server — turning the release gate red for
   # exactly the environment this check exists to skip. Run the whole harness
   # under `xvfb-run` instead; that supplies a real DISPLAY.
-  if [ "$E2E_OS" = "linux" ] && [ -z "${DISPLAY:-}" ]; then
-    skip "$P" tier all "no DISPLAY on Linux (re-run the harness under xvfb-run)"; return 0
+  #
+  # A set-but-unusable DISPLAY costs the same red gate and is not rare: a
+  # display-manager session switch leaves $DISPLAY pointing at a server this
+  # process has no cookie for, and Electron then binds its CDP port and never
+  # answers on it, so the failure surfaces as an opaque readiness timeout rather
+  # than as "no display". Probe it when a probe tool exists; when none does, say
+  # so in the skip rather than implying the display was checked.
+  if [ "$E2E_OS" = "linux" ]; then
+    if [ -z "${DISPLAY:-}" ]; then
+      skip "$P" tier all "no DISPLAY on Linux (re-run the harness under xvfb-run)"; return 0
+    fi
+    if command -v xdpyinfo >/dev/null 2>&1; then
+      xdpyinfo >/dev/null 2>&1 || { skip "$P" tier all "DISPLAY=$DISPLAY set but not reachable (xdpyinfo failed)"; return 0; }
+    elif command -v xset >/dev/null 2>&1; then
+      xset -q >/dev/null 2>&1 || { skip "$P" tier all "DISPLAY=$DISPLAY set but not reachable (xset failed)"; return 0; }
+    else
+      info "no xdpyinfo/xset: DISPLAY=$DISPLAY assumed usable, unverified"
+    fi
   fi
 
   local ebin; ebin="$(_find_electron)"
