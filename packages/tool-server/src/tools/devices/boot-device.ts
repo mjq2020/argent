@@ -148,12 +148,12 @@ type BootDeviceResult =
 // `emulator -help`) and are flag-only with no host detection, so they apply
 // uniformly to macOS and Linux. The sibling dialog-suppression flag
 // `-crash-report-mode never` is deliberately NOT here: it is missing from many
-// builds (e.g. 36.1.9.0 does not list it) and an unrecognized option aborts
-// the launch, so it is feature-detected per boot — see `crashReportArgs` in
-// `bootAndroid`. `-noaudio` and `-netfast` change qemu device topology, which
-// means these — and `crashReportArgs` — must be passed identically to the
-// snapshot probe, hot boot, and cold boot: a mismatch would silently
-// invalidate the snapshot the previous cold boot saved.
+// builds (e.g. 36.1.9.0 answers `unknown option` for it) and an unrecognized
+// option aborts the launch, so it is feature-detected per boot — see
+// `crashReportArgs` in `bootAndroid`. `-noaudio` and `-netfast` change qemu
+// device topology, so these must be passed identically to the snapshot probe,
+// hot boot, and cold boot: a mismatch would silently invalidate the snapshot
+// the previous cold boot saved.
 const LAUNCH_HARDENING_ARGS = ["-noaudio", "-no-boot-anim", "-netfast", "-no-metrics"] as const;
 
 // Each stage has its own sub-budget so a hang in one stage cannot consume the
@@ -1090,8 +1090,10 @@ async function bootAndroidImpl(params: {
   // boot with "unknown option: -crash-report-mode" and the device never comes
   // up. Computed here (after the already-running reuse fast-path returns) so
   // the `-help` probe is skipped when we are not going to spawn, and shared by
-  // the snapshot probe and the hot- and cold-boot arg lists below — all three
-  // must agree, exactly like LAUNCH_HARDENING_ARGS.
+  // the snapshot probe and the hot- and cold-boot arg lists below. Unlike
+  // LAUNCH_HARDENING_ARGS this one carries no snapshot risk — it selects crash
+  // reporting, not qemu devices — but one decision reused across all three
+  // spawns is a flag that cannot be detected differently for each.
   const crashReportArgs = (await emulatorSupportsFlag("-crash-report-mode"))
     ? ["-crash-report-mode", "never"]
     : [];
@@ -1176,9 +1178,9 @@ async function bootAndroidImpl(params: {
   // Cold boot fallback (either no usable snapshot, or hot-boot attempt failed).
   // Renderer args mirror the hot-boot path so the snapshot this cold boot
   // saves matches the renderer the next launch's probe will resolve.
-  // LAUNCH_HARDENING_ARGS and crashReportArgs likewise — `-noaudio` and
-  // `-netfast` change device topology, so a mismatch between cold-save and
-  // hot-load would invalidate the saved snapshot.
+  // LAUNCH_HARDENING_ARGS likewise — `-noaudio` and `-netfast` change device
+  // topology, so a mismatch between cold-save and hot-load would invalidate the
+  // saved snapshot. crashReportArgs rides along from the same detection.
   const coldArgs = [
     "-avd",
     params.avdName,
