@@ -55,7 +55,7 @@ run_phase() {
       export E2E_ANDROID_SERIAL="$DEV"
       pass "$P" boot-device boot "booted $DEV"
     else
-      fail "$P" boot-device boot "$(printf '%s' "$RT_OUT" | tr '\n' ' ' | cut -c1-160)"; return 0
+      fail "$P" boot-device boot "$(rt_detail 160)"; return 0
     fi
   else
     skip "$P" tier all "no Android device (set E2E_ANDROID_SERIAL or E2E_ANDROID_AVD)"; return 0

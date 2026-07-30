@@ -112,6 +112,30 @@ skip() { # phase tool case reason
 }
 
 # ---------------------------------------------------------------------------
+# One-line summary of the last run_tool call, for a failure detail.
+#
+# timeout(1) kills the CLI before it writes anything, so RT_OUT is empty exactly
+# when the operator most needs to know what happened — a hung tool would
+# otherwise be recorded as a failure with a blank detail, indistinguishable from
+# one that reported nothing. Name the timeout instead. timeout reserves 124 for
+# a timeout, 125 for its own failure, 126 for a command it cannot invoke and 127
+# for one it cannot find.
+# ---------------------------------------------------------------------------
+rt_detail() { # [max-chars]
+  local max="${1:-180}" body
+  body="$(printf '%s' "$RT_OUT" | tr '\n' ' ' | sed 's/^ *//; s/ *$//' | cut -c1-"$max")"
+  if [ -n "$body" ]; then
+    printf 'rc=%s: %s' "$RT_RC" "$body"
+    return
+  fi
+  case "$RT_RC" in
+    124) printf 'timed out after %ss, no output' "$TOOL_TIMEOUT" ;;
+    125|126|127) printf 'tool never ran (timeout rc=%s)' "$RT_RC" ;;
+    *) printf 'rc=%s, no output' "$RT_RC" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # Assertion helpers (all take: phase tool case ...).
 # ---------------------------------------------------------------------------
 
@@ -122,7 +146,7 @@ assert_ok() { # phase tool case json-args
   if [ "$RT_RC" -eq 0 ]; then
     pass "$phase" "$tool" "$case"
   else
-    fail "$phase" "$tool" "$case" "$(printf '%s' "$RT_OUT" | tr '\n' ' ' | cut -c1-200)"
+    fail "$phase" "$tool" "$case" "$(rt_detail 200)"
   fi
 }
 
@@ -131,7 +155,7 @@ assert_field() { # phase tool case json-args jq-filter expected
   local phase="$1" tool="$2" case="$3" args="$4" filter="$5" expected="$6"
   run_tool "$tool" "$args"
   if [ "$RT_RC" -ne 0 ]; then
-    fail "$phase" "$tool" "$case" "rc=$RT_RC: $(printf '%s' "$RT_OUT" | tr '\n' ' ' | cut -c1-160)"
+    fail "$phase" "$tool" "$case" "$(rt_detail 160)"
     return
   fi
   local got; got=$(printf '%s' "$RT_JSON" | jq -r "$filter" 2>/dev/null)
@@ -147,7 +171,7 @@ assert_true() { # phase tool case json-args jq-filter
   local phase="$1" tool="$2" case="$3" args="$4" filter="$5"
   run_tool "$tool" "$args"
   if [ "$RT_RC" -ne 0 ]; then
-    fail "$phase" "$tool" "$case" "rc=$RT_RC: $(printf '%s' "$RT_OUT" | tr '\n' ' ' | cut -c1-160)"
+    fail "$phase" "$tool" "$case" "$(rt_detail 160)"
     return
   fi
   local got; got=$(printf '%s' "$RT_JSON" | jq -r "$filter" 2>/dev/null)

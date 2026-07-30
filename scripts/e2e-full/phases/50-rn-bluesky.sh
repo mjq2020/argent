@@ -85,7 +85,7 @@ run_phase() {
 
   run_tool debugger-connect "{\"device_id\":\"$DEV\",\"port\":$MPORT}"
   if [ "$RT_RC" -ne 0 ]; then
-    fail "$P" debugger-connect connect "$(printf '%s' "$RT_OUT"|tr '\n' ' '|cut -c1-160)"
+    fail "$P" debugger-connect connect "$(rt_detail 160)"
     _skip_all "debugger-connect failed"; _rn_stop_metro; return 0
   fi
   local LID; LID="$(printf '%s' "$RT_JSON" | jq -r '.logicalDeviceId // empty')"
@@ -145,7 +145,7 @@ run_phase() {
     for t in react-profiler-start react-profiler-status react-profiler-stop react-profiler-analyze \
              react-profiler-renders react-profiler-fiber-tree react-profiler-cpu-summary react-profiler-component-source \
              profiler-load profiler-cpu-query profiler-commit-query profiler-stack-query profiler-combined-report; do
-      skip "$P" "$t" happy-path "react-profiler-start failed: $(printf '%s' "$RT_OUT"|tr '\n' ' '|cut -c1-80)"
+      skip "$P" "$t" happy-path "react-profiler-start failed: $(rt_detail 80)"
     done
   fi
 
@@ -158,7 +158,7 @@ run_phase() {
     assert_ok "$P" native-profiler-analyze np-analyze "{\"device_id\":\"$DEV\"}"
     assert_ok "$P" profiler-load load-native "{\"mode\":\"load_native\",\"device_id\":\"$DEV\",\"app_process\":\"$PKG\"}"
   else
-    skip "$P" native-profiler-start  np-start   "start failed: $(printf '%s' "$RT_OUT"|tr '\n' ' '|cut -c1-80)"
+    skip "$P" native-profiler-start  np-start   "start failed: $(rt_detail 80)"
     skip "$P" native-profiler-stop   np-stop    "native profiler not started"
     skip "$P" native-profiler-analyze np-analyze "native profiler not started"
   fi

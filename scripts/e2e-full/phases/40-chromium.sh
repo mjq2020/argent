@@ -90,7 +90,7 @@ run_phase() {
   # setups; disable-gpu keeps rendering deterministic.
   run_tool boot-device "{\"electronAppPath\":\"$appdir\",\"electronPort\":$port,\"electronArgs\":[\"--no-sandbox\",\"--disable-gpu\"]}"
   if [ "$RT_RC" -ne 0 ] || ! printf '%s' "$RT_JSON" | jq -e '.booted==true' >/dev/null 2>&1; then
-    fail "$P" boot-device boot "$(printf '%s' "$RT_OUT" | tr '\n' ' ' | cut -c1-180)"
+    fail "$P" boot-device boot "$(rt_detail 180)"
     skip "$P" tier remaining "electron did not boot"; return 0
   fi
   local DEV; DEV="$(printf '%s' "$RT_JSON" | jq -r '.id // .udid // .serial // empty')"
@@ -130,7 +130,7 @@ run_phase() {
     case "$RT_OUT" in
       *"Not supported"*|*"not supported"*)
         skip "$P" chromium-tabs new "single-window Electron: tab creation not supported" ;;
-      *) fail "$P" chromium-tabs new "$(printf '%s' "$RT_OUT"|tr '\n' ' '|cut -c1-140)" ;;
+      *) fail "$P" chromium-tabs new "$(rt_detail 140)" ;;
     esac
     # Whatever the reason `new` gave, there is no second tab, so select/close
     # were not exercised. Record that on both arms or the report counts
