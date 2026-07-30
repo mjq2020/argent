@@ -5,10 +5,18 @@
 run_phase() {
   local P=cleanup
 
-  # Stop any simulator-servers this run started (Android/iOS backends).
-  if [ -n "${ARGENT_TOOLS_URL:-}" ]; then
-    run_tool stop-all-simulator-servers '{}' >/dev/null 2>&1 && pass "$P" stop-all-simulator-servers teardown || skip "$P" stop-all-simulator-servers teardown "no server/none running"
+  # Stop any simulator-servers this run started (Android/iOS backends), and
+  # Metro with them. Gated on the tool-server actually answering rather than on
+  # ARGENT_TOOLS_URL: the harness never pins that variable — ensure_server lets
+  # the CLI auto-spawn on a free port and discovers it through the sandbox
+  # ~/.argent — so keying off it skips both teardowns and leaves a
+  # simulator-server and Metro alive after the run.
+  if server_running; then
+    run_tool stop-all-simulator-servers '{}' >/dev/null 2>&1 && pass "$P" stop-all-simulator-servers teardown || skip "$P" stop-all-simulator-servers teardown "none running"
     run_tool stop-metro '{}' >/dev/null 2>&1 && pass "$P" stop-metro teardown || skip "$P" stop-metro teardown "no metro"
+  else
+    skip "$P" stop-all-simulator-servers teardown "no reachable tool-server"
+    skip "$P" stop-metro teardown "no reachable tool-server"
   fi
 
   # Kill any Electron we spawned (tracked by 40-chromium).
@@ -28,8 +36,13 @@ run_phase() {
     info "killed metro pid $E2E_METRO_PID"
   fi
 
-  # Stop our private tool-server.
+  # Stop our private tool-server, and confirm it actually went down — this case
+  # is the run's only record that nothing was left behind, so it has to check
+  # rather than assert.
   argent_cli server stop >/dev/null 2>&1 && info "stopped private tool-server" || true
-
-  pass "$P" harness teardown-complete
+  if server_running; then
+    fail "$P" harness teardown-complete "tool-server still answering after 'server stop'"
+  else
+    pass "$P" harness teardown-complete
+  fi
 }

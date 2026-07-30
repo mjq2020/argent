@@ -87,8 +87,9 @@ run_phase() {
   ensure_server || warn "could not restart server after stop test"
 
   # --- link / unlink round-trip (sandbox ~/.argent/link.json) --------------
-  # NB: setting a link overrides discovery; unset it immediately so downstream
-  # phases keep using ARGENT_TOOLS_URL.
+  # NB: a link overrides discovery, and this one points at a port no server
+  # listens on, so unset it immediately or every downstream phase talks to
+  # nothing instead of to the server recorded in the sandbox ~/.argent.
   if argent_cli link "http://127.0.0.1:${E2E_TOOLS_PORT}"; then
     pass "$P" link set
     if [ -f "$E2E_HOME/.argent/link.json" ]; then pass "$P" link persisted; else skip "$P" link persisted "no link.json"; fi

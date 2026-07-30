@@ -70,8 +70,13 @@ run_phase() {
     # --- missing-required ---------------------------------------------------
     if [ -n "$reqs" ]; then
       local first_req; first_req="$(printf '%s\n' "$reqs" | head -1)"
-      # omit everything -> the first required flag must be flagged undefined
-      assert_reject "$P" "$t" missing-required '{}' "$first_req" "invalid_type"
+      # omit everything -> the first required flag must be flagged undefined.
+      # An omitted enum is reported as invalid_value rather than invalid_type,
+      # because zod checks the value against the member list before it reports a
+      # type mismatch.
+      local first_code="invalid_type"
+      [ "$(model_flag_kind "$model" "$first_req")" = "enum" ] && first_code="invalid_value"
+      assert_reject "$P" "$t" missing-required '{}' "$first_req" "$first_code"
     else
       case " $_VAL_EXCLUDE_MISSING " in
         *" $t "*) : ;;  # device/stateful no-arg tool: covered elsewhere

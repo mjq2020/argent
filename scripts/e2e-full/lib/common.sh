@@ -82,10 +82,10 @@ ${RT_ERR}"
 }
 
 # ---------------------------------------------------------------------------
-# Result recording. One JSON object per test case appended to $E2E_JSONL.
-# Counters live in files so subshells/phases aggregate correctly.
+# Result recording. One JSON object per test case appended to $E2E_JSONL, which
+# is the single source of truth: run-e2e.sh derives the totals and the exit code
+# from it with jq, so a phase that dies mid-way still has everything it recorded.
 # ---------------------------------------------------------------------------
-PASS_N=0; FAIL_N=0; SKIP_N=0
 
 _record() { # phase tool case status detail
   jq -nc \
@@ -98,19 +98,16 @@ _record() { # phase tool case status detail
 pass() { # phase tool case [detail]
   local phase="${1:-}" tool="${2:-}" case="${3:-}" detail="${4:-}"
   _record "$phase" "$tool" "$case" "pass" "$detail"
-  PASS_N=$((PASS_N + 1))
   printf '%s\n' "  ${C_GRN}✓${C_RST} ${C_DIM}$tool${C_RST} $case" >&2
 }
 fail() { # phase tool case detail
   local phase="${1:-}" tool="${2:-}" case="${3:-}" detail="${4:-}"
   _record "$phase" "$tool" "$case" "fail" "$detail"
-  FAIL_N=$((FAIL_N + 1))
   printf '%s\n' "  ${C_RED}✗${C_RST} $tool ${C_DIM}[$case]${C_RST} $detail" >&2
 }
 skip() { # phase tool case reason
   local phase="${1:-}" tool="${2:-}" case="${3:-}" detail="${4:-}"
   _record "$phase" "$tool" "$case" "skip" "$detail"
-  SKIP_N=$((SKIP_N + 1))
   printf '%s\n' "  ${C_YEL}∼${C_RST} ${C_DIM}$tool ($case): $detail${C_RST}" >&2
 }
 
@@ -161,9 +158,25 @@ assert_true() { # phase tool case json-args jq-filter
   fi
 }
 
-# The tool call must FAIL (rc != 0). If `path` is given, and stdout is a zod
-# issue array, at least one issue must match that path (proves the specific
-# field was rejected, not just an unrelated error).
+# The zod issue array a rejected call produces, or empty if the output holds
+# none. The CLI prints issues on STDERR — stdout carries only successful results
+# and is empty on a rejection — but both streams are searched so a tool that
+# reports on stdout is still checked rather than waved through.
+zod_issues() {
+  local s
+  for s in "$RT_ERR" "$RT_JSON"; do
+    if printf '%s' "$s" | jq -e 'type=="array" and length>0 and all(.[]; has("path") and has("code"))' >/dev/null 2>&1; then
+      printf '%s' "$s"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The tool call must FAIL (rc != 0). If `path` is given and the output carries
+# zod issues, one of them must name that path — a rejection blamed on a
+# different field means the tool refused this input for an unrelated reason and
+# the case proved nothing about the field it was built to exercise.
 assert_reject() { # phase tool case json-args [zod-path] [zod-code]
   local phase="$1" tool="$2" case="$3" args="$4" zpath="${5:-}" zcode="${6:-}"
   run_tool "$tool" "$args"
@@ -171,23 +184,31 @@ assert_reject() { # phase tool case json-args [zod-path] [zod-code]
     fail "$phase" "$tool" "$case" "expected rejection but tool SUCCEEDED"
     return
   fi
-  if [ -n "$zpath" ]; then
-    # Best-effort structured check: if stdout is a zod issue array, assert a
-    # matching issue exists. If output isn't JSON (e.g. plain service error),
-    # the non-zero exit alone satisfies the case.
-    local hit
-    hit=$(printf '%s' "$RT_JSON" | jq -e --arg p "$zpath" --arg c "$zcode" '
-      if type=="array" then
-        any(.[]; (.path[0] == $p) and ($c=="" or .code==$c))
-      else false end' 2>/dev/null)
-    if [ "$hit" = "true" ]; then
-      pass "$phase" "$tool" "$case" "rejected $zpath${zcode:+/$zcode}"
-    else
-      # Non-structured failure still counts as a rejection, but note it.
-      pass "$phase" "$tool" "$case" "rc=$RT_RC (unstructured)"
-    fi
-  else
+  # Every call goes through timeout(1), which reserves 124 for a timeout, 125
+  # for its own failure, 126 for a command it cannot invoke and 127 for one it
+  # cannot find. In all four the schema never judged the input, so none is a
+  # rejection — counting them as one lets a hung server or a broken ARGENT_BIN
+  # report a fully green validation tier.
+  case "$RT_RC" in
+    124) fail "$phase" "$tool" "$case" "timed out after ${TOOL_TIMEOUT}s — no verdict on the input"; return;;
+    125|126|127) fail "$phase" "$tool" "$case" "tool never ran (timeout rc=$RT_RC) — no verdict on the input"; return;;
+  esac
+  if [ -z "$zpath" ]; then
     pass "$phase" "$tool" "$case" "rc=$RT_RC"
+    return
+  fi
+  local issues
+  if ! issues="$(zod_issues)"; then
+    # A plain service error carries no field attribution; the non-zero exit
+    # alone has to stand in for it.
+    pass "$phase" "$tool" "$case" "rc=$RT_RC (unstructured)"
+    return
+  fi
+  if printf '%s' "$issues" | jq -e --arg p "$zpath" --arg c "$zcode" \
+       'any(.[]; (.path[0] == $p) and ($c=="" or .code==$c))' >/dev/null 2>&1; then
+    pass "$phase" "$tool" "$case" "rejected $zpath${zcode:+/$zcode}"
+  else
+    fail "$phase" "$tool" "$case" "rejected, but no issue names $zpath${zcode:+/$zcode}: $(printf '%s' "$issues" | jq -c '[.[]|{path:.path[0],code}]' 2>/dev/null | cut -c1-140)"
   fi
 }
 
@@ -234,6 +255,9 @@ artifact_path() { # <jq-path-to-artifact-object, default .image>
 capture_screenshot() { # udid outfile
   local udid="$1" out="$2" cmd
   read -ra cmd <<< "${ARGENT_BIN:?}"
+  # Clear the previous call's results, or a capture that produces no file at all
+  # reports the size and path of the last one that succeeded.
+  SHOT_PATH=""; SHOT_SIZE=0; SHOT_RC=0
   rm -f "$out"
   timeout "$TOOL_TIMEOUT" "${cmd[@]}" run screenshot --udid "$udid" --out "$out" >/dev/null 2>&1
   SHOT_RC=$?

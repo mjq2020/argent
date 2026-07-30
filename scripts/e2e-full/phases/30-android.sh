@@ -75,13 +75,15 @@ run_phase() {
   assert_true "$P" open-url url "{\"udid\":\"$DEV\",\"url\":\"https://example.com\"}" '.opened'
 
   # --- screenshot-diff (two live captures) ----------------------------------
-  local b c
+  # Each capture writes its own file, so the pair can be handed to the tool as
+  # they are. Both are declared empty first: a failed capture leaves its
+  # variable unassigned, and under `set -u` reading one would abort the tier.
+  local b="" c=""
   _shot_ok "$P" "$DEV" diff-baseline && b="$SHOT_PATH"
-  cp "$b" "$E2E_WORK/diff-base.png" 2>/dev/null || true
   run_tool button "{\"udid\":\"$DEV\",\"button\":\"home\"}" >/dev/null 2>&1
   _shot_ok "$P" "$DEV" diff-current && c="$SHOT_PATH"
-  if [ -n "${b:-}" ] && [ -n "${c:-}" ]; then
-    assert_ok "$P" screenshot-diff diff "{\"udid\":\"$DEV\",\"baselinePath\":\"$E2E_WORK/diff-base.png\",\"currentPath\":\"$c\"}"
+  if [ -n "$b" ] && [ -n "$c" ]; then
+    assert_ok "$P" screenshot-diff diff "{\"udid\":\"$DEV\",\"baselinePath\":\"$b\",\"currentPath\":\"$c\"}"
   else
     skip "$P" screenshot-diff diff "could not capture two screenshots"
   fi

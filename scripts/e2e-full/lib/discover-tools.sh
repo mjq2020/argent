@@ -44,8 +44,11 @@ parse_tool_model() { # <tool>
     /^Flags:/ { inflags=1; next }
     inflags && /^[[:space:]]*--/ {
       line=$0
-      # flag name
-      match(line, /--[a-zA-Z0-9-]+/); name=substr(line, RSTART+2, RLENGTH-2)
+      # Flag name. The class has to include "_": flags are named after their
+      # schema keys, and the snake_case ones (--device_id, --project_root,
+      # --component_name) would otherwise be truncated at the underscore, so
+      # every argument built from this model would carry a key no schema knows.
+      match(line, /--[a-zA-Z0-9_-]+/); name=substr(line, RSTART+2, RLENGTH-2)
       req = (line ~ /\(required\)/) ? 1 : 0
       kind="unknown"; enums=""
       if (line ~ /enum:/) {
