@@ -79,7 +79,13 @@ run_phase() {
   # skip it silently — anything it did was unreliable by construction. Pin the
   # absence so the hook cannot creep back in: assert neither the script file
   # nor a `postinstall` entry in the shipped package.json.
-  if [ -f "$pkg/scripts/postinstall.cjs" ] || jq -e '.scripts.postinstall' "$pkg/package.json" >/dev/null 2>&1; then
+  # Read the manifest first: `jq -e` exits non-zero for an unreadable file just
+  # as it does for an absent key, so without this an install missing its
+  # package.json would report "no hook" — an absence check passing because it
+  # could not look, which is the one way this assertion is worth nothing.
+  if ! jq -e . "$pkg/package.json" >/dev/null 2>&1; then
+    fail "$P" postinstall no-hook "package.json missing or unparseable at $pkg"
+  elif [ -f "$pkg/scripts/postinstall.cjs" ] || jq -e '.scripts.postinstall' "$pkg/package.json" >/dev/null 2>&1; then
     fail "$P" postinstall no-hook "package ships a postinstall hook again (dropped in #510)"
   else
     pass "$P" postinstall no-hook
