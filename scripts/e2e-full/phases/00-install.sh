@@ -39,9 +39,9 @@ run_phase() {
 
   # --- the sandbox global install produced a working CLI --------------------
   if argent_cli --version && [ "$CLI_OUT" = "$TGZ_VERSION" ]; then
-    pass "$P" npm-global "argent v$CLI_OUT on PATH"
+    pass "$P" npm-global version "argent v$CLI_OUT on PATH"
   else
-    fail "$P" npm-global "version '$CLI_OUT' != '$TGZ_VERSION' (install broken?)"
+    fail "$P" npm-global version "got '$CLI_OUT' want '$TGZ_VERSION' (install broken?)"
   fi
 
   if [ -n "$pkg" ] && [ -d "$pkg" ]; then
@@ -141,9 +141,9 @@ run_phase() {
   # workspace install.
   pushd "$lws" >/dev/null
   if argent_cli update --yes; then
-    pass "$P" update "completed (rc=0)"
+    pass "$P" update ran "completed (rc=0)"
   else
-    skip "$P" update "non-zero (likely offline/registry): $(printf '%s' "$CLI_OUT" | head -1)"
+    skip "$P" update ran "non-zero (likely offline/registry): $(printf '%s' "$CLI_OUT" | head -1)"
   fi
   popd >/dev/null
 

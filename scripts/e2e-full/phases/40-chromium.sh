@@ -90,14 +90,14 @@ run_phase() {
   # setups; disable-gpu keeps rendering deterministic.
   run_tool boot-device "{\"electronAppPath\":\"$appdir\",\"electronPort\":$port,\"electronArgs\":[\"--no-sandbox\",\"--disable-gpu\"]}"
   if [ "$RT_RC" -ne 0 ] || ! printf '%s' "$RT_JSON" | jq -e '.booted==true' >/dev/null 2>&1; then
-    fail "$P" boot-device "$(printf '%s' "$RT_OUT" | tr '\n' ' ' | cut -c1-180)"
+    fail "$P" boot-device boot "$(printf '%s' "$RT_OUT" | tr '\n' ' ' | cut -c1-180)"
     skip "$P" tier remaining "electron did not boot"; return 0
   fi
   local DEV; DEV="$(printf '%s' "$RT_JSON" | jq -r '.id // .udid // .serial // empty')"
   [ -z "$DEV" ] && DEV="chromium-cdp-$port"
   export E2E_ELECTRON_PID="$(printf '%s' "$RT_JSON" | jq -r '.pid // empty')"
   export E2E_ELECTRON_PORT="$port"
-  pass "$P" boot-device "electron $DEV (port $port)"
+  pass "$P" boot-device boot "electron $DEV (port $port)"
 
   # --- discovery ------------------------------------------------------------
   assert_true "$P" list-devices present "{}" "(any(.devices[]?; (.id//.udid//.serial)==\"$DEV\"))"

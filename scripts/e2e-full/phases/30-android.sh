@@ -31,7 +31,7 @@ run_phase() {
   if [ -n "${E2E_ANDROID_SERIAL:-}" ]; then
     DEV="$E2E_ANDROID_SERIAL"
     if _android_present "$DEV"; then
-      pass "$P" list-devices "injected serial $DEV present"
+      pass "$P" list-devices present "injected serial $DEV"
     else
       skip "$P" tier all "injected serial $DEV not visible to tool-server"; return 0
     fi
@@ -53,9 +53,9 @@ run_phase() {
       # without this `--android-avd` drives this tier fully and then blanket-skips
       # all 24 debugger/profiler tools for want of a device that is right there.
       export E2E_ANDROID_SERIAL="$DEV"
-      pass "$P" boot-device "booted $DEV"
+      pass "$P" boot-device boot "booted $DEV"
     else
-      fail "$P" boot-device "$(printf '%s' "$RT_OUT" | tr '\n' ' ' | cut -c1-160)"; return 0
+      fail "$P" boot-device boot "$(printf '%s' "$RT_OUT" | tr '\n' ' ' | cut -c1-160)"; return 0
     fi
   else
     skip "$P" tier all "no Android device (set E2E_ANDROID_SERIAL or E2E_ANDROID_AVD)"; return 0
