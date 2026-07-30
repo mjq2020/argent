@@ -213,8 +213,10 @@ assert_reject() { # phase tool case json-args [zod-path] [zod-code]
 }
 
 # ---------------------------------------------------------------------------
-# Private tool-server lifecycle. Uses ARGENT_TOOLS_URL so `argent run` targets
-# OUR server (own port), and a sandbox HOME so its state file is isolated.
+# Private tool-server lifecycle. Isolation comes from the sandbox HOME alone:
+# the server's state file lands in $E2E_HOME/.argent, so every `argent` call in
+# this run discovers our server and no foreign one. ARGENT_TOOLS_URL is
+# deliberately never set — see ensure_server below.
 # ---------------------------------------------------------------------------
 # Is a healthy tool-server discoverable for this install (via ~/.argent state)?
 server_running() {
@@ -241,12 +243,6 @@ ensure_server() {
 
 # PNG "real pixels" floor, shared with drive-device.sh rationale.
 MIN_SHOT_BYTES="${MIN_SHOT_BYTES:-20000}"
-
-# Extract an artifact hostPath from a screenshot-style envelope on stdout.
-artifact_path() { # <jq-path-to-artifact-object, default .image>
-  local sel="${1:-.image}"
-  printf '%s' "$RT_JSON" | jq -r "${sel}.hostPath // empty" 2>/dev/null
-}
 
 # Capture a screenshot straight to a file via `argent run screenshot --out`
 # (the CLI renders screenshot artifacts as a "Saved screenshot: <path>" message

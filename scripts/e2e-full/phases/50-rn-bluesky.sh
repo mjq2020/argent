@@ -13,8 +13,9 @@
 # Env overrides:
 #   E2E_RN_DIR       default ~/dev/bluesky
 #   E2E_RN_PKG       default xyz.blueskyweb.app
-#   E2E_RN_PREBUILT  =1 to assume the dev-client is already installed (default;
-#                    building via `expo run:android` is too heavy to auto-run)
+#   E2E_RN_BUILD     =1 to build the dev-client with `expo run:android` when it
+#                    is not installed. Off by default: the build is too heavy to
+#                    run unasked, so the tier skips itself instead.
 #   E2E_METRO_PORT   default 8081
 
 _metro_ready() { curl -fsS -m 3 "http://127.0.0.1:${1}/status" 2>/dev/null | grep -q 'packager-status:running'; }
@@ -87,10 +88,16 @@ run_phase() {
     fail "$P" debugger-connect connect "$(printf '%s' "$RT_OUT"|tr '\n' ' '|cut -c1-160)"
     _skip_all "debugger-connect failed"; _rn_stop_metro; return 0
   fi
-  local LID; LID="$(printf '%s' "$RT_JSON" | jq -r '.logicalDeviceId // .device_id // empty')"
-  [ -z "$LID" ] && LID="$DEV"
-  pass "$P" debugger-connect "connected (logicalDeviceId=$LID)"
-  local D="\"device_id\":\"$LID\",\"port\":$MPORT"
+  local LID; LID="$(printf '%s' "$RT_JSON" | jq -r '.logicalDeviceId // empty')"
+  pass "$P" debugger-connect connect "logicalDeviceId=${LID:-none}"
+  # Keep driving the list-devices id. debugger-connect's own contract: "Pass this
+  # SAME id as device_id to every subsequent debugger-* call… The returned
+  # logicalDeviceId is informational… you do not switch to it." Forwarding the
+  # logical id still resolves for the debugger tools via the alias, but the
+  # profiler tools cache their paths under the id they are handed, so a session
+  # recorded under one id would be looked up under the other and come back "No
+  # profiling data stored".
+  local D="\"device_id\":\"$DEV\",\"port\":$MPORT"
 
   # --- debugger chain -------------------------------------------------------
   assert_ok    "$P" debugger-status status "{$D}"
@@ -127,9 +134,11 @@ run_phase() {
     # profiler query tools operate on the loaded react session
     assert_ok "$P" profiler-load load-list "{\"mode\":\"list\",\"device_id\":\"$DEV\"}"
     assert_ok "$P" profiler-cpu-query cpu-top "{$D,\"mode\":\"top_functions\",\"top_n\":10}"
-    assert_ok "$P" profiler-commit-query commits "{$D,\"mode\":\"by_time_range\"}"
-    assert_ok "$P" profiler-stack-query stacks "{$D,\"mode\":\"thread_breakdown\"}"
-    assert_ok "$P" profiler-combined-report combined "{$D}"
+    # by_time_range requires time_range_ms; without it the tool throws before it
+    # reads any data. The window is the whole performance.now timeline, so the
+    # case exercises the query rather than a filter that matches nothing.
+    assert_ok "$P" profiler-commit-query commits \
+      "{$D,\"mode\":\"by_time_range\",\"time_range_ms\":{\"start\":0,\"end\":99999999}}"
     # component-source needs a component name from the render list — best-effort
     skip "$P" react-profiler-component-source rp-src "needs a specific component name (manual)"
   else

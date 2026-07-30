@@ -3,7 +3,8 @@
 #
 # Starting from ONLY a `swmansion-argent-*.tgz`, this:
 #   0. installs from the tarball (global + local), runs init/uninstall/telemetry
-#   1. introspects the CLI (help, all 70 `tools describe`, flags, server, link)
+#   1. introspects the CLI (help, a `tools describe` per published tool, flags,
+#      server, link)
 #   2. validates every tool's argument schema (missing/enum/type rejection)
 #   3. drives a happy-path of every applicable tool against real targets:
 #        - Android emulator      (Linux + Mac)
@@ -41,14 +42,19 @@ export E2E_ANDROID_AVD="${E2E_ANDROID_AVD:-}"
 # help text cannot drift into printing code the way a pinned line range does.
 usage() { sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "${BASH_SOURCE[0]}"; exit "${1:-0}"; }
 
+# A value-taking flag given without its value would otherwise read an unset $2
+# and die on "unbound variable" with no usage text — the least helpful response
+# to a plain typo, and the one the `*)` arm below already handles properly.
+need_val() { [ "$1" -ge 2 ] || { echo "$2 needs a value" >&2; usage 1; }; }
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tgz) TGZ="$2"; shift 2;;
-    --phase|--phases) PHASES="$2"; shift 2;;
+    --tgz) need_val $# "$1"; TGZ="$2"; shift 2;;
+    --phase|--phases) need_val $# "$1"; PHASES="$2"; shift 2;;
     --skip-install) SKIP_INSTALL=1; shift;;
     --system) SYSTEM_INSTALL=1; shift;;
-    --android-serial) E2E_ANDROID_SERIAL="$2"; shift 2;;
-    --android-avd) E2E_ANDROID_AVD="$2"; shift 2;;
+    --android-serial) need_val $# "$1"; E2E_ANDROID_SERIAL="$2"; shift 2;;
+    --android-avd) need_val $# "$1"; E2E_ANDROID_AVD="$2"; shift 2;;
     --keep) KEEP=1; shift;;
     -h|--help) usage 0;;
     *) echo "unknown arg: $1" >&2; usage 1;;
@@ -93,10 +99,18 @@ export E2E_OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 # Results
 RESULTS_DIR="$E2E_ROOT/results"
 mkdir -p "$RESULTS_DIR"
-TS="$(date +%Y%m%d-%H%M%S)"
+# The pid disambiguates two runs started in the same second, which would
+# otherwise share one results file: the second truncates it, both append, and
+# each run's exit code is then computed over the other's cases too.
+TS="$(date +%Y%m%d-%H%M%S)-$$"
 export E2E_JSONL="$RESULTS_DIR/e2e-$TS.jsonl"
 REPORT_MD="$RESULTS_DIR/report-$TS.md"
 : > "$E2E_JSONL"
+
+# Sourced before the teardown trap below is installed: finish() calls group/warn/err
+# and run_one, so the handler has to be defined against a shell that already has them.
+source "$E2E_ROOT/lib/common.sh"
+source "$E2E_ROOT/lib/discover-tools.sh"
 
 # --------------------------------------------------------------------------
 # Teardown. Installed the moment the sandbox and the results log exist, because
@@ -108,9 +122,24 @@ REPORT_MD="$RESULTS_DIR/report-$TS.md"
 # either is assigned, and this must not become the thing that fails.
 # --------------------------------------------------------------------------
 E2E_COMPLETED=0
+CLEANUP_RAN=0
 finish() {
   local rc=$?
   trap - EXIT INT TERM
+
+  # Processes first, sandbox second, and both from in here so an abort reaches
+  # them at all. $E2E_HOME holds the detached tool-server's pid file, and
+  # ensure_server starts that server with no idle timeout — so removing the
+  # sandbox before stopping it strands a process that `argent server stop` can
+  # no longer find, along with any Electron, Metro and fixture server the tiers
+  # spawned.
+  # ARGENT_BIN has to be set before cleanup can run: argent_cli resolves it with
+  # ${ARGENT_BIN:?}, which exits the shell outright — from in here that would
+  # abandon the rest of this handler and leak the sandbox it exists to remove.
+  if [ "$CLEANUP_RAN" -eq 0 ] && [ -n "${ARGENT_BIN:-}" ] && declare -F run_one >/dev/null 2>&1; then
+    CLEANUP_RAN=1
+    run_one cleanup "$E2E_ROOT/phases/90-cleanup.sh" || true
+  fi
 
   group "Generating report"
   E2E_JSONL="$E2E_JSONL" TGZ_VERSION="${TGZ_VERSION:-unknown}" E2E_OS="$E2E_OS" \
@@ -176,9 +205,6 @@ if [ "$SYSTEM_INSTALL" -eq 0 ]; then export npm_config_prefix="$E2E_PREFIX"; fi
 export DO_NOT_TRACK=1
 export CI=1
 
-source "$E2E_ROOT/lib/common.sh"
-source "$E2E_ROOT/lib/discover-tools.sh"
-
 # --------------------------------------------------------------------------
 # Unpack the tarball (used for file-level install assertions + skip-install)
 # --------------------------------------------------------------------------
@@ -213,11 +239,17 @@ else
   # network download and are irrelevant to the offline phases.
   OMIT="--omit=optional"
   if selected chromium || selected rn; then OMIT=""; fi
+  # Published so the install phase can put the driver back exactly as it was
+  # after its uninstall test. Restoring with different flags silently changes
+  # what the rest of the run is testing.
+  export E2E_NPM_OMIT="$OMIT"
   if [ "$SYSTEM_INSTALL" -eq 1 ]; then
     warn "--system: installing to the REAL global prefix (release-machine mode)"
+    export E2E_NPM_PREFIX_ARGS=""
     npm install -g "$E2E_TGZ" $OMIT 2>&1 | tail -20 >&2 || true
     export ARGENT_BIN="$(command -v argent || echo "$E2E_PREFIX/bin/argent")"
   else
+    export E2E_NPM_PREFIX_ARGS="--prefix $E2E_PREFIX"
     npm install -g "$E2E_TGZ" --prefix "$E2E_PREFIX" $OMIT 2>&1 | tail -20 >&2 || true
     export ARGENT_BIN="$E2E_PREFIX/bin/argent"
   fi
@@ -259,8 +291,7 @@ if selected android;       then run_one android       "$E2E_ROOT/phases/30-andro
 if selected chromium;      then run_one chromium      "$E2E_ROOT/phases/40-chromium.sh"; fi
 if selected rn;            then run_one rn            "$E2E_ROOT/phases/50-rn-bluesky.sh"; fi
 
-run_one cleanup "$E2E_ROOT/phases/90-cleanup.sh"
-
-# Every selected phase ran. The EXIT trap renders the report, tears the sandbox
-# down and decides the exit code.
+# Every selected phase ran. The EXIT trap runs the cleanup phase, renders the
+# report, tears the sandbox down and decides the exit code — the same path an
+# aborted run takes, so teardown cannot depend on getting here.
 E2E_COMPLETED=1

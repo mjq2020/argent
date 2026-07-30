@@ -62,7 +62,7 @@ run_phase() {
   if [ -n "$simsrv" ] && [ -x "$simsrv" ]; then
     pass "$P" bundle simulator-server "$(basename "$(dirname "$simsrv")")"
   else
-    fail "$P" bundle simulator-server "missing/again-executable: $simsrv"
+    fail "$P" bundle simulator-server "missing/non-executable: $simsrv"
   fi
   # trace-processor assets (profiler) always shipped
   [ -d "$pkg/assets/trace-processor" ] && pass "$P" bundle trace-processor || fail "$P" bundle trace-processor "assets/trace-processor missing"
@@ -168,8 +168,15 @@ run_phase() {
   # Restore the global driver (uninstall --global removes the sandbox bin that
   # ARGENT_BIN points at). Fast: the tarball is local and npm caches it.
   if [ ! -x "${ARGENT_BIN%% *}" ]; then
-    log "restoring sandbox driver after uninstall test"
-    npm install -g "$E2E_TGZ" --prefix "$E2E_PREFIX" --omit=optional >/dev/null 2>&1 || true
+    log "restoring driver after uninstall test"
+    # Put back exactly what run-e2e.sh installed — same prefix, same
+    # optional-dep policy. Hardcoding --omit=optional here drops electron on a
+    # full run, and the chromium tier then skips itself for the rest of the run
+    # as "electron not installed"; hardcoding the sandbox prefix under --system
+    # restores to the wrong place entirely, leaving the machine's real global
+    # argent (which this test just uninstalled) missing.
+    # shellcheck disable=SC2086
+    npm install -g "$E2E_TGZ" ${E2E_NPM_PREFIX_ARGS:-} ${E2E_NPM_OMIT:-} >/dev/null 2>&1 || true
   fi
   if argent_cli --version >/dev/null 2>&1; then pass "$P" driver-restored ok; else fail "$P" driver-restored ok "argent not runnable after restore"; fi
 }

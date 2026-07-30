@@ -37,7 +37,15 @@ run_phase() {
     fi
   elif [ -n "${E2E_ANDROID_AVD:-}" ]; then
     log "booting AVD $E2E_ANDROID_AVD"
-    run_tool boot-device "{\"avdName\":\"$E2E_ANDROID_AVD\",\"bootTimeoutMs\":840000}"
+    # boot-device is given 840s to bring an AVD up, but run_tool wraps every
+    # call in `timeout $TOOL_TIMEOUT` (120s by default) — which would kill the
+    # CLI at 2 minutes while the tool-server kept booting the emulator
+    # unattended, so this documented flag could never succeed. Give the call a
+    # margin over the budget the tool itself was handed.
+    local BOOT_MS=840000 prev_timeout="$TOOL_TIMEOUT"
+    TOOL_TIMEOUT=$(( BOOT_MS / 1000 + 60 ))
+    run_tool boot-device "{\"avdName\":\"$E2E_ANDROID_AVD\",\"bootTimeoutMs\":$BOOT_MS}"
+    TOOL_TIMEOUT="$prev_timeout"
     if [ "$RT_RC" -eq 0 ] && printf '%s' "$RT_JSON" | jq -e '.booted==true' >/dev/null 2>&1; then
       DEV="$(printf '%s' "$RT_JSON" | jq -r '.serial // .udid // empty')"
       BOOTED_HERE=1
@@ -116,6 +124,14 @@ run_phase() {
   # drives the same serial straight after this.
   if [ "$BOOTED_HERE" -eq 1 ]; then
     assert_ok "$P" stop-simulator-server stop "$U"
+    # And shut the emulator itself down. Nothing else will: the tool-server only
+    # reaps devices Lens booted through its preview path, not ones the
+    # boot-device tool started, so an AVD this phase booted would otherwise
+    # outlive the run. Best-effort — a device already gone must not fail teardown.
+    if command -v adb >/dev/null 2>&1; then
+      adb -s "$DEV" emu kill >/dev/null 2>&1 || true
+      info "sent 'emu kill' to $DEV"
+    fi
   else
     skip "$P" stop-simulator-server stop "injected device left running for the caller"
   fi

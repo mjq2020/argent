@@ -2,7 +2,7 @@
 
 A release-gating end-to-end test that starts from **nothing but a
 `swmansion-argent-*.tgz` bundle** and exercises the whole product: the install
-flow, every CLI command, all 70 tools' argument validation, and a happy-path run
+flow, every CLI command, every tool's argument validation, and a happy-path run
 of every tool that applies against real devices.
 
 Run it on the real Linux box and the real Mac before a release.
@@ -29,7 +29,7 @@ hard assertion failed (skips do not fail the run).
 | phase           | needs                                       | covers                                                                                                                            |
 | --------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `install`       | npm + network                               | `npm i -g <tgz>`, bundled binaries, `init` (global + `--local`), `update`, `uninstall`, telemetry, MCP-config generation          |
-| `introspection` | —                                           | `--version/--help`, `tools`, `tools describe` for **all 70** tools, feature flags, `server start/status/logs/stop`, `link/unlink` |
+| `introspection` | —                                           | `--version/--help`, `tools`, `tools describe` for **every published** tool, feature flags, `server start/status/logs/stop`, `link/unlink` |
 | `validation`    | —                                           | for every tool: missing-required / bad-enum / bad-type rejection (deterministic, no hardware)                                     |
 | `android`       | Android emulator                            | happy-path of every touch/gesture/screenshot/app-lifecycle tool                                                                   |
 | `chromium`      | Electron (bundled optional dep) + a display | boots a generated Electron app; drives CDP tools (scroll/drag/tabs/cookies/storage)                                               |
@@ -66,9 +66,11 @@ E2E_RN_DIR=~/dev/bluesky E2E_RN_PKG=xyz.blueskyweb.app \
   bash scripts/e2e-full/run-e2e.sh --phase rn --android-serial <serial>
 ```
 
-Assumes the Bluesky dev-client is already built and installed on the device
-(`E2E_RN_PREBUILT`, the default). Pass `E2E_RN_BUILD=1` to let it run
-`expo run:android` first (slow). It starts Metro itself and tears it down.
+Assumes the Bluesky dev-client is already built and installed on the device; the
+tier skips itself if the package is absent. Pass `E2E_RN_BUILD=1` to let it run
+`expo run:android` first (slow). It starts Metro if nothing is serving the port
+and tears down only a Metro it started — one you were already running is left
+alone.
 
 ## Flags
 
