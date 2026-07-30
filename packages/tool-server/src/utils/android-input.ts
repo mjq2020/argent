@@ -544,5 +544,10 @@ export function resolveAndroidNamedKeycode(name: string): number {
       }
     );
   }
-  await injectAndroidKeycode(serial, keycode);
+  return keycode;
+}
+
+/** Press a named key (keyboard tool `key` vocabulary) on Android. */
+export async function injectAndroidNamedKey(serial: string, name: string): Promise<void> {
+  await injectAndroidKeycode(serial, resolveAndroidNamedKeycode(name));
 }

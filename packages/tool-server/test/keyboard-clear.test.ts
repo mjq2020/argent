@@ -154,21 +154,23 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     expect(chromium).toEqual(ios);
   });
 
-  it("orders clear → text → key in a single call", async () => {
+  it("orders clear → key in a single call", async () => {
+    // `text` and `key` cannot both be present — the tool rejects that shape (see
+    // keyboard-text-key-exclusive.test.ts) — so `clear` + a named key is the other
+    // combination a caller can send, and the clear still has to land first.
     const { events, api } = recordingApi();
 
     await typeSimulatorServer(registryWith(api), IOS_SIM, {
       udid: IOS_SIM.id,
       clear: true,
-      text: "a",
       key: "enter",
       delayMs: 0,
     });
 
-    // Left GUI, `a`, backspace, the typed `a`, enter — HID usages spelled out
+    // Left GUI, `a`, backspace (the clear), then enter — HID usages spelled out
     // for the same reason as above.
     const downs = events.filter((e) => e.startsWith("Down:"));
-    expect(downs).toEqual(["Down:227", "Down:4", "Down:42", "Down:4", "Down:40"]);
+    expect(downs).toEqual(["Down:227", "Down:4", "Down:42", "Down:40"]);
   });
 
   it("rejects an unknown key before clearing anything", async () => {
@@ -271,17 +273,19 @@ describe("keyboard clear — Android (adb input)", () => {
     expect(result.cleared).toBe(true);
   });
 
-  it("orders clear → text → key in a single call", async () => {
+  it("orders clear → key in a single call", async () => {
+    // `text` and `key` cannot both be present — the tool rejects that shape (see
+    // keyboard-text-key-exclusive.test.ts) — so `clear` + a named key is the other
+    // combination a caller can send, and the clear still has to land first.
     await makeAndroidImpl(registryWith({})).handler(
       {},
-      { udid: ANDROID.id, clear: true, text: "abc", key: "enter" },
+      { udid: ANDROID.id, clear: true, key: "enter" },
       ANDROID
     );
 
     expect(adbShell.mock.calls.map((c) => c[1])).toEqual([
       SELECT_ALL_CMD,
       DEL_CMD,
-      "input text 'abc'",
       "input keyevent 66",
     ]);
   });
@@ -1057,21 +1061,24 @@ describe("keyboard clear — Chromium (CDP)", () => {
     expect(events.map((e) => e.type)).toEqual(["rawKeyDown", "keyUp"]);
   });
 
-  it("orders clear → text → key in a single call", async () => {
+  it("orders clear → key in a single call", async () => {
+    // `text` and `key` cannot both be present — the tool rejects that shape (see
+    // keyboard-text-key-exclusive.test.ts) — so `clear` + a named key is the other
+    // combination a caller can send, and the clear still has to land first.
     const { events, api } = recordingApi();
 
     await makeChromiumImpl(registryWith(api)).handler(
       {},
-      { udid: CHROMIUM.id, clear: true, text: "hi", key: "enter", delayMs: 0 },
+      { udid: CHROMIUM.id, clear: true, key: "enter", delayMs: 0 },
       CHROMIUM
     );
 
-    // The clear's rawKeyDown, then each character, then Enter.
+    // The clear's rawKeyDown (the select-all "a"), then Enter.
     expect(events.filter((e) => e.type === "rawKeyDown").length).toBe(1);
-    const typedOrder = events
+    const dispatchOrder = events
       .filter((e) => e.type === "rawKeyDown" || e.type === "keyDown")
       .map((e) => e.key);
-    expect(typedOrder).toEqual(["a", "h", "i", "Enter"]);
+    expect(dispatchOrder).toEqual(["a", "Enter"]);
   });
 
   it("rejects an unknown key before clearing anything", async () => {

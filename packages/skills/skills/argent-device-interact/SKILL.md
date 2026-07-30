@@ -176,10 +176,10 @@ Special keys: `enter`, `escape`, `backspace`, `tab`, `space`, `arrow-up`, `arrow
 **Replacing a field's value.** Typing **appends**. Pass `"clear": true` to empty the focused field first:
 
 ```json
-{ "udid": "<UDID>", "clear": true, "text": "new@example.com", "key": "enter" }
+{ "udid": "<UDID>", "clear": true, "text": "new@example.com" }
 ```
 
-- Order within one call is always **clear → text → key**, so the call above replaces the value and submits in a single tool call.
+- `clear` runs **first**, so the call above replaces the field's value in one call. It may accompany `text` or `key` — but those two still can't be combined with each other, so submitting is a second call (`{ "key": "enter" }`).
 - `{ "udid": "<UDID>", "clear": true }` alone just empties the field.
 - **Focus a text field first.** On Chromium a clear with nothing editable focused is refused outright, since a select-all there would select the page rather than empty an input. On iOS and Android it is dispatched blind, so an unfocused clear does nothing and still reports success.
 - Supported on iOS, Android and Chromium. Rejected — before anything is typed — on Vega and on TV targets; a silent no-op would be worse than an error.
