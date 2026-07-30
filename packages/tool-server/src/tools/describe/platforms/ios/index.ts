@@ -23,9 +23,9 @@ import { adaptNativeDescribeToDescribeResult } from "./ios-native-adapter";
 //
 // Restarting the simulator costs the developer whatever is running on it — a
 // Metro session, a dev client, staged app state — so the caveat splits on what
-// the read actually produced. Only a read that came back blind has anything to
-// gain from the reboot; a populated tree is its own proof the reboot is not
-// needed, and says so without ordering one.
+// the accessibility read actually produced. Only a read that came back blind
+// has anything to gain from the reboot; a populated accessibility read is its
+// own proof the reboot is not needed, and says so without ordering one.
 const DEGRADED_BLIND_HINT =
   "The accessibility read returned no elements, and this simulator was not booted through argent, " +
   "so the pre-boot accessibility settings were never applied. Unless the screen is genuinely blank, " +
@@ -153,7 +153,7 @@ export async function describeIos(
   }
 
   let tree: DescribeNode;
-  let degraded = false;
+  let degraded: boolean;
   // A resolver failure that names its own cause, which outranks the boot caveat.
   let resolverHint: string | undefined;
 
@@ -173,15 +173,19 @@ export async function describeIos(
     degraded = resolverHint === undefined;
   }
 
-  // Resolved against the tree actually being returned rather than the AX tree:
-  // the native-devtools fallback below can fill a tree the AX read left empty,
-  // and it is the emptiness — not the boot method — that makes a reboot worth
-  // its cost.
-  const caveatFor = (returned: DescribeNode): string | undefined => {
-    if (!degraded) return undefined;
-    return returned.children.length === 0 ? DEGRADED_BLIND_HINT : DEGRADED_STANDING_HINT;
-  };
-  const hint = resolverHint ?? caveatFor(tree);
+  // Resolved against what the ACCESSIBILITY read produced, which is not always
+  // what comes back: the native-devtools fallback below can fill a tree the AX
+  // read left empty, out of the injected app's own view hierarchy. Those
+  // elements carry no SpringBoard chrome and no system dialog at all, so a
+  // populated tree from that source is no evidence the AX subsystem is
+  // working — it is precisely the blind read a reboot fixes. Only a populated
+  // AX read proves the reboot is not worth its cost.
+  const degradedHint = !degraded
+    ? undefined
+    : tree.children.length === 0
+      ? DEGRADED_BLIND_HINT
+      : DEGRADED_STANDING_HINT;
+  const hint = resolverHint ?? degradedHint;
 
   if (tree.children.length > 0) {
     return { tree, source: "ax-service", hint };
@@ -229,13 +233,7 @@ export async function describeIos(
 
     const parsed = parseNativeDescribeScreenResult(rawResult);
     const nativeTree = adaptNativeDescribeToDescribeResult(parsed);
-    // Re-resolve against the native tree: a populated one means this screen is
-    // readable after all, so the caveat drops to the standing note.
-    return {
-      tree: nativeTree,
-      source: "native-devtools",
-      hint: resolverHint ?? caveatFor(nativeTree),
-    };
+    return { tree: nativeTree, source: "native-devtools", hint };
   } catch {
     // Native devtools unavailable or no connected app — return the empty AX result
     return { tree, source: "ax-service", hint };

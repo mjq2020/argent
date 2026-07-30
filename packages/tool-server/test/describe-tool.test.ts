@@ -607,6 +607,50 @@ describe("describe tool", () => {
     expect(first.hint).toMatch(/no elements/i);
   });
 
+  it("keeps the blind-read caveat when native-devtools fills the tree the AX read left empty", async () => {
+    // Reproduced on a fresh iOS 18.6 sim whose AX read went blind for the whole
+    // boot: with the location prompt on screen, native-devtools returned the
+    // injected app's own 20 elements and the dialog was not among them. That
+    // tree is populated but carries no SpringBoard chrome and no system dialog
+    // at all, so it is no evidence the AX subsystem works — reading it as such
+    // downgrades the caveat to the standing note, which the per-device gate
+    // then deletes, leaving the agent a tree silently missing a modal that is
+    // blocking the screen.
+    const axApi = makeAXServiceApi({ alertVisible: false, elements: [] }, { degraded: true });
+    const nativeApi = makeNativeDevtoolsApi({
+      connectedBundleIds: ["com.example.settings"],
+      describeScreenResult: {
+        screenFrame: { x: 0, y: 0, width: 440, height: 956 },
+        elements: [
+          {
+            frame: { x: 20, y: 150, width: 400, height: 44 },
+            tapPoint: { x: 220, y: 172 },
+            normalizedFrame: { x: 0.045, y: 0.157, width: 0.909, height: 0.046 },
+            normalizedTapPoint: { x: 0.5, y: 0.18 },
+            traits: ["button"],
+            label: "General",
+          },
+        ],
+      },
+    });
+    const tool = createDescribeTool(
+      makeMockRegistry({ axService: axApi, nativeDevtools: nativeApi })
+    );
+    const udid = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA";
+
+    const first = await tool.execute({}, { udid, bundleId: "com.example.settings" });
+    const second = await tool.execute({}, { udid, bundleId: "com.example.settings" });
+
+    expect(first.source).toBe("native-devtools");
+    expect(first.description).toMatch(/AXButton\s+"General"/);
+    // The reboot is what recovers the AX read, so it stays named…
+    expect(first.hint).toMatch(/no elements/i);
+    expect(first.hint).toMatch(/boot-device/);
+    // …and repeats, because the per-device gate only ever drops the standing
+    // note, which this path must not be producing.
+    expect(second.hint).toEqual(first.hint);
+  });
+
   it("keeps the caveat on every internal describeIos read, which the tool alone dedupes", async () => {
     // await-ui-element / flows / await-screen-idle poll describeIos directly and
     // fold the last read's hint into one terminal note. The per-device gate
