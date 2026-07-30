@@ -144,23 +144,41 @@ run_phase() {
   else
     for t in react-profiler-start react-profiler-status react-profiler-stop react-profiler-analyze \
              react-profiler-renders react-profiler-fiber-tree react-profiler-cpu-summary react-profiler-component-source \
-             profiler-load profiler-cpu-query profiler-commit-query profiler-stack-query profiler-combined-report; do
+             profiler-load profiler-cpu-query profiler-commit-query; do
       skip "$P" "$t" happy-path "react-profiler-start failed: $(rt_detail 80)"
     done
   fi
 
   # --- native profiler (Android perfetto) ----------------------------------
+  # profiler-stack-query and profiler-combined-report belong here, not in the
+  # react block: both read the native trace and throw "No Android trace loaded.
+  # Run native-profiler-stop → native-profiler-analyze first." until analyze has
+  # run, so calling them earlier fails on every healthy build.
   run_tool native-profiler-start "{\"device_id\":\"$DEV\",\"app_process\":\"$PKG\"}"
   if [ "$RT_RC" -eq 0 ]; then
     pass "$P" native-profiler-start np-start
     run_tool gesture-swipe "{\"udid\":\"$DEV\",\"fromX\":0.5,\"fromY\":0.7,\"toX\":0.5,\"toY\":0.3}" >/dev/null 2>&1; sleep 3
     assert_ok "$P" native-profiler-stop    np-stop   "{\"device_id\":\"$DEV\"}"
     assert_ok "$P" native-profiler-analyze np-analyze "{\"device_id\":\"$DEV\"}"
-    assert_ok "$P" profiler-load load-native "{\"mode\":\"load_native\",\"device_id\":\"$DEV\",\"app_process\":\"$PKG\"}"
+    assert_ok "$P" profiler-stack-query stacks "{$D,\"mode\":\"thread_breakdown\"}"
+    assert_ok "$P" profiler-combined-report combined "{$D}"
+    # load_native needs the session_id that `list` mode prints; sessions are
+    # stamped YYYYMMDD-HHMMSS. Without one the tool throws before loading, so
+    # take the newest and skip rather than fail when list shows none.
+    run_tool profiler-load "{\"mode\":\"list\",\"device_id\":\"$DEV\"}"
+    local SID; SID="$(printf '%s' "$RT_OUT" | grep -oE '[0-9]{8}-[0-9]{6}' | sort -u | tail -1)"
+    if [ -n "$SID" ]; then
+      assert_ok "$P" profiler-load load-native "{\"mode\":\"load_native\",\"device_id\":\"$DEV\",\"app_process\":\"$PKG\",\"session_id\":\"$SID\"}"
+    else
+      skip "$P" profiler-load load-native "no session id in profiler-load list output"
+    fi
   else
     skip "$P" native-profiler-start  np-start   "start failed: $(rt_detail 80)"
     skip "$P" native-profiler-stop   np-stop    "native profiler not started"
     skip "$P" native-profiler-analyze np-analyze "native profiler not started"
+    skip "$P" profiler-stack-query stacks "native profiler not started"
+    skip "$P" profiler-combined-report combined "native profiler not started"
+    skip "$P" profiler-load load-native "native profiler not started"
   fi
   skip "$P" native-network-logs happy-path "iOS-only (not applicable on Android)"
 
