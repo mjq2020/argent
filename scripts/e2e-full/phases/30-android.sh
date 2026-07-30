@@ -17,7 +17,7 @@ _android_present() { # serial
 _shot_ok() { # phase udid case
   local phase="$1" udid="$2" case="$3"
   if capture_screenshot "$udid" "$E2E_WORK/android-$case.png"; then
-    pass "$phase" screenshot "$case (${SHOT_SIZE}B)"; return 0
+    pass "$phase" screenshot "$case" "${SHOT_SIZE}B"; return 0
   else
     fail "$phase" screenshot "$case" "size=${SHOT_SIZE:-0} rc=${SHOT_RC:-?} (blank framebuffer?)"; return 1
   fi
@@ -27,14 +27,12 @@ run_phase() {
   local P=android
   ensure_server || { skip "$P" tier all "tool-server unavailable"; return 0; }
 
-  local DEV=""
+  local DEV="" BOOTED_HERE=0
   if [ -n "${E2E_ANDROID_SERIAL:-}" ]; then
     DEV="$E2E_ANDROID_SERIAL"
     if _android_present "$DEV"; then
       pass "$P" list-devices "injected serial $DEV present"
     else
-      # not yet visible — try a boot-device against it in case the sim-server
-      # needs to attach; otherwise skip.
       skip "$P" tier all "injected serial $DEV not visible to tool-server"; return 0
     fi
   elif [ -n "${E2E_ANDROID_AVD:-}" ]; then
@@ -42,6 +40,11 @@ run_phase() {
     run_tool boot-device "{\"avdName\":\"$E2E_ANDROID_AVD\",\"bootTimeoutMs\":840000}"
     if [ "$RT_RC" -eq 0 ] && printf '%s' "$RT_JSON" | jq -e '.booted==true' >/dev/null 2>&1; then
       DEV="$(printf '%s' "$RT_JSON" | jq -r '.serial // .udid // empty')"
+      BOOTED_HERE=1
+      # Publish it: the RN tier resolves its device from E2E_ANDROID_SERIAL, so
+      # without this `--android-avd` drives this tier fully and then blanket-skips
+      # all 24 debugger/profiler tools for want of a device that is right there.
+      export E2E_ANDROID_SERIAL="$DEV"
       pass "$P" boot-device "booted $DEV"
     else
       fail "$P" boot-device "$(printf '%s' "$RT_OUT" | tr '\n' ' ' | cut -c1-160)"; return 0
@@ -107,12 +110,13 @@ run_phase() {
   skip "$P" reinstall-app happy-path "covered in RN tier with the Bluesky apk"
 
   # --- teardown for this device --------------------------------------------
-  # Only stop the sim-server if we booted the AVD ourselves; a device injected
-  # by the allocator is released by the caller.
-  if [ -z "${E2E_ANDROID_SERIAL:-}" ]; then
+  # Only stop the sim-server for an AVD this phase booted. An injected device is
+  # the caller's (on a shared machine, the allocator's), and tearing its
+  # per-device service down here would pull it out from under the RN tier, which
+  # drives the same serial straight after this.
+  if [ "$BOOTED_HERE" -eq 1 ]; then
     assert_ok "$P" stop-simulator-server stop "$U"
   else
-    run_tool stop-simulator-server "$U" >/dev/null 2>&1 || true
-    skip "$P" stop-simulator-server stop "injected device released by caller"
+    skip "$P" stop-simulator-server stop "injected device left running for the caller"
   fi
 }

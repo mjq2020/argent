@@ -52,9 +52,12 @@ The device tiers need a booted device. Two ways:
 - **Inject** an already-booted one (recommended on shared/CI machines):
   `--android-serial emulator-5554` (the harness attaches, doesn't boot/teardown it).
 - **Let the harness boot it**: `--android-avd Pixel_9a` (uses `boot-device`).
+  The booted serial is published to the RN tier, so it runs against the same device.
 
-The Chromium tier needs no device — it generates and boots its own Electron app
-(requires `DISPLAY`, or `xvfb-run` on a headless Linux box).
+The Chromium tier needs no device — it generates and boots its own Electron app.
+It requires `DISPLAY`; on a headless Linux box run the whole harness under
+`xvfb-run`, which supplies one. Having `xvfb-run` merely installed is not enough,
+because nothing wraps the Electron spawn in it.
 
 ## RN (Bluesky) tier
 

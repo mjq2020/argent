@@ -55,15 +55,27 @@ run_phase() {
   fi
 
   # --- start Metro ----------------------------------------------------------
+  local STARTED_METRO=0
   if ! _metro_ready "$MPORT"; then
     log "starting Metro in $RN_DIR"
     local expo="$RN_DIR/node_modules/.bin/expo"
     [ -x "$expo" ] || expo="npx --prefix $RN_DIR expo"
     ( cd "$RN_DIR" && exec $expo start --dev-client --port "$MPORT" ) >/tmp/e2e-metro.log 2>&1 &
     export E2E_METRO_PID=$!
+    STARTED_METRO=1
     local i
     for i in $(seq 1 45); do _metro_ready "$MPORT" && break; sleep 2; done
   fi
+  # Stop only a Metro this phase started. A developer's own Metro on :8081 is
+  # not ours to kill, and every early return past this point has to run it or
+  # the one we did start outlives the run.
+  _rn_stop_metro() {
+    if [ "$STARTED_METRO" -eq 1 ]; then
+      assert_ok "$P" stop-metro stop "{}"
+    else
+      skip "$P" stop-metro stop "Metro was already running on :$MPORT; left as found"
+    fi
+  }
   if _metro_ready "$MPORT"; then pass "$P" metro ready; else fail "$P" metro ready "Metro not up on :$MPORT"; _skip_all "Metro unavailable"; return 0; fi
 
   # --- launch app + connect the debugger -----------------------------------
@@ -73,7 +85,7 @@ run_phase() {
   run_tool debugger-connect "{\"device_id\":\"$DEV\",\"port\":$MPORT}"
   if [ "$RT_RC" -ne 0 ]; then
     fail "$P" debugger-connect connect "$(printf '%s' "$RT_OUT"|tr '\n' ' '|cut -c1-160)"
-    _skip_all "debugger-connect failed"; return 0
+    _skip_all "debugger-connect failed"; _rn_stop_metro; return 0
   fi
   local LID; LID="$(printf '%s' "$RT_JSON" | jq -r '.logicalDeviceId // .device_id // empty')"
   [ -z "$LID" ] && LID="$DEV"
@@ -152,5 +164,5 @@ run_phase() {
   fi
 
   # --- teardown -------------------------------------------------------------
-  assert_ok "$P" stop-metro stop "{}"
+  _rn_stop_metro
 }
