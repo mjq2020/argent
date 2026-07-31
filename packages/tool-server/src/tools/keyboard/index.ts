@@ -53,6 +53,32 @@ const zodSchema = z.object({
 
 type Params = z.infer<typeof zodSchema>;
 
+/**
+ * The `[started, completed]` phrasings for one keyboard request.
+ *
+ * Kept as one function so the two tenses cannot drift apart, and so every arm of
+ * the request shape is named exactly once. A request with none of the three is
+ * still possible (`{ udid }` alone types nothing) and reads as a key press,
+ * which is what it did before `clear` existed.
+ */
+function keyboardAction(params: Pick<Params, "text" | "key" | "clear">): [string, string] {
+  const text = params.text !== undefined;
+  const key = params.key !== undefined;
+  const [started, completed] =
+    text && key
+      ? ["entering text and pressing a key", "entered text and pressed a key"]
+      : text
+        ? ["entering text", "entered text"]
+        : ["pressing a key", "pressed a key"];
+  if (!params.clear) return [capitalize(started), capitalize(completed)];
+  // A clear-only call carries neither `text` nor `key`, so it has nothing else
+  // to report and must not be phrased as the key press it never makes.
+  if (!text && !key) return ["Clearing a field", "Cleared a field"];
+  return [`Clearing a field and ${started}`, `Cleared a field and ${completed}`];
+}
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
 const capability: ToolCapability = {
   apple: { simulator: true, device: true },
   appleRemote: { simulator: true },
@@ -94,16 +120,13 @@ export function createKeyboardTool(registry: Registry): ToolDefinition<Params, K
       // Treat both text and key as sensitive. `key` is an unrestricted string at
       // this boundary, so a value must not reach the event log before execution
       // validates whether it is a supported named key.
-      startedMsg: ({ params }) => {
-        if (params.text === undefined) return "Pressing a key";
-        if (params.key === undefined) return "Entering text";
-        return "Entering text and pressing a key";
-      },
-      completedMsg: ({ params }) => {
-        if (params.text === undefined) return "Pressed a key";
-        if (params.key === undefined) return "Entered text";
-        return "Entered text and pressed a key";
-      },
+      //
+      // `clear` gets its own arm rather than riding the text/key split: a
+      // clear-only call carries neither, so without one it announces a key press
+      // that never happens, and a `{ clear, text }` call is logged as plain
+      // typing with the destructive half unmentioned.
+      startedMsg: ({ params }) => keyboardAction(params)[0],
+      completedMsg: ({ params }) => keyboardAction(params)[1],
       failedMsg: ({ failureSignal }) => `Failed to use keyboard: ${failureSignal.error_code}`,
     },
     description: `Type text or press special keys on the device (iOS simulator, Android emulator or device, Chromium app, Vega Virtual Device, or Apple TV / Android TV) using keyboard events.
@@ -112,7 +135,7 @@ Returns { typed: string, keys: number, cleared?: boolean }. Fails if an unsuppor
 A failure is not rolled back. An unsupported key name is always rejected before anything is sent, and so is a \`clear\` on a platform that cannot do it — a rejected request never empties the field. Un-typeable text is not: the iOS simulator and Chromium reject it mid-string and leave the characters before it in the field (Android, Vega and TV targets check the whole string up front). A transport failure partway also leaves the text already sent. On a retry, read the field's actual contents — do not assume it is unchanged.
 - text: types a string (supports uppercase, digits, common punctuation). To type a credential, use \`{{secret:<NAME>}}\` — resolved server-side from the \`ARGENT_SECRET_<NAME>\` env var or an argent secrets file (\`.argent/secrets.env\` in the project, \`~/.argent/secrets.env\`, or an \`ARGENT_SECRET_\`-prefixed key in the project's \`.env\`/\`.env.local\`), so the plaintext never enters agent context; the result echoes the placeholder, not the value, and the after-typing auto-screenshot is skipped.
 - key: presses a single named key (enter, escape, backspace, tab, arrow-up/down/left/right, f1–f12) — NOT supported on TV targets; move focus with \`tv-remote\` instead.
-- clear: empties the focused field before typing. Typing alone APPENDS — against a field that already holds a value (a remembered login, a restored draft, a re-run step) the old text stays and the new text lands after it. Use \`{ clear: true, text: "…" }\` to replace a value, \`{ clear: true }\` alone to just empty it. iOS, Android and Chromium; rejected on Vega and TV targets. Focus a text field first — on Chromium a clear with nothing editable focused is refused outright, and on iOS/Android it is dispatched blind. Only Chromium reads the field back, and even there an unreadable page falls back to best-effort — so \`cleared: true\` never means "seen NOT empty", but it does not prove the field is empty either. On iOS and Android nothing is read back, and a widget that swallows the select-all leaves the following delete acting as a plain backspace: the field ends up ONE CHARACTER SHORTER, not unchanged, and a combined \`text\` then appends to that. Assert the value whenever the result matters. On Android levels older than \`input keycombination\` the clear deletes backwards from end-of-LINE, so a multi-line field keeps what sits below the caret; a field over 150 characters is refused rather than partly deleted. Where the length cannot be read at all — a password field, or a dump the device refused — it falls back to a fixed 128 backspaces, which is neither refusable nor exact, so a longer value keeps its head. A readonly field is refused on Chromium.
+- clear: empties the focused field before typing. Typing alone APPENDS — against a field that already holds a value (a remembered login, a restored draft, a re-run step) the old text stays and the new text lands after it. Use \`{ clear: true, text: "…" }\` to replace a value, \`{ clear: true }\` alone to just empty it. iOS, Android and Chromium; rejected on Vega and TV targets. Focus a text field first — on Chromium a clear with nothing editable focused is refused outright, and on iOS/Android it is dispatched blind. Only Chromium reads the field back, and even there an unreadable page falls back to best-effort — so \`cleared: true\` never means "seen NOT empty", but it does not prove the field is empty either. On iOS and Android nothing is read back, and a widget that swallows the select-all leaves the following delete acting as a plain backspace: the field ends up ONE CHARACTER SHORTER, not unchanged, and a combined \`text\` then appends to that. Assert the value whenever the result matters. On Android levels older than \`input keycombination\` the clear deletes backwards from end-of-LINE, so a multi-line field keeps what sits below the caret; a field over 150 characters is refused rather than partly deleted. Where the length cannot be read at all — a password field, a dump the device refused, or no focused text field in it — it falls back to a fixed 120 backspaces, which is neither refusable nor exact, so a longer value keeps its head. A readonly field is refused on Chromium.
 On a TV target (runtimeKind 'tv') only \`text\` applies — focus a text field first (with \`tv-remote\`), then type into it (injected HID keyboard on Apple TV, \`adb input text\` on Android TV).
 Provide text, key, or both — when both are given, the text is typed first and the key is pressed after it (text + key:"enter" types and submits). Order within one call is always clear → text → key, so { clear: true, text: "hello", key: "enter" } replaces a field's value and submits it.`,
     zodSchema,
