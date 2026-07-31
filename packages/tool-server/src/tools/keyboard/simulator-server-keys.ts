@@ -13,12 +13,59 @@ import type { KeyboardParams, KeyboardResult } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * One in-flight typing run per device, chained.
+ *
+ * Modifier state lives in the GUEST, and this backend holds a modifier down
+ * across awaits so the guest sees a real chord (see `pressKeyCode`). Nothing
+ * else serializes tool calls against a device — the registry hands concurrent
+ * calls the same session and the transport writes immediately — so a second
+ * `keyboard` call arriving inside that window has its keystroke delivered as
+ * part of the chord: with Left GUI held, `{ text: "w" }` reaches the guest as
+ * Cmd+W (an app `UIKeyCommand` or a system shortcut) and the character is never
+ * typed, while the call still reports it as typed. Shift had the same window
+ * before `clear` existed, where the worst outcome was a mis-cased character;
+ * Command is the modifier that makes it destructive.
+ *
+ * Chaining, not rejecting: overlapping calls are a legitimate thing for a caller
+ * to do, they just cannot interleave. Each device's chain is dropped once it
+ * drains, so this holds no state for an idle device.
+ */
+const typeChains = new Map<string, Promise<void>>();
+
+function serializePerDevice<T>(deviceId: string, run: () => Promise<T>): Promise<T> {
+  const previous = typeChains.get(deviceId) ?? Promise.resolve();
+  // `.then(run, run)`, so a predecessor that threw still lets this call start.
+  const result = previous.then(run, run);
+  // The stored tail never rejects: one failed call must not reject the next, and
+  // an unhandled rejection here would be a stored promise nobody awaits.
+  const tail = result.then(
+    () => undefined,
+    () => undefined
+  );
+  typeChains.set(deviceId, tail);
+  void tail.then(() => {
+    // Only drop the slot when nothing queued behind this call, so a waiter is
+    // never handed a drained chain and allowed to overtake the run in flight.
+    if (typeChains.get(deviceId) === tail) typeChains.delete(deviceId);
+  });
+  return result;
+}
+
 // Type text / press named keys over the simulator-server (iOS simulator) using
 // the HID keycode maps in key-codes.ts (with shift). Only the iOS keyboard
 // branch uses this now — Android phones/tablets inject over `adb shell input`
 // instead (see utils/android-input.ts, issue #449), so despite the shared-
 // looking name this is no longer a shared iOS/Android transport.
-export async function typeSimulatorServer(
+export function typeSimulatorServer(
+  registry: Registry,
+  device: DeviceInfo,
+  params: KeyboardParams
+): Promise<KeyboardResult> {
+  return serializePerDevice(device.id, () => runSimulatorServerType(registry, device, params));
+}
+
+async function runSimulatorServerType(
   registry: Registry,
   device: DeviceInfo,
   params: KeyboardParams
@@ -39,6 +86,11 @@ export async function typeSimulatorServer(
   // backgrounds the app). Neither transport currently throws from `pressKey`
   // (the local one writes to a pipe, the remote one is fire-and-forget), so this
   // is a guard against a future one that does, not a fix for a reachable bug.
+  //
+  // The hold spans awaits, so a keystroke from a CONCURRENT call would land
+  // inside the chord (measured: `{ text: "w" }` 15ms behind a `{ clear: true }`
+  // reached the guest as Cmd+W and was never typed). That is why the whole run
+  // is serialized per device — see `serializePerDevice`.
   const pressKeyCode = async (keyCode: number, modifierKeyCode?: number) => {
     if (modifierKeyCode !== undefined) {
       api.pressKey("Down", modifierKeyCode);
@@ -98,12 +150,12 @@ export async function typeSimulatorServer(
     }
   }
 
-  // Resolve EVERY character before touching the device. Typing used to resolve
-  // per character inside the loop, which was harmless when the worst outcome was
-  // a partially-typed field. With `clear` it is not: clearing and then rejecting
-  // on character 4 destroys the field's original value and leaves a fragment
-  // behind, so the caller ends up worse off than before a call that returned
-  // 400. Same up-front-validation rule the android backend applies with
+  // Resolve EVERY character before touching the device: no device write happens
+  // until the whole request is known to be executable. Resolving per character
+  // inside the loop below would let a `{ clear, text }` whose character 4 has no
+  // keycode destroy the field's original value and leave a fragment behind, so a
+  // call that returned 400 would leave the caller worse off than before it. Same
+  // up-front-validation rule the android backend applies with
   // `assertTypeableAndroidText`.
   const presses = params.text
     ? [...params.text].map((char) => ({ char, press: charToKeyPress(char) }))
