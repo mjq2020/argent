@@ -86,6 +86,22 @@ const enclosingFocusXml = () =>
 </hierarchy>`;
 
 /**
+ * The overlay: a focused input sitting INSIDE the named field's box without
+ * being it — a mention/autocomplete popover over a composer. Geometry alone
+ * cannot tell this from `wrapperFocusXml` below; what separates them is that
+ * here the NAMED node is itself a text field, so a different focused text field
+ * inside it is covering it rather than belonging to it.
+ */
+const overlayFocusXml = () =>
+  `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout" package="com.acme.app" bounds="[0,0][1080,1920]">
+    <node index="0" class="android.widget.EditText" resource-id="email" content-desc="Username or email address" text="old.remembered.login" package="com.acme.app" bounds="[40,200][1040,600]" />
+    <node index="1" class="android.widget.EditText" resource-id="suggestions" content-desc="Suggestions" text="do not erase me" focused="true" package="com.acme.app" bounds="[80,300][900,380]" />
+  </node>
+</hierarchy>`;
+
+/**
  * The legitimate non-identity case the containment test has to keep working:
  * the selector names a testID wrapper and focus is reported by the input INSIDE
  * it. A second focused node sits elsewhere on screen, so the verdict cannot
@@ -225,6 +241,29 @@ describe("type directive — clear dispatch", () => {
     expect(keyboardArgs(calls)).toEqual([]);
   });
 
+  it("refuses to clear when a focused OVERLAY sits over the named field", async () => {
+    // The mirror of the enclosing case, and the one geometry alone cannot tell
+    // from the legitimate wrapper below: a suggestion popover's input sits
+    // INSIDE the composer's box without being it. Driven on a live Chromium
+    // page, the clear emptied the popover, left the composer untouched, and
+    // reported a pass on the composer.
+    const calls: Call[] = [];
+    const registry = mockRegistry(calls, () => ({ xml: overlayFocusXml() }));
+
+    await writeFlow("f", {
+      executionPrerequisite: "",
+      steps: [
+        { kind: "type", into: { identifier: "email" }, text: "new@example.com", clear: true },
+      ],
+    });
+
+    const result = asRun(await run(registry));
+    expect(result.steps.map((s) => s.status)).toEqual(["fail"]);
+    expect(result.steps[0]!.reason).toContain("refusing to clear");
+    expect(result.steps[0]!.reason).toContain("OVERLAPS");
+    expect(keyboardArgs(calls)).toEqual([]);
+  });
+
   it("still clears when focus lands on the input inside the wrapper the selector named", async () => {
     // Containment, not identity: the legitimate case the strict test must keep
     // working. The decoy focused node elsewhere on screen is what stops this
@@ -323,6 +362,51 @@ describe("type directive — clear dispatch", () => {
       executionPrerequisite: "",
       steps: [
         { kind: "type", into: { identifier: "email" }, text: "new@example.com", clear: true },
+      ],
+    });
+
+    const result = asRun(await run(registry));
+    expect(result.steps.map((s) => s.status)).toEqual(["pass"]);
+    expect(keyboardArgs(calls)).toEqual([
+      { clear: true, text: "new@example.com" },
+      { key: "enter" },
+    ]);
+  });
+
+  it("compares focus against where the target is NOW, not where it was tapped", async () => {
+    // Keyboard avoidance scrolls the field away from the point the tap landed
+    // on. The identity arm does not care, but the geometric one — the selector
+    // named a wrapper and the input inside it reports focus — compares boxes,
+    // and against the stale tap frame the input is no longer inside it. Every
+    // other fixture here is static, so this is otherwise never exercised.
+    const calls: Call[] = [];
+    let reads = 0;
+    const registry = mockRegistry(calls, () => {
+      reads++;
+      // From the focus poll onwards the whole group sits 500px higher.
+      const y = reads <= 2 ? 900 : 400;
+      return {
+        xml:
+          `<?xml version='1.0' encoding='UTF-8'?><hierarchy rotation="0">` +
+          `<node index="0" class="android.widget.FrameLayout" bounds="[0,0][1080,1920]">` +
+          `<node index="0" class="android.view.ViewGroup" resource-id="email-wrapper" ` +
+          `bounds="[40,${y - 20}][1040,${y + 100}]">` +
+          `<node index="0" class="android.widget.EditText" resource-id="email" ` +
+          `content-desc="Username or email address" text="old.remembered.login" ` +
+          `focused="true" bounds="[40,${y}][1040,${y + 80}]" />` +
+          `</node></node></hierarchy>`,
+      };
+    });
+
+    await writeFlow("f", {
+      executionPrerequisite: "",
+      steps: [
+        {
+          kind: "type",
+          into: { identifier: "email-wrapper" },
+          text: "new@example.com",
+          clear: true,
+        },
       ],
     });
 

@@ -343,6 +343,20 @@ function flowSelectorToFrame(tree: DescribeNode, sel: FlowSelector): DescribeFra
 }
 
 /**
+ * The NODE {@link flowSelectorToFrame} would take the frame of — same
+ * alternatives, same visible-first pick — for the one caller that needs the
+ * node's identity and role rather than only its box.
+ */
+function flowSelectorToNode(tree: DescribeNode, sel: FlowSelector): DescribeNode | undefined {
+  for (const s of selectorAlternatives(sel)) {
+    const matches = findAll(tree, s);
+    const node = firstInReadingOrder(matches.filter(isVisible)) ?? firstInReadingOrder(matches);
+    if (node) return node;
+  }
+  return undefined;
+}
+
+/**
  * Re-read the describe tree until two consecutive reads are identical — the UI
  * has settled (a scroll's fling has stopped, an animation finished). Returns the
  * stable tree, the last tree read on timeout (best effort), or undefined if the
@@ -433,6 +447,20 @@ function framesOverlap(a: DescribeFrame, b: DescribeFrame): boolean {
  */
 const FRAME_CONTAINMENT_EPSILON = 0.005;
 
+/**
+ * Roles the three adapters give a node that holds editable text.
+ *
+ * Chromium emits the tag name (or an explicit `role` attribute), the Android
+ * parser maps `EditText`/`TextInput` to `TextField`, and the iOS adapter maps
+ * `UITextField`/`UITextView`/`UISearchField` to `AXTextField`.
+ */
+const TEXT_INPUT_ROLE =
+  /^(input|textarea|textbox|searchbox|combobox)$|TextField|TextView|SearchField/i;
+
+function isTextInput(node: DescribeNode): boolean {
+  return TEXT_INPUT_ROLE.test(node.role);
+}
+
 /** Is `inner` inside `outer` (equal frames included)? */
 function frameWithin(inner: DescribeFrame, outer: DescribeFrame): boolean {
   const e = FRAME_CONTAINMENT_EPSILON;
@@ -499,10 +527,13 @@ function collectFocused(node: DescribeNode, acc: DescribeNode[]): DescribeNode[]
  * - "confirmed" — a focus-flagged node sits INSIDE the target's frame (equal
  *   frames included). The keys will land in the field the step named.
  * - "encloses" — the only focus-flagged node overlapping the target CONTAINS
- *   it. That is not evidence: it is what an open shadow root
- *   (`document.activeElement` is the host, never the inner element), a hybrid
- *   app's focused WebView, and an ordinary focus trap all look like, and each
- *   of them can coexist with a different element genuinely holding the keys.
+ *   it. That is not evidence: it is what a hybrid app's focused WebView and an
+ *   ordinary focus trap look like, and each can coexist with a different
+ *   element genuinely holding the keys.
+ * - "overlaps" — a focus-flagged node overlaps the target without being it and
+ *   without containing it: an overlay over the field (a suggestion popover, an
+ *   autocomplete list), or a partial overlap. Also not evidence — clearing on
+ *   it empties the overlay.
  * - "unconfirmed" — the tree reported focus, on something that does not
  *   overlap the target at all.
  * - "unobservable" — no focus evidence anywhere: the source cannot report
@@ -519,7 +550,13 @@ function collectFocused(node: DescribeNode, acc: DescribeNode[]): DescribeNode[]
  * the platform. Hence the outcome keys off what the tree reported, not off the
  * source alone.
  */
-type FocusOutcome = "confirmed" | "encloses" | "unconfirmed" | "unobservable" | "unreadable";
+type FocusOutcome =
+  | "confirmed"
+  | "encloses"
+  | "overlaps"
+  | "unconfirmed"
+  | "unobservable"
+  | "unreadable";
 
 /**
  * Poll until an element reporting `focused` sits inside the typed-into element.
@@ -571,7 +608,7 @@ async function waitForFocus(
   // blur, so the same flow against the same app failed or passed depending on
   // whether round 1 beat the blur. `undefined` until a read succeeds, so a
   // window in which every read throws stays "unobservable".
-  let lastRead: "focus-elsewhere" | "focus-encloses" | "no-focus" | undefined;
+  let lastRead: "focus-elsewhere" | "focus-encloses" | "focus-overlaps" | "no-focus" | undefined;
   const giveUp = (): FocusOutcome => {
     // `undefined` means no read ever succeeded — an outage, not an observation.
     // Reporting it as "unobservable" would let a clear through on the strength
@@ -579,6 +616,7 @@ async function waitForFocus(
     // convention for the same condition, and for the same reason.
     if (lastRead === undefined) return "unreadable";
     if (lastRead === "focus-encloses") return "encloses";
+    if (lastRead === "focus-overlaps") return "overlaps";
     return lastRead === "focus-elsewhere" ? "unconfirmed" : "unobservable";
   };
   for (;;) {
@@ -586,20 +624,41 @@ async function waitForFocus(
     try {
       const { tree, source } = await fetchFlowTree(env.registry, env.device);
       if (!FOCUS_REPORTING_SOURCES.has(source)) return "unobservable";
-      const target = flowSelectorToFrame(tree, into) ?? tappedFrame;
+      // The target NODE, not just its frame: identity is the only unambiguous
+      // evidence, and geometry alone cannot tell an input INSIDE the container
+      // the selector named from an unrelated input OVERLAYING the field it
+      // named. `tappedFrame` still covers a round where the selector does not
+      // resolve, but only the geometric arm can use it.
+      const targetNode = flowSelectorToNode(tree, into);
+      const target = targetNode?.frame ?? tappedFrame;
       const focused = collectFocused(tree, []);
       // Classified from the MOST RECENT successful read, never from "any read,
       // ever": the question the caller is about to act on is what holds focus
       // NOW, and a sticky flag answers it with history. It also made the
       // verdict a race — an app that blurs on the focusing tap reports focus
       // for however many rounds precede the blur.
-      if (focused.some((n) => frameWithin(n.frame, target))) return "confirmed";
+      if (focused.some((n) => n === targetNode)) return "confirmed";
+      // Geometry, for the case identity cannot serve: the selector matched a
+      // testID container and the input inside it is what reports focus. Scoped
+      // to a target that is NOT itself a text input, because when it is, a
+      // different focused input inside its box is an overlay — a suggestion
+      // popover over a composer — and clearing on that emptied the popover and
+      // reported a pass on the composer it never touched.
+      if (
+        targetNode &&
+        !isTextInput(targetNode) &&
+        focused.some((n) => frameWithin(n.frame, target))
+      ) {
+        return "confirmed";
+      }
       lastRead =
         focused.length === 0
           ? "no-focus"
-          : focused.some((n) => framesOverlap(n.frame, target))
+          : focused.some((n) => frameWithin(target, n.frame))
             ? "focus-encloses"
-            : "focus-elsewhere";
+            : focused.some((n) => framesOverlap(n.frame, target))
+              ? "focus-overlaps"
+              : "focus-elsewhere";
     } catch {
       // transient describe failure — retry until the deadline, leaving
       // `lastRead` alone so a window of nothing but failures stays "unreadable"
@@ -1077,10 +1136,17 @@ function clearRefusalReason(into: FlowSelector, focus: FocusOutcome): string {
   if (focus === "encloses") {
     return (
       `${head}: the only element reporting focus within ${TYPE_FOCUS_TIMEOUT_MS}ms CONTAINS ${sel} ` +
-      `rather than sitting inside it — a shadow host, a focused WebView or a focus trap looks ` +
-      `exactly like this while a different element holds the keys, so clearing here can empty ` +
-      `that element instead. Point the selector at the input itself, or clear it with the app's ` +
-      `own affordance`
+      `rather than being it — a focused WebView or a focus trap looks exactly like this while a ` +
+      `different element holds the keys, so clearing here can empty that element instead. Point ` +
+      `the selector at the input itself, or clear it with the app's own affordance`
+    );
+  }
+  if (focus === "overlaps") {
+    return (
+      `${head}: within ${TYPE_FOCUS_TIMEOUT_MS}ms focus was reported on an element that OVERLAPS ` +
+      `${sel} but is not it — an overlay over the field (a suggestion popover, an autocomplete ` +
+      `list) looks exactly like this, and clearing would empty that element instead. Dismiss the ` +
+      `overlay first, or name the element that actually holds the caret`
     );
   }
   if (focus === "unreadable") {
@@ -1121,9 +1187,10 @@ async function runType(
   // Wrapped like the two keyboard dispatches below, so all three of this step's
   // device calls classify a cancelled run the same way. Leaving the focus tap
   // bare made one step report `error` or `skip` depending on which dispatch
-  // happened to be in flight when the caller gave up. (The single dispatch in
-  // `runTap` / `runLongPress` / `scrollIncrement` / `runPinch` is still bare —
-  // one call each, so there is no within-step split to fix there.)
+  // happened to be in flight when the caller gave up. (`runTap`, `runLongPress` and
+  // `scrollIncrement` leave their own dispatch bare — one call each, so there is
+  // no within-step split to fix there. `runPinch` chains several, but guards the
+  // signal between them itself.)
   if (!(await dispatchOrAbort(env, "gesture-tap", getDescribeTapPoint(frame)))) {
     return ABORTED_OUTCOME;
   }
@@ -1147,9 +1214,10 @@ async function runType(
   //     previously in (unrecoverable, reported as a pass on a field it never
   //     touched) or lands nowhere while the report still claims a clear. Both
   //     reproduced on a Pixel 3a against a real app.
-  //   - "encloses": the only overlapping focus flag CONTAINS the target. Not
-  //     evidence — see waitForFocus for the three shapes that produce it and
-  //     the field each of them destroyed instead of the named one.
+  //   - "encloses" / "overlaps": the focus flag covers the target, or sits over
+  //     it without being it. Neither is evidence — see waitForFocus for the
+  //     shapes that produce them and the field each destroyed instead of the
+  //     named one.
   //   - "unreadable": every read in the window threw, so nothing was observed.
   //     A tree-source outage is not the same as a tree that reported nothing,
   //     and only the second is safe to clear on.
