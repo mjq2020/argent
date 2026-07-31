@@ -224,6 +224,19 @@ if [ -z "$PHASES" ]; then
 fi
 selected() { case ",$PHASES," in *",$1,"*) return 0;; *) return 1;; esac; }
 
+# The name check above walks the words a phase list splits into, so a list that
+# splits into none — `--phase ,` or `--phase ' '` — passes it while selecting
+# nothing. Count what `selected` actually matches instead: a run that executes
+# no phase records no failure, and reports "pass:0 fail:0" and exit 0 for a
+# release it never tested.
+_selected=0
+for _p in $ALL_PHASES; do selected "$_p" && _selected=$((_selected + 1)); done
+if [ "$_selected" -eq 0 ]; then
+  echo "no phases selected from '$PHASES' (known: $ALL_PHASES)" >&2
+  exit 2
+fi
+unset _p _selected
+
 # --------------------------------------------------------------------------
 # Establish the argent CLI we drive with.
 #   default: real sandbox global install (also what phase 0 asserts)

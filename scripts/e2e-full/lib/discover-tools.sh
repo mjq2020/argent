@@ -14,7 +14,9 @@
 #
 # We parse those into a compact model file per tool under $E2E_WORK/tools/<t>.model,
 # one line per flag:  <name>\t<kind>\t<required 0|1>\t<enumvals csv>
-# kind ∈ string|number|boolean|enum|array|object|unknown
+# kind ∈ string|number|integer|boolean|enum|array|object|unknown
+# ("unknown" is what an `any`-typed field parses to — there is no one kind to
+#  build a value for, so the bad-type matrix leaves it alone.)
 
 : "${E2E_WORK:?E2E_WORK must be set}"
 TOOLS_DIR="$E2E_WORK/tools"

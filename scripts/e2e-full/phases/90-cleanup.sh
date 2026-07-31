@@ -5,6 +5,27 @@
 run_phase() {
   local P=cleanup
 
+  # An AVD the android tier booted is reaped here, not there: the RN tier drives
+  # the same serial after that tier ends, so its per-device service and the
+  # emulator both have to survive until now. Runs before the stop-all below so
+  # the per-device call still has a service to stop and can be asserted on.
+  if [ -n "${E2E_ANDROID_REAP_SERIAL:-}" ]; then
+    if server_running; then
+      assert_ok "$P" stop-simulator-server stop "{\"udid\":\"$E2E_ANDROID_REAP_SERIAL\"}"
+    else
+      skip "$P" stop-simulator-server stop "no reachable tool-server"
+    fi
+    # Nothing else shuts the emulator itself down: the tool-server only reaps
+    # devices Lens booted through its preview path, not ones the boot-device
+    # tool started. Best-effort — a device already gone must not fail teardown.
+    if command -v adb >/dev/null 2>&1; then
+      adb -s "$E2E_ANDROID_REAP_SERIAL" emu kill >/dev/null 2>&1 || true
+      info "sent 'emu kill' to $E2E_ANDROID_REAP_SERIAL"
+    else
+      warn "adb not on PATH: emulator $E2E_ANDROID_REAP_SERIAL left running"
+    fi
+  fi
+
   # Stop any simulator-servers this run started (Android/iOS backends), and
   # Metro with them. Gated on the tool-server actually answering rather than on
   # ARGENT_TOOLS_URL: the harness never pins that variable — ensure_server lets

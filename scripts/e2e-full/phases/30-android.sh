@@ -118,20 +118,15 @@ run_phase() {
   skip "$P" reinstall-app happy-path "covered in RN tier with the Bluesky apk"
 
   # --- teardown for this device --------------------------------------------
-  # Only stop the sim-server for an AVD this phase booted. An injected device is
-  # the caller's (on a shared machine, the allocator's), and tearing its
-  # per-device service down here would pull it out from under the RN tier, which
-  # drives the same serial straight after this.
+  # Nothing is reaped here, on either branch. An injected device is the caller's
+  # (on a shared machine, the allocator's). One this phase booted is still in
+  # use: the RN tier drives the same serial straight after this, so both the
+  # per-device service and the emulator have to outlive this phase. 90-cleanup
+  # owns that reap, and it runs from run-e2e.sh's EXIT trap, so an aborted run
+  # reaps the AVD too — which ending the phase here would not.
   if [ "$BOOTED_HERE" -eq 1 ]; then
-    assert_ok "$P" stop-simulator-server stop "$U"
-    # And shut the emulator itself down. Nothing else will: the tool-server only
-    # reaps devices Lens booted through its preview path, not ones the
-    # boot-device tool started, so an AVD this phase booted would otherwise
-    # outlive the run. Best-effort — a device already gone must not fail teardown.
-    if command -v adb >/dev/null 2>&1; then
-      adb -s "$DEV" emu kill >/dev/null 2>&1 || true
-      info "sent 'emu kill' to $DEV"
-    fi
+    export E2E_ANDROID_REAP_SERIAL="$DEV"
+    skip "$P" stop-simulator-server stop "$DEV still in use by later phases; reaped in cleanup"
   else
     skip "$P" stop-simulator-server stop "injected device left running for the caller"
   fi

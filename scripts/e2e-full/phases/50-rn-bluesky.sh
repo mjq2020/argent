@@ -71,13 +71,23 @@ run_phase() {
   # not ours to kill, and every early return past this point has to run it or
   # the one we did start outlives the run.
   _rn_stop_metro() {
-    if [ "$STARTED_METRO" -eq 1 ]; then
+    if [ "$STARTED_METRO" -ne 1 ]; then
+      skip "$P" stop-metro stop "Metro was already running on :$MPORT; left as found"
+    elif _metro_ready "$MPORT"; then
       assert_ok "$P" stop-metro stop "{}"
     else
-      skip "$P" stop-metro stop "Metro was already running on :$MPORT; left as found"
+      # We spawned it, but nothing is serving the port, so stop-metro has
+      # nothing to find and failing the run on that says nothing true. The pid
+      # is still held in E2E_METRO_PID, which 90-cleanup kills.
+      skip "$P" stop-metro stop "the Metro this tier started is not serving :$MPORT; pid reaped in cleanup"
     fi
   }
-  if _metro_ready "$MPORT"; then pass "$P" metro ready; else fail "$P" metro ready "Metro not up on :$MPORT"; _skip_all "Metro unavailable"; return 0; fi
+  if _metro_ready "$MPORT"; then
+    pass "$P" metro ready
+  else
+    fail "$P" metro ready "Metro not up on :$MPORT"
+    _skip_all "Metro unavailable"; _rn_stop_metro; return 0
+  fi
 
   # --- launch app + connect the debugger -----------------------------------
   assert_true "$P" launch-app launch "{\"udid\":\"$DEV\",\"bundleId\":\"$PKG\"}" '.launched'
