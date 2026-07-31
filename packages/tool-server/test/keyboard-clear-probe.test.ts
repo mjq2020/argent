@@ -35,34 +35,43 @@ interface FakeEl {
   shadowRoot?: { activeElement: FakeEl | null } | null;
   contentDocument?: FakeDoc | null;
   validity?: { badInput: boolean };
+  /** The element's own root — a Document or an open ShadowRoot. */
+  getRootNode?: () => { activeElement: FakeEl | null } | null;
 }
 
 interface FakeDoc {
-  /** What the `Document.prototype` accessor reports — the truthful answer. */
+  /** What the `Document.prototype` accessors report — the truthful answers. */
   __active: FakeEl | null;
-  /** The document's own named getter, which a page can shadow. See below. */
+  __body: FakeEl;
+  __root: FakeEl;
+  /** The document's own named getters, which a page can shadow. See below. */
   activeElement: FakeEl;
   body: FakeEl;
   documentElement: FakeEl;
 }
 
 /**
- * A document whose OWN `activeElement` is a decoy.
+ * A document whose OWN `activeElement`, `body` and `documentElement` are decoys.
  *
- * `document.activeElement`'s named getter is `[LegacyOverrideBuiltIns]`, so a
- * `<form name="activeElement">` shadows it — measured on Chrome 150, the own
- * property then reports `FORM` while the `Document.prototype` accessor still
- * reports the real `INPUT`. Modelling the decoy on every document is what makes
- * these tests discriminating: any read that bypasses the prototype accessor
- * picks up the FORM and produces a visibly wrong verdict, so dropping that read
- * cannot ship green.
+ * Those named getters are `[LegacyOverrideBuiltIns]`, so `<form
+ * name="activeElement">`, `<img name="body">` and `<form
+ * name="documentElement">` each shadow the one they are named after — measured
+ * on Chrome 148, where `document.body.tagName` becomes `"IMG"` while the
+ * `Document.prototype` accessor still reports `BODY`. Modelling a decoy for all
+ * three is what makes these tests discriminating: any read that bypasses the
+ * prototype accessor picks up the decoy and produces a visibly wrong verdict, so
+ * dropping one cannot ship green.
  */
 function makeDoc(active: FakeEl | null): FakeDoc {
+  const body: FakeEl = { tagName: "BODY" };
+  const root: FakeEl = { tagName: "HTML" };
   return {
     __active: active,
+    __body: body,
+    __root: root,
     activeElement: { tagName: "FORM", id: "decoy" },
-    body: { tagName: "BODY" },
-    documentElement: { tagName: "HTML" },
+    body: { tagName: "IMG", id: "logo" },
+    documentElement: { tagName: "FORM", id: "rootDecoy" },
   };
 }
 
@@ -90,12 +99,18 @@ function runProbe(
     RegExp,
     String,
   };
-  Object.defineProperty(sandbox.Document.prototype, "activeElement", {
-    get(this: FakeDoc) {
-      return this.__active;
-    },
-    configurable: true,
-  });
+  for (const [name, backing] of [
+    ["activeElement", "__active"],
+    ["body", "__body"],
+    ["documentElement", "__root"],
+  ] as const) {
+    Object.defineProperty(sandbox.Document.prototype, name, {
+      get(this: FakeDoc) {
+        return this[backing];
+      },
+      configurable: true,
+    });
+  }
   Object.assign(sandbox, { globalThis: sandbox });
   const raw = runInNewContext(expression, sandbox) as string;
   return { result: JSON.parse(raw), window };
@@ -118,8 +133,42 @@ describe("chromium clear — focused-element probe", () => {
     // focused, never null. Feeding null instead would leave the body guard — the
     // one that actually fires in production — unpinned.
     const doc = makeDoc(null);
-    doc.__active = doc.body;
+    doc.__active = doc.__body;
     expect(runProbe(focusedEditableProbe(HANDLE), doc).result.verdict).toBe("none");
+  });
+
+  it("reports nothing focused when the documentElement holds focus", () => {
+    const doc = makeDoc(null);
+    doc.__active = doc.__root;
+    expect(runProbe(focusedEditableProbe(HANDLE), doc).result.verdict).toBe("none");
+  });
+
+  it("accepts a contenteditable BODY — the editor iframe shape", () => {
+    // TinyMCE in its default iframe mode, CKEditor 4 classic and
+    // `document.designMode = "on"` all make the BODY the editing host, which is
+    // exactly what the iframe descent above exists to reach. Blink clears it
+    // correctly, so the body sentinel must not swallow it into "nothing focused"
+    // — that refusal tells the caller to focus the field it already focused.
+    const doc = makeDoc(null);
+    doc.__body = { tagName: "BODY", id: "tinymce", isContentEditable: true, textContent: "draft" };
+    doc.__active = doc.__body;
+    const { result, window } = runProbe(focusedEditableProbe(HANDLE), doc);
+    expect(result).toMatchObject({ verdict: "editable", label: "BODY#tinymce", parked: true });
+    expect(window[HANDLE]).toBe(doc.__body);
+  });
+
+  it("reads body/documentElement through the prototype, not the page's own getters", () => {
+    // `<img name="body">` shadows `document.body`, so a direct read hands the
+    // sentinel an IMG: a focused BODY then falls through to the non-text
+    // refusal, whose advice ("use the element's own control") rules out the tap
+    // that would actually fix it.
+    const doc = makeDoc(null);
+    doc.__active = doc.__body;
+    expect(doc.body.tagName).toBe("IMG");
+    expect(runProbe(focusedEditableProbe(HANDLE), doc).result).toEqual({
+      verdict: "none",
+      mac: true,
+    });
   });
 
   it("reports nothing focused when there is no active element at all", () => {
@@ -338,6 +387,30 @@ describe("chromium clear — release probe", () => {
         [HANDLE]: { tagName: "INPUT", type: "password", value: "s3cret", isConnected: true },
       }).result.secret
     ).toBe(true);
+  });
+
+  it("reports whether the cleared element still holds focus", () => {
+    // The text of a combined `{ clear, text }` is dispatched at the page, so it
+    // lands wherever focus is AFTER the clear. A field that blurs once empty, or
+    // an app that advances to the next input, therefore swallows the whole value
+    // or appends it to a different field — both reported as a plain success
+    // until this is read back. Scoped by `getRootNode()` so it is the right
+    // question inside a shadow root and inside a sub-document too.
+    const kept: FakeEl = { tagName: "INPUT", value: "", isConnected: true };
+    kept.getRootNode = () => ({ activeElement: kept });
+    expect(release({ [HANDLE]: kept }).result).toMatchObject({ tracked: true, focused: true });
+
+    const blurred: FakeEl = { tagName: "INPUT", value: "", isConnected: true };
+    blurred.getRootNode = () => ({ activeElement: { tagName: "BODY" } });
+    expect(release({ [HANDLE]: blurred }).result).toMatchObject({ tracked: true, focused: false });
+  });
+
+  it("reports focus lost when the root cannot be read at all", () => {
+    const hostile: FakeEl = { tagName: "INPUT", value: "", isConnected: true };
+    hostile.getRootNode = () => {
+      throw new Error("hostile getRootNode");
+    };
+    expect(release({ [HANDLE]: hostile }).result).toMatchObject({ tracked: true, focused: false });
   });
 
   it("reports untracked rather than a bogus success when the read throws", () => {

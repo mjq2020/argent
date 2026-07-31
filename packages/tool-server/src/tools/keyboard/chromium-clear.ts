@@ -74,13 +74,22 @@ function newTargetHandle(): string {
  * `activeElement` afterwards cannot tell "emptied, then focus moved" from
  * "never emptied, and focus moved". Re-reading the SAME element can.
  *
- * `activeElement` is read through the `Document.prototype` accessor because the
- * document's named getter is `[LegacyOverrideBuiltIns]`: a `<form
- * name="activeElement">` shadows it. Same reasoning, and same technique, as the
- * describe DOM walker.
+ * `activeElement`, `body` and `documentElement` are all read through the
+ * `Document.prototype` accessors because the document's named getter is
+ * `[LegacyOverrideBuiltIns]`: `<form name="activeElement">`, `<img name="body">`
+ * and `<form name="documentElement">` each shadow the property they are named
+ * after. Reading `doc.body` directly is how the two sentinels below get handed a
+ * page-controlled element and hand the caller the wrong half of the refusal.
+ * Same reasoning, and same technique, as the describe DOM walker, which guards
+ * the identical read (`getDocBody = protoGetter(docProto, "body")`).
  *
- * Returns a JSON string (not an object) so the value crosses `Runtime.evaluate`
- * as a primitive, the same way the chromium clipboard and storage helpers do.
+ * Returns a JSON string rather than an object. Not a convention borrowed from
+ * the sibling CDP helpers — `chromium-server/clipboard.ts` and
+ * `chromium-server/storage.ts` both return objects through `returnByValue` — but
+ * a local one: `evaluateJson`'s `typeof raw !== "string"` guard is what makes an
+ * unreadable page fall to the best-effort branch, so the probes and that guard
+ * have to agree. Returning an object here would put every clear on the
+ * best-effort branch silently.
  */
 // Exported for test/keyboard-clear-probe.test.ts, which evals it against a mock
 // DOM: it runs inside the page, so the rest of the suite can only mock what it
@@ -96,8 +105,13 @@ export const focusedEditableProbe = (handle: string) => `(() => {
   try { mac = /Mac|iPhone|iPad/i.test((navigator && navigator.platform) || ""); } catch (e) {}
   try {
     const docProto = typeof Document === "undefined" ? {} : Document.prototype;
-    const activeOf = (Object.getOwnPropertyDescriptor(docProto, "activeElement") || {}).get;
+    const protoGet = (name) => (Object.getOwnPropertyDescriptor(docProto, name) || {}).get;
+    const activeOf = protoGet("activeElement");
+    const bodyOf = protoGet("body");
+    const rootOf = protoGet("documentElement");
     const active = (d) => (activeOf ? activeOf.call(d) : d.activeElement);
+    const bodyOfDoc = (d) => (bodyOf ? bodyOf.call(d) : d.body);
+    const rootOfDoc = (d) => (rootOf ? rootOf.call(d) : d.documentElement);
     let doc = document;
     let el = active(doc);
     // Bounded: a malformed page could otherwise cycle host → shadow → host.
@@ -117,7 +131,17 @@ export const focusedEditableProbe = (handle: string) => `(() => {
       if (shadow && shadow.activeElement) { el = shadow.activeElement; continue; }
       break;
     }
-    if (!el || el === doc.body || el === doc.documentElement) {
+    // Body / documentElement focus means "nothing is focused" — UNLESS the body
+    // is itself the editing host. \`document.designMode = "on"\`, TinyMCE in its
+    // default iframe mode and CKEditor 4 classic all put
+    // \`<body contenteditable="true">\` inside the editor iframe, which is exactly
+    // what the descent above exists to reach; Blink clears it correctly, so
+    // refusing it would refuse a working clear and tell the caller to focus the
+    // field it had already focused. The check is ordered before the sentinel
+    // rather than left to the \`isContentEditable\` branch further down, which the
+    // sentinel would otherwise shadow.
+    if (!el) return JSON.stringify({ verdict: "none", mac });
+    if ((el === bodyOfDoc(doc) || el === rootOfDoc(doc)) && el.isContentEditable !== true) {
       return JSON.stringify({ verdict: "none", mac });
     }
     const tag = (el.tagName || "").toUpperCase();
@@ -175,6 +199,15 @@ export const focusedEditableProbe = (handle: string) => `(() => {
  *
  * `tracked: false` means the element is gone — the page navigated, or the probe
  * never parked one — which is not evidence either way.
+ *
+ * `focused` answers a second question the caller needs: does the element still
+ * hold focus? Clearing routinely moves it — a field that blurs once empty, an
+ * app that advances to the next input — and the characters of a combined
+ * `{ clear, text }` are dispatched at whatever holds focus THEN, not at the
+ * element that was emptied. `getRootNode().activeElement` is the right test for
+ * that on every shape the probe can park: a shadow root and a (sub)document both
+ * expose `activeElement`, and it is scoped to the tree the element actually
+ * lives in.
  */
 // Exported for test/keyboard-clear-probe.test.ts — see focusedEditableProbe.
 export const clearedTargetProbe = (handle: string) => `(() => {
@@ -182,6 +215,11 @@ export const clearedTargetProbe = (handle: string) => `(() => {
     const el = window[${JSON.stringify(handle)}];
     delete window[${JSON.stringify(handle)}];
     if (!el) return JSON.stringify({ tracked: false });
+    let focused = false;
+    try {
+      const root = el.getRootNode ? el.getRootNode() : null;
+      focused = !!root && root.activeElement === el;
+    } catch (e) { focused = false; }
     // A page that replaces the field on edit (the React remount pattern) leaves
     // this node detached and holding its OLD value forever, while the live field
     // really was cleared. A stale read there is a false failure, so a detached
@@ -193,6 +231,7 @@ export const clearedTargetProbe = (handle: string) => `(() => {
     const value = form ? (el.value || "") : (el.textContent || "");
     return JSON.stringify({
       tracked: true,
+      focused,
       secret: (el.type || "") === "password",
       length: bad ? Math.max(1, value.length) : value.length,
     });
@@ -213,8 +252,22 @@ export interface FocusedEditable {
 
 export interface ClearedTarget {
   tracked: boolean;
+  /** Whether the cleared element still holds focus in its own root. */
+  focused?: boolean;
   secret?: boolean;
   length?: number;
+}
+
+/**
+ * What {@link clearChromiumField} observed, for the caller that types next.
+ *
+ * `keptFocus: undefined` means the page could not be read, so nothing is known —
+ * the same best-effort branch the emptiness check falls to.
+ */
+export interface ClearOutcome {
+  keptFocus?: boolean;
+  /** The element label the probe reported, for the caller's error message. */
+  label?: string;
 }
 
 async function evaluateJson<T>(api: ChromiumCdpApi, expression: string): Promise<T | undefined> {
@@ -267,7 +320,7 @@ const CDP_MODIFIER_META = 4;
  * it does, the check below reports the clear as the failure it is instead of
  * letting a following `text` append to the surviving value.
  */
-export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
+export async function clearChromiumField(api: ChromiumCdpApi): Promise<ClearOutcome> {
   const handle = newTargetHandle();
   const before = await readFocusedEditable(api, handle);
   if (before.verdict === "none" || before.verdict === "not-editable") {
@@ -328,16 +381,16 @@ export async function clearChromiumField(api: ChromiumCdpApi): Promise<void> {
   // there is nothing to verify against; `parked: false` means the assignment
   // itself did not take (a page can pre-define the slot non-writable). Either
   // way, stay best-effort rather than inventing a failure.
-  if (before.verdict !== "editable" || before.parked === false) return;
+  if (before.verdict !== "editable" || before.parked === false) return { label: before.label };
 
   // The re-read measures the element the probe parked, NOT whatever holds focus
   // now. Clearing routinely moves focus (a page that blurs on empty, a
   // re-render, an app shortcut), so `activeElement` afterwards cannot tell
   // "emptied, then focus moved" from "never emptied, and focus moved" — and the
   // second is exactly what an app cancelling the chord produces.
-  if (!after?.tracked) return;
+  if (!after?.tracked) return { label: before.label };
   const remaining = after.length ?? 0;
-  if (remaining === 0) return;
+  if (remaining === 0) return { keptFocus: after.focused === true, label: before.label };
 
   const held = after.secret || before.secret ? "its contents" : `${remaining} character(s)`;
   throw new FailureError(
