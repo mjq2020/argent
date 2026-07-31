@@ -44,13 +44,14 @@ function recordingCdpApi() {
       // the parked element — and a stub answering only the first sends every
       // clear down the best-effort branch instead of the one production takes
       // against a page it can read. Route by call order, and report a field that
-      // is populated until the clear runs.
+      // is populated until the clear runs, and that keeps focus afterwards (the
+      // ordinary shape — a field that blurs on empty refuses the typing).
       evaluate: async () => {
         probes++;
         return JSON.stringify(
           probes % 2 === 1
             ? { verdict: "editable", label: "INPUT#pw", length: 8, mac: true, parked: true }
-            : { tracked: true, length: cleared ? 0 : 8 }
+            : { tracked: true, focused: true, length: cleared ? 0 : 8 }
         );
       },
     },

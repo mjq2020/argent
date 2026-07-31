@@ -113,6 +113,34 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     expect(result.cleared).toBe(true);
   });
 
+  it("serializes overlapping calls so a keystroke never lands inside the chord", async () => {
+    // The modifier is held across awaits, and nothing else serializes tool calls
+    // against a device. A `{ text: "w" }` arriving inside that window used to be
+    // delivered as Cmd+W — a system shortcut — while still being reported as
+    // typed. Interleaving shows up as `Down:26` between `Down:227` and `Up:227`.
+    const { events, api } = recordingApi();
+    const registry = registryWith(api);
+
+    const clearing = typeSimulatorServer(registry, IOS_SIM, {
+      udid: IOS_SIM.id,
+      clear: true,
+      delayMs: 5,
+    });
+    const typing = typeSimulatorServer(registry, IOS_SIM, {
+      udid: IOS_SIM.id,
+      text: "w",
+      delayMs: 5,
+    });
+    await Promise.all([clearing, typing]);
+
+    const guiDown = events.indexOf("Down:227");
+    const guiUp = events.indexOf("Up:227");
+    expect(guiDown).toBeGreaterThanOrEqual(0);
+    expect(events.slice(guiDown, guiUp)).not.toContain("Down:26");
+    // The second call still ran, in full, after the first finished.
+    expect(events.slice(guiUp)).toContain("Down:26");
+  });
+
   it("clears with no text and reports cleared", async () => {
     const { events, api } = recordingApi();
 
@@ -214,7 +242,7 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     expect(result).not.toHaveProperty("cleared");
   });
 
-  it("still types a capital with shift (the modifier generalisation is not a regression)", async () => {
+  it("holds shift down across a capital's whole down/up pair", async () => {
     const { events, api } = recordingApi();
 
     await typeSimulatorServer(registryWith(api), IOS_SIM, {
@@ -353,6 +381,10 @@ describe("keyboard clear — Android (adb input)", () => {
 
       const timeoutOf = (call: [string, string, unknown?]) =>
         (call[2] as { timeoutMs: number }).timeoutMs;
+      // The probe is a READ leg too, and the FIRST one — if it kept a cap of its
+      // own the shared deadline would never bind, which is the whole mechanism
+      // this block introduced. 20s budget − 0s spent − 11s reserved.
+      expect(timeoutOf(adbShell.mock.calls[0]!)).toBe(9_000);
       // The dump is a READ leg, so it gets what is left MINUS the reserve held
       // back for the delete run: 20s budget − 3s spent − 11s reserved. Without that subtraction a slow dump can spend the whole
       // budget and the run it measured for then starts with nothing left.
@@ -424,6 +456,54 @@ describe("keyboard clear — Android (adb input)", () => {
     }
   });
 
+  it("waits out the dump's holder before retrying, rather than re-racing it", async () => {
+    // The winner of a UiAutomation race holds the connection for the whole dump
+    // (~2s) while the loser is refused in ~0.27s, so an immediate retry re-races
+    // the same holder and loses again — measured 3/3. Without a real wait the
+    // retry is decoration and every lost race still degrades to the blind count.
+    // Real elapsed time, because the backoff is a `sleep`, not a deadline read.
+    seedLegacyLevel();
+    seedDump("Killed");
+    seedDump(dumpWith("abcdefghij"));
+
+    const startedAt = process.hrtime.bigint();
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+
+    expect(adbExecOutBinary).toHaveBeenCalledTimes(2);
+    // Comfortably below DUMP_RETRY_BACKOFF_MS (2.5s) so a fast box cannot flake
+    // it, and far above the ~0ms a dropped backoff would take.
+    expect(elapsedMs).toBeGreaterThan(1_500);
+  }, 10_000);
+
+  it("removes the on-device dump file even when reading it back fails", async () => {
+    // The dump is written to /data/local/tmp and `cat`ed back. Joining the two
+    // with `&&` would skip the cleanup on exactly the failures that recur —
+    // keyguard/MFA flaps once leaked a file per attempt — and the clear now runs
+    // this path up to twice per call on top of describe and the TV blueprint.
+    seedLegacyLevel();
+    seedDump(dumpWith("abc"));
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    const dumpCmd = adbExecOutBinary.mock.calls[0]![1];
+    expect(dumpCmd).toMatch(/;\s*rm -f /);
+    expect(dumpCmd).not.toMatch(/&&\s*rm -f /);
+  });
+
+  it("omits `cleared` entirely when clear was not requested", async () => {
+    // `cleared` is defined as present only for a call that asked for a clear, so
+    // an emitted `cleared: false` reads to an agent as "the clear ran and
+    // failed" on a call that never requested one.
+    const result = await makeAndroidImpl(registryWith({})).handler(
+      {},
+      { udid: ANDROID.id, text: "hi" },
+      ANDROID
+    );
+
+    expect(result).not.toHaveProperty("cleared");
+  });
+
   it("gives up after one retry rather than dumping forever", async () => {
     seedLegacyLevel();
     seedDump("Killed");
@@ -471,9 +551,25 @@ describe("keyboard clear — Android (adb input)", () => {
 
     await expect(
       makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
-    ).rejects.toThrow(/1200 characters.*NOT modified/s);
+    ).rejects.toThrow(/1200 characters.*Nothing was modified and nothing was typed/s);
     // Probe only — no delete run was issued.
     expect(inputCmds()).toEqual([SELECT_ALL_CMD]);
+  });
+
+  it("does not attribute the refused count to the field the caller meant", async () => {
+    // The count is a maximum over every focused EditText in the dump, and the
+    // dump reports an EMPTY field's placeholder in the same `text` attribute as
+    // a real value — on the levels this fallback serves there is no separate
+    // `hint` attribute to tell them apart. So the number can come from another
+    // window's field, or be a placeholder on an empty one. The refusal stands
+    // (deleting on a guess is what truncates), but it must not assert that the
+    // target holds it.
+    seedLegacyLevel();
+    seedDump(dumpWith("x".repeat(200)));
+
+    await expect(
+      makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID)
+    ).rejects.toThrow(/a focused text field on this screen reports 200 characters/);
   });
 
   it("uses the blind count for a password field, whose text is unreadable", async () => {
@@ -754,7 +850,7 @@ describe("keyboard clear — Chromium (CDP)", () => {
       length: 8,
       mac: true,
     },
-    after: Record<string, unknown> = { tracked: true, length: 0 }
+    after: Record<string, unknown> = { tracked: true, length: 0, focused: true }
   ) {
     const events: KeyEventArgs[] = [];
     const probes: string[] = [];
@@ -786,6 +882,87 @@ describe("keyboard clear — Chromium (CDP)", () => {
         expect(probes).toHaveLength(2);
         expect(probes[0]).not.toBe(probes[1]);
       });
+  });
+
+  it("parks each clear under its own handle, so two calls cannot collide", async () => {
+    // Nothing serializes tool calls against a device, so two clears sharing one
+    // slot interleave: B's probe overwrites A's element, or B's release deletes
+    // the slot before A re-reads it and A takes the best-effort branch — a
+    // silent success on a field that was never emptied. A fixed name is also one
+    // the page can squat on with a non-writable decoy.
+    const handleOf = (probe: string) => probe.match(/__argentKeyboardClearTarget_\w+/)?.[0];
+
+    const first = recordingApi();
+    await makeChromiumImpl(registryWith(first.api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      CHROMIUM
+    );
+    const second = recordingApi();
+    await makeChromiumImpl(registryWith(second.api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(handleOf(first.probes[0]!)).toBeDefined();
+    // Both probes of one call share a handle; the two calls must not.
+    expect(handleOf(first.probes[1]!)).toBe(handleOf(first.probes[0]!));
+    expect(handleOf(second.probes[0]!)).not.toBe(handleOf(first.probes[0]!));
+  });
+
+  it("omits `cleared` entirely when clear was not requested", async () => {
+    const result = await makeChromiumImpl(registryWith(recordingApi().api)).handler(
+      {},
+      { udid: CHROMIUM.id, text: "hi", delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(result).not.toHaveProperty("cleared");
+  });
+
+  it("refuses to type when the clear moved focus off the field", async () => {
+    // Emptying a field routinely moves focus — one that blurs when empty, or an
+    // app that advances to the next input. The characters are dispatched at the
+    // PAGE, so they then land nowhere at all or append to a DIFFERENT field,
+    // and both returned the same success a real replacement returns.
+    const { events, api } = recordingApi(undefined, { tracked: true, length: 0, focused: false });
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: "new@example.com", delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/no longer holds focus/);
+
+    // The clear's own rawKeyDown + keyUp, and not one character beyond them.
+    expect(events).toHaveLength(2);
+  });
+
+  it("still clears when nothing follows, even if the field blurred itself", async () => {
+    // A clear-only call has no text to misplace, so losing focus afterwards is
+    // not a failure — the field was emptied, which is all that was asked.
+    const result = await makeChromiumImpl(
+      registryWith(recordingApi(undefined, { tracked: true, length: 0, focused: false }).api)
+    ).handler({}, { udid: CHROMIUM.id, clear: true, delayMs: 0 }, CHROMIUM);
+
+    expect(result.cleared).toBe(true);
+  });
+
+  it("types after a clear it could not read back, rather than refusing blind", async () => {
+    // An unreadable page yields no focus evidence either way. Refusing there
+    // would break clears that work today for a check that is merely blind.
+    const { events, api } = recordingApi(undefined, { tracked: false });
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, text: "ab", delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(result).toMatchObject({ typed: "ab", keys: 2, cleared: true });
+    expect(events.length).toBeGreaterThan(2);
   });
 
   it("dispatches selectAll+deleteBackward as `commands`, with a real modifier", async () => {

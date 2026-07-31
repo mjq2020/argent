@@ -64,7 +64,9 @@ export function parseUiAutomatorXml(xml: string): ParsedXmlNode | null {
 //   text='a&lt;b&gt;c&amp;d"e&apos;f'
 // A double-quote-only matcher skips that attribute entirely, so the node keeps
 // its other attributes but silently loses its text: the describe tree shows the
-// field as blank, and the keyboard clear's length measurement reads it as empty.
+// field as blank, and the keyboard clear's length measurement — which floors a
+// focused editable carrying no readable `text` to BLIND_DELETE_COUNT rather than
+// to zero — runs that fixed blind count against it, truncating anything longer.
 function parseAttributes(raw: string): Record<string, string> {
   const attrs: Record<string, string> = {};
   const re = /([A-Za-z_][\w.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;

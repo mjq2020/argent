@@ -168,9 +168,11 @@ const KEYCODE_DEL = 67;
  * Wall-clock budget for one whole clear, shared across every adb round trip it
  * makes.
  *
- * A clear is up to three sequential calls (the `keycombination` probe, then on a
- * legacy level a `uiautomator dump` and the delete run), and `text` / `key`
- * injection still follows it inside the same request. `keyboard` does not
+ * A clear is up to four sequential adb calls plus an in-process backoff: the
+ * `keycombination` probe, then on a legacy level a `uiautomator dump`, a
+ * DUMP_RETRY_BACKOFF_MS wait, a second dump (see {@link readHierarchy}) and the
+ * delete run. `text` / `key` injection still follows it inside the same
+ * request. `keyboard` does not
  * declare `longRunning`, so the argent-mcp adapter applies its 30s per-request
  * fetch timeout to the lot (`FETCH_TIMEOUT_MS`, mcp-server.ts) — which means the
  * legs CANNOT each be sized against 30s independently, or their worst cases sum
@@ -207,11 +209,17 @@ const DELETE_RUN_RESERVE_MS = 11_000;
  * Timeout for the next leg of a clear: whatever is left of the shared budget.
  *
  * `reserveMs` is withheld so an earlier leg cannot consume what a later one
- * needs. The shared deadline is deliberately the only bound — per-leg caps were
- * removed because the budget is what actually has to hold, and two of them could
- * never bind anyway. Floored at 1s rather than 0 so an already-overrun budget
- * still attempts the call: a 0ms timeout would fail every time, turning a merely
- * slow device into a hard error.
+ * needs. The shared deadline is deliberately the only bound: the budget is what
+ * actually has to hold, and a second per-leg cap on top of it could only ever
+ * bind before the budget did, which is the sizing the whole block exists to
+ * avoid.
+ *
+ * Floored at 1s rather than 0 because `runAdb` forwards this straight to
+ * `execFile`'s `timeout`, and `??`-defaulting preserves a `0` — which Node reads
+ * as NO timeout, not as an instant one. An already-overrun budget would
+ * therefore hand the last leg an UNBOUNDED adb child rather than failing it
+ * fast. 1s keeps every leg bounded and still lets a merely slow device finish a
+ * warm call.
  */
 function clearLegTimeout(deadline: number, reserveMs = 0): number {
   return Math.max(1_000, deadline - Date.now() - reserveMs);
@@ -297,14 +305,16 @@ const DELETE_MARGIN = 8;
 // This IS the fixed run the measurement exists to avoid, so it carries that
 // shape's failure with it: a field longer than this keeps its head.
 //
-// It MUST stay below MAX_DELETE_COUNT. An unmeasurable focused editable floors
+// It MUST NOT exceed MAX_DELETE_COUNT. An unmeasurable focused editable floors
 // the measurement to this value rather than vanishing from it (see
 // measureFocusedTextLength), so the blind count is what the length refusal
 // compares — and if it sat above the limit, every unmeasurable field (every
 // password field on these levels) would be refused, quoting this constant as
-// though it were a length that had been measured. `blind_delete_count_fits_the_limit`
-// in test/keyboard-clear.test.ts pins the relationship, because the two
-// constants are otherwise edited independently and nothing else connects them.
+// though it were a length that had been measured. The refusal is `count >
+// MAX_DELETE_COUNT`, so equality is allowed and `<=` is the relationship.
+// `it("keeps the blind delete count under the length limit")` in
+// test/keyboard-clear.test.ts pins it, because the two constants are otherwise
+// edited independently and nothing else connects them.
 export const BLIND_DELETE_COUNT = 120;
 
 // Longest field this path will attempt; beyond it the clear is refused rather
@@ -339,9 +349,17 @@ export const MAX_DELETE_COUNT = 150;
  * and BLIND_DELETE_COUNT for what it covers.
  *
  * Note the dump reports an EMPTY field's hint in the same `text` attribute (on
- * every level tested, including API 36), so a measurement can be the placeholder
- * rather than real content. That is harmless in this direction: it only ever makes the run
- * slightly longer than needed, and backspace on an empty field does nothing.
+ * every level tested, including API 36, which carries no separate `hint`
+ * attribute to tell them apart), so a measurement can be the placeholder rather
+ * than real content. For the delete run that is harmless — it only makes the run
+ * slightly longer than needed, and backspace on an empty field does nothing. It
+ * is NOT harmless for the MAX_DELETE_COUNT gate below, which turns any
+ * over-measurement into a refusal: an empty field whose placeholder is longer
+ * than the limit is refused with a length it does not hold. Accepted rather than
+ * fixed, because nothing in the dump distinguishes the two on the levels this
+ * fallback serves, and the alternative (delete first, judge after) can only
+ * discover a real over-long field by having already truncated it. A placeholder
+ * that long is also not a shape these single-line fields take.
  *
  * Known limit, and the reason this is the fallback rather than the primary path:
  * `KEYCODE_MOVE_END` is end-of-LINE, not end-of-buffer, so a multi-line field
@@ -355,19 +373,23 @@ export const MAX_DELETE_COUNT = 150;
 async function clearByDeleting(serial: string, deadline: number): Promise<void> {
   const count = (await measureFocusedTextLength(serial, deadline)) ?? BLIND_DELETE_COUNT;
   const keys = count + DELETE_MARGIN;
-  // Refuse BEFORE touching the field. Length is the only ground: the run's time
-  // is bounded by DELETE_RUN_RESERVE_MS, which the read legs above cannot spend,
-  // so "this call ran out of budget" is not a case that needs its own rejection.
-  // An earlier cut also refused on an estimated run time and got this wrong in
-  // both directions — it over-predicted a normal field by ~29x (turning working
-  // clears into hard 400s) while reporting a fabricated length for the blind
-  // path, where no length was ever measured.
+  // Refuse BEFORE touching the field, and on length alone. Time is deliberately
+  // not a second ground: the run is already bounded by DELETE_RUN_RESERVE_MS,
+  // which the read legs above cannot spend, so "this call ran out of budget" has
+  // no case of its own to reject. Predicting the run's duration instead of
+  // capping its length cannot work here either — the per-key cost spans two
+  // orders of magnitude between an idle field and a live-filtering one (see
+  // MAX_DELETE_COUNT), and on the blind path there is no measured length to
+  // predict from.
   if (count > MAX_DELETE_COUNT) {
     throw new InvalidToolInputError(
-      `keyboard clear: the focused field holds ${count} characters, more than this Android ` +
-        `level can clear. Without \`input keycombination\` (added after API 30) the only ` +
-        `available clear is one backspace per character, which is too slow to finish ` +
-        `reliably past ${MAX_DELETE_COUNT}. The field was NOT modified. Clear it with the ` +
+      `keyboard clear: a focused text field on this screen reports ${count} characters, more ` +
+        `than this Android level can clear. Without \`input keycombination\` (added after API ` +
+        `30) the only available clear is one backspace per character, which is too slow to ` +
+        `finish reliably past ${MAX_DELETE_COUNT}. The count is read from the uiautomator ` +
+        `dump, which reports an empty field's placeholder in the same attribute as its value ` +
+        `and covers every window, so it may belong to a different focused field than the one ` +
+        `you meant. Nothing was modified and nothing was typed. Clear the field with the ` +
         `app's own affordance, or use an emulator on a newer API level.`,
       {
         // Its own code rather than KEYBOARD_CLEAR_INEFFECTIVE: this is a
@@ -462,8 +484,12 @@ async function readHierarchy(serial: string, deadline: number): Promise<string |
  * focused node in document order would read that as "the field is empty" and
  * issue only DELETE_MARGIN backspaces against a field that is not, leaving a
  * partly-cleared value reported as `cleared: true`. Where more than one editable
- * node claims focus, the longest wins: over-deleting is a no-op, under-deleting
- * is the truncation this exists to avoid.
+ * node claims focus, the longest wins: for the delete run over-deleting is a
+ * no-op while under-deleting is the truncation this exists to avoid. The
+ * MAX_DELETE_COUNT gate makes that asymmetry less clean than it reads — a long
+ * field focused in ANOTHER window refuses the clear of a short one, and the
+ * refusal quotes a length the target does not hold — so the message says the
+ * count came from a focused field on screen rather than from "the" field.
  *
  * The XML goes through the describe stack's `parseUiAutomatorXml` rather than a
  * local regex. That parser already handles what a hand-rolled one gets wrong on
@@ -506,7 +532,7 @@ async function measureFocusedTextLength(
     // 300-character field alongside an unreadable one falls to the blind run and
     // truncates the first. Merely skipping it is worse: a focused password field
     // beside a short focused sibling (`text="ab"`) would measure 2, issuing ten
-    // backspaces where the field alone would have got the blind 128. Flooring
+    // backspaces where the field alone would have got the blind count. Flooring
     // keeps `longest` monotonic, which is what makes the "over-deleting is a
     // no-op, under-deleting truncates" rule above actually hold.
     const text = attrIsTrue(attrs, "password") ? undefined : attrs.text;

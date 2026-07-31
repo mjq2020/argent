@@ -163,8 +163,11 @@ describe("parseUiAutomatorXml — reads single-quoted attribute values", () => {
   //   text='a&lt;b&gt;c&amp;d"e&apos;f'
   // A double-quote-only attribute matcher skips that attribute entirely. The
   // node keeps its other attributes, so nothing looks broken — the text just
-  // silently disappears from the describe tree, and any length read off it
-  // (the keyboard clear's delete count) measures the field as empty.
+  // silently disappears from the describe tree, and the keyboard clear's delete
+  // count then reads the field as UNMEASURABLE rather than as empty: it floors a
+  // focused editable carrying no `text` to BLIND_DELETE_COUNT, so an
+  // eight-character field draws the full blind run and anything longer than that
+  // count keeps its head.
   it("keeps the text of a node whose value contains a double quote", () => {
     const xml = `<?xml version='1.0' ?>
 <hierarchy rotation="0">
