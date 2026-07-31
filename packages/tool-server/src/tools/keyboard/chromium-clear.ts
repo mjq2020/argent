@@ -52,9 +52,11 @@ import { InvalidToolInputError } from "../../utils/capability";
 // made every clear on that page report success forever. A fresh name per call
 // makes both far harder to hit. (`crypto.randomUUID` is the same shape
 // `cdp-client`'s `evaluateWithBinding` uses to key its own callbacks.)
-function newTargetHandle(): string {
+export function newTargetHandle(): string {
   return `__argentKeyboardClearTarget_${randomUUID().replace(/-/g, "")}`;
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Resolves the editable element that holds focus — across shadow roots and
@@ -195,7 +197,7 @@ export const focusedEditableProbe = (handle: string) => `(() => {
 })()`;
 
 /**
- * Re-reads the element the probe parked, and releases it.
+ * Re-reads the element the probe parked. Releases it unless `keep` is set.
  *
  * `tracked: false` means the element is gone — the page navigated, or the probe
  * never parked one — which is not evidence either way.
@@ -208,17 +210,37 @@ export const focusedEditableProbe = (handle: string) => `(() => {
  * that on every shape the probe can park: a shadow root and a (sub)document both
  * expose `activeElement`, and it is scoped to the tree the element actually
  * lives in.
+ *
+ * `activeElement` is read through the prototype accessor of whichever root came
+ * back, for the same reason `focusedEditableProbe` does it: on a document it is
+ * a `[LegacyOverrideBuiltIns]` named getter, so `<iframe name="activeElement">`
+ * makes the raw read return that frame's `Window` and every successful clear
+ * report that the field lost focus.
+ *
+ * `keep: true` leaves the element parked so the caller can ask again after it
+ * has typed — the reason `releaseTargetProbe` exists.
  */
 // Exported for test/keyboard-clear-probe.test.ts — see focusedEditableProbe.
-export const clearedTargetProbe = (handle: string) => `(() => {
+export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
   try {
     const el = window[${JSON.stringify(handle)}];
-    delete window[${JSON.stringify(handle)}];
+    ${keep ? "" : `delete window[${JSON.stringify(handle)}];`}
     if (!el) return JSON.stringify({ tracked: false });
     let focused = false;
     try {
       const root = el.getRootNode ? el.getRootNode() : null;
-      focused = !!root && root.activeElement === el;
+      // Walk the prototype CHAIN, not just the immediate one: on an HTML
+      // document the own prototype is HTMLDocument.prototype while
+      // \`activeElement\` is declared on Document.prototype above it, so a
+      // one-level lookup finds nothing and falls back to the shadowed read.
+      let activeOf;
+      for (let proto = root && Object.getPrototypeOf(root); proto; ) {
+        const d = Object.getOwnPropertyDescriptor(proto, "activeElement");
+        if (d && d.get) { activeOf = d.get; break; }
+        proto = Object.getPrototypeOf(proto);
+      }
+      const active = root ? (activeOf ? activeOf.call(root) : root.activeElement) : null;
+      focused = active === el;
     } catch (e) { focused = false; }
     // A page that replaces the field on edit (the React remount pattern) leaves
     // this node detached and holding its OLD value forever, while the live field
@@ -268,6 +290,19 @@ export interface ClearOutcome {
   keptFocus?: boolean;
   /** The element label the probe reported, for the caller's error message. */
   label?: string;
+}
+
+/**
+ * Re-read the parked element's focus and release it, in one round trip.
+ *
+ * The caller uses this both to ask "did focus survive the typing?" and simply to
+ * let the element go, so the handle is never left pinning a detached subtree.
+ */
+export async function releaseParkedTarget(
+  api: ChromiumCdpApi,
+  handle: string
+): Promise<ClearedTarget | undefined> {
+  return evaluateJson<ClearedTarget>(api, clearedTargetProbe(handle, false));
 }
 
 async function evaluateJson<T>(api: ChromiumCdpApi, expression: string): Promise<T | undefined> {
@@ -320,8 +355,11 @@ const CDP_MODIFIER_META = 4;
  * it does, the check below reports the clear as the failure it is instead of
  * letting a following `text` append to the surviving value.
  */
-export async function clearChromiumField(api: ChromiumCdpApi): Promise<ClearOutcome> {
-  const handle = newTargetHandle();
+export async function clearChromiumField(
+  api: ChromiumCdpApi,
+  handle: string,
+  settleMs: number
+): Promise<ClearOutcome> {
   const before = await readFocusedEditable(api, handle);
   if (before.verdict === "none" || before.verdict === "not-editable") {
     // Well-formed request against a page that cannot serve it — a 400, the same
@@ -373,8 +411,21 @@ export async function clearChromiumField(api: ChromiumCdpApi): Promise<ClearOutc
       commands: ["selectAll", "deleteBackward"],
     });
     await api.dispatchKeyEvent({ type: "keyUp", ...selectAllKey });
+    // Settle BEFORE measuring, not after. A page reacts to becoming empty in a
+    // later task — a field that blurs itself, one that advances to the next
+    // input, a re-render — so a read taken microseconds after the key event
+    // sees the state the page has not finished leaving. Measured on Chrome 150:
+    // the probe landed 2-24ms after the dispatch while typing started `delayMs`
+    // later, and a blur scheduled anywhere inside that gap was invisible to the
+    // check that exists to catch it (4/8 at a 30ms blur, 5/5 at 10-40ms).
+    // Sleeping here instead of in the caller makes this read the LAST thing
+    // before the first character goes out.
+    await sleep(settleMs);
   } finally {
-    after = await evaluateJson<ClearedTarget>(api, clearedTargetProbe(handle));
+    // `keep`, so the caller can ask the same element about focus again once it
+    // has finished typing — a blur can also land mid-loop, which no single
+    // sample before the loop can see.
+    after = await evaluateJson<ClearedTarget>(api, clearedTargetProbe(handle, true));
   }
 
   // `unknown` before means the page was unreadable, so no element was parked and

@@ -297,9 +297,15 @@ describe("chromium clear — focused-element probe", () => {
   });
 
   it("reports the RENDERER's platform so the chord matches the page", () => {
-    expect(focused({ tagName: "INPUT", value: "a" }, {}, "MacIntel").result.mac).toBe(true);
-    expect(focused({ tagName: "INPUT", value: "a" }, {}, "Win32").result.mac).toBe(false);
-    expect(focused({ tagName: "INPUT", value: "a" }, {}, "Linux x86_64").result.mac).toBe(false);
+    // iPhone/iPad are in the test because an embedded renderer can report them
+    // and Command is still the select-all chord there; without those arms the
+    // page would silently get Ctrl.
+    for (const platform of ["MacIntel", "iPhone", "iPad"]) {
+      expect(focused({ tagName: "INPUT", value: "a" }, {}, platform).result.mac).toBe(true);
+    }
+    for (const platform of ["Win32", "Linux x86_64", "Android"]) {
+      expect(focused({ tagName: "INPUT", value: "a" }, {}, platform).result.mac).toBe(false);
+    }
   });
 
   it("still reports the platform when the page could not be read", () => {
