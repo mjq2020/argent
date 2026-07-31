@@ -91,11 +91,13 @@ export async function describeAndroid(
       `uiautomator could not capture the screen: ${trimmed || "(no output)"}. ` +
         `Common causes: device locked / keyguard, DRM or secure overlay, Play Integrity screen, ` +
         `or another uiautomator dump holding the device. ` +
-        `Unlock the device or take a screenshot as a fallback.`,
+        `Retry once — a lost race clears once the holder finishes — then unlock the device or ` +
+        `take a screenshot as a fallback.`,
       {
-        // The adb wrapper exits 0, but the uiautomator tool it ran reported an
-        // in-band `ERROR:` line — a functional failure of the uiautomator
-        // subprocess. Classified `subprocess` to match the sibling
+        // The adb wrapper exits 0 while the uiautomator tool it ran produced no
+        // hierarchy: an in-band `ERROR:` line, or the bare `Killed` of a lost
+        // UiAutomation race. Either is a functional failure of the uiautomator
+        // subprocess, so `subprocess` matches the sibling
         // ANDROID_UIAUTOMATOR_PARSE_FAILED (also adb-exit-0, unusable output).
         error_code: FAILURE_CODES.ANDROID_UIAUTOMATOR_CAPTURE_FAILED,
         failure_stage: "android_uiautomator_capture",
