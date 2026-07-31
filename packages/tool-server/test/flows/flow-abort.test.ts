@@ -312,6 +312,145 @@ describe("run cancellation mid-directive", () => {
     expect(calls).toContain("keyboard");
   });
 
+  // The four guards below were each removable with the whole flow suite still
+  // green. They are the ones that stop a cancelled run from still reaching the
+  // device, so each gets a test that fails when it is taken out.
+  //
+  // `focusedField` is the tree every one of them runs against: focus lands on
+  // the target, so the focus wait confirms immediately and the step proceeds to
+  // its dispatches — which is where the cancellation has to be caught.
+  const focusedField = () => ({
+    tree: screen([
+      n({
+        identifier: "email",
+        focused: true,
+        frame: { x: 0.1, y: 0.2, width: 0.8, height: 0.06 },
+      }),
+    ]),
+    source: "native-devtools" as const,
+  });
+
+  it("does not submit after a run cancelled during the text dispatch", async () => {
+    // The first keyboard call SUCCEEDS and the cancel lands while it runs, so
+    // no rejection reclassifies anything: only the explicit re-check before the
+    // Enter block stops the submit. Without it the cancelled run presses Enter
+    // into whatever the app has focused, and reports the step as a pass.
+    const controller = new AbortController();
+    currentFetch = focusedField;
+    const calls: string[] = [];
+    const registry = {
+      invokeTool: vi.fn(async (id: string) => {
+        calls.push(id);
+        if (id === "list-devices") return { devices: [] };
+        if (id === "keyboard") controller.abort();
+        return { ok: true };
+      }),
+      getTool: vi.fn(() => ({ inputSchema: { properties: { udid: {} } } })),
+    } as unknown as Registry;
+
+    await writeFlow("cancelled-before-submit", {
+      executionPrerequisite: "",
+      steps: [{ kind: "type", into: { identifier: "email" }, text: "a@b.com" }],
+    });
+
+    const result = await run("cancelled-before-submit", registry, controller.signal);
+
+    expect(result.steps.map((s) => `${s.kind}:${s.status}`)).toEqual(["type:skip"]);
+    expect(calls.filter((c) => c === "keyboard")).toHaveLength(1);
+  });
+
+  it("reports a clear-only step cancelled during its one dispatch as a skip", async () => {
+    // `submit` defaults to false for a clear-only step, so the Enter block never
+    // runs and the guard on the clear/text dispatch's own return value is the
+    // only one in play. Without it the step reports a pass after the clear was
+    // dispatched into a cancelled run.
+    const controller = new AbortController();
+    currentFetch = focusedField;
+    const registry = {
+      invokeTool: vi.fn(async (id: string) => {
+        if (id === "list-devices") return { devices: [] };
+        if (id === "keyboard") {
+          controller.abort();
+          throw new Error("simulator-server connection closed");
+        }
+        return { ok: true };
+      }),
+      getTool: vi.fn(() => ({ inputSchema: { properties: { udid: {} } } })),
+    } as unknown as Registry;
+
+    await writeFlow("cancelled-clear-only", {
+      executionPrerequisite: "",
+      steps: [{ kind: "type", into: { identifier: "email" }, clear: true }],
+    });
+
+    const result = await run("cancelled-clear-only", registry, controller.signal);
+
+    expect(result.steps.map((s) => `${s.kind}:${s.status}`)).toEqual(["type:skip"]);
+    expect(result.steps[0].reason).toBe("run aborted");
+  });
+
+  it("reports a type cancelled DURING the submitting Enter as a skip, not an error", async () => {
+    // The Enter dispatch needs the same reclassification as the text one: a
+    // rejection that coincides with the cancel must not surface as a step error
+    // quoting the backend.
+    const controller = new AbortController();
+    currentFetch = focusedField;
+    let keyboardCalls = 0;
+    const registry = {
+      invokeTool: vi.fn(async (id: string) => {
+        if (id === "list-devices") return { devices: [] };
+        if (id === "keyboard") {
+          keyboardCalls++;
+          if (keyboardCalls === 1) return { ok: true };
+          controller.abort();
+          throw new Error("simulator-server connection closed");
+        }
+        return { ok: true };
+      }),
+      getTool: vi.fn(() => ({ inputSchema: { properties: { udid: {} } } })),
+    } as unknown as Registry;
+
+    await writeFlow("cancelled-enter", {
+      executionPrerequisite: "",
+      steps: [{ kind: "type", into: { identifier: "email" }, text: "a@b.com" }],
+    });
+
+    const result = await run("cancelled-enter", registry, controller.signal);
+
+    expect(result.steps.map((s) => `${s.kind}:${s.status}`)).toEqual(["type:skip"]);
+    expect(result.steps[0].reason).toBe("run aborted");
+    expect(keyboardCalls).toBe(2);
+  });
+
+  it("reports a type cancelled DURING the focusing tap as a skip, not an error", async () => {
+    // All three of the step's device calls have to classify a cancelled run the
+    // same way; with the tap left bare, the same step reported `error` or `skip`
+    // depending on which dispatch happened to be in flight.
+    const controller = new AbortController();
+    currentFetch = focusedField;
+    const registry = {
+      invokeTool: vi.fn(async (id: string) => {
+        if (id === "list-devices") return { devices: [] };
+        if (id === "gesture-tap") {
+          controller.abort();
+          throw new Error("simulator-server connection closed");
+        }
+        return { ok: true };
+      }),
+      getTool: vi.fn(() => ({ inputSchema: { properties: { udid: {} } } })),
+    } as unknown as Registry;
+
+    await writeFlow("cancelled-focus-tap", {
+      executionPrerequisite: "",
+      steps: [{ kind: "type", into: { identifier: "email" }, text: "a@b.com" }],
+    });
+
+    const result = await run("cancelled-focus-tap", registry, controller.signal);
+
+    expect(result.steps.map((s) => `${s.kind}:${s.status}`)).toEqual(["type:skip"]);
+    expect(result.steps[0].reason).toBe("run aborted");
+  });
+
   it("propagates a keyboard rejection as a real error when the run is not aborted", async () => {
     // The other half of the guard above: only a CANCELLED run may be reclassified
     // as a skip. A backend rejecting on its own — un-typeable text, an unknown

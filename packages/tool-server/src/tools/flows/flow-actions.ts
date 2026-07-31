@@ -105,14 +105,26 @@ export function invokeOnDevice(
 }
 
 /**
- * {@link invokeOnDevice} for a directive whose tool has no abort handling of its
- * own. Cancelling a run tears down the transport the dispatch rides on (the
- * simulator-server connection, the CDP session), so a call in flight when the
- * caller gives up rejects with a raw backend message. Per {@link ABORTED_OUTCOME}
- * that must read as an aborted skip, never a step failure quoting the tool —
- * `runRotate` applied this guard inline before there was a second directive
- * needing it; returning a boolean lets both share one copy, matching
- * {@link sleepOrAbort}'s shape.
+ * {@link invokeOnDevice}, reclassifying a rejection that coincides with a
+ * cancelled run as the aborted skip {@link ABORTED_OUTCOME} defines, rather than
+ * a step failure quoting the tool.
+ *
+ * The two callers reach it from opposite directions.
+ *
+ * `gesture-rotate` DOES honour the signal: it polls `ctx?.signal?.aborted` every
+ * frame, lifts the fingers and throws a named `AbortError`. Without this wrapper
+ * `runRotate` would report that deliberate unwind as a failed step.
+ *
+ * `keyboard` honours nothing — the `ToolContext` reaches its platform handlers
+ * and every one of them discards it — so its dispatch rejects only for an
+ * unrelated reason that happens to land inside a cancelled window: a `typeTv`
+ * refusal on a TV target, or an `adb shell input` timeout. Rare, but the
+ * classification still has to be the skip, because the alternative is a report
+ * blaming the tool for a run the caller cancelled.
+ *
+ * (Cancelling a run does NOT tear down the transport under an in-flight call.
+ * Flow-run's Chromium teardown is run-level, in the `finally` after `execSteps`
+ * settles.)
  *
  * `runLaunch` handles the same case differently on purpose and is NOT a caller:
  * it returns a `restart-app failed: …` outcome rather than rethrowing, so
@@ -414,6 +426,25 @@ function framesOverlap(a: DescribeFrame, b: DescribeFrame): boolean {
 }
 
 /**
+ * Frames are normalized fractions of the screen produced by three different
+ * adapters, so "the same node" can differ in the last place. A rect-containment
+ * test needs to absorb that; half a percent of the screen is far below any real
+ * nesting and far above any rounding.
+ */
+const FRAME_CONTAINMENT_EPSILON = 0.005;
+
+/** Is `inner` inside `outer` (equal frames included)? */
+function frameWithin(inner: DescribeFrame, outer: DescribeFrame): boolean {
+  const e = FRAME_CONTAINMENT_EPSILON;
+  return (
+    inner.x >= outer.x - e &&
+    inner.y >= outer.y - e &&
+    inner.x + inner.width <= outer.x + outer.width + e &&
+    inner.y + inner.height <= outer.y + outer.height + e
+  );
+}
+
+/**
  * Is this node a scroll container? Android's uiautomator dump flags one
  * directly (`scrollable`); the iOS full-hierarchy adapter carries no such flag
  * but maps UIScrollView/UITableView/UICollectionView class names to the
@@ -462,35 +493,69 @@ function collectFocused(node: DescribeNode, acc: DescribeNode[]): DescribeNode[]
 }
 
 /**
- * Outcome of the focus handshake. The distinction only matters to a destructive
- * `clear`: "unobservable" means no focus evidence was obtained — the source
- * cannot report focus, nothing was flagged, or the tree could not be read at
- * all — so a failed poll says nothing, while "unconfirmed" means the tree DID
- * report focus, just on something other than the target.
+ * Outcome of the focus handshake. The distinctions only matter to a destructive
+ * `clear`; plain typing treats everything but a hard abort as best-effort.
  *
- * Membership in {@link FOCUS_REPORTING_SOURCES} is not enough to tell those
+ * - "confirmed" — a focus-flagged node sits INSIDE the target's frame (equal
+ *   frames included). The keys will land in the field the step named.
+ * - "encloses" — the only focus-flagged node overlapping the target CONTAINS
+ *   it. That is not evidence: it is what an open shadow root
+ *   (`document.activeElement` is the host, never the inner element), a hybrid
+ *   app's focused WebView, and an ordinary focus trap all look like, and each
+ *   of them can coexist with a different element genuinely holding the keys.
+ * - "unconfirmed" — the tree reported focus, on something that does not
+ *   overlap the target at all.
+ * - "unobservable" — no focus evidence anywhere: the source cannot report
+ *   focus, or every read succeeded and no node was flagged.
+ * - "unreadable" — every read in the window threw, so nothing at all was
+ *   observed. Distinct from "unobservable", where reads DID succeed: this is
+ *   the tree-source outage `settleTree` refuses to swallow for the same reason.
+ *
+ * Membership in {@link FOCUS_REPORTING_SOURCES} is not enough to tell these
  * apart. An iOS device whose injected framework predates the `firstResponder`
  * field answers `getFullHierarchy` without it (see `flow-ios-tree`), so the
  * source is native-devtools yet no node is ever flagged — verified on an
  * iPhone 16 Pro, where treating that as "unconfirmed" refused every clear on
- * the platform. Hence the outcome keys off whether any node in the tree
- * reported focus, not off the source alone.
+ * the platform. Hence the outcome keys off what the tree reported, not off the
+ * source alone.
  */
-type FocusOutcome = "confirmed" | "unconfirmed" | "unobservable";
+type FocusOutcome = "confirmed" | "encloses" | "unconfirmed" | "unobservable" | "unreadable";
 
 /**
- * Poll until an element reporting `focused` overlaps the typed-into element.
- * Overlap, not identity: the selector often matches a testID container while
- * focus is reported by the input inside it. The target's frame is re-resolved
- * each round — the keyboard sliding up routinely scrolls the field away from
- * where it was tapped (keyboard avoidance), and the focused element must be
- * compared against where the field is NOW; `tappedFrame` covers rounds where
- * the selector momentarily doesn't resolve.
+ * Poll until an element reporting `focused` sits inside the typed-into element.
  *
- * Reports rather than decides: plain typing treats "unconfirmed" as
- * best-effort and types anyway (no focus seen can also mean the focused view
- * didn't make it into the tree, and misplaced text is visible and additive),
- * while `runType` refuses to dispatch a destructive clear on it.
+ * Containment, not identity: the selector often matches a testID container
+ * while focus is reported by the input inside it, and the two are then
+ * different nodes with different frames. The target's frame is re-resolved each
+ * round — the keyboard sliding up routinely scrolls the field away from where
+ * it was tapped (keyboard avoidance), and the focused element must be compared
+ * against where the field is NOW; `tappedFrame` covers rounds where the
+ * selector momentarily doesn't resolve.
+ *
+ * Containment, not overlap, is what separates evidence from coincidence. A
+ * focus-flagged node large enough to COVER the target satisfies an overlap test
+ * by construction, and every shape that produces one can hide a different
+ * element holding the keys:
+ *
+ *   - an open shadow root, where `document.activeElement` is the host and never
+ *     the inner element, so the host is flagged while an input inside it has
+ *     the caret. On a Chromium page whose shadow host spanned the screen, a
+ *     clear aimed at an overlaid `<input>` emptied the SHADOW field instead and
+ *     reported a pass (3/3);
+ *   - an ordinary focus trap — a `focusin` handler bouncing focus back to a
+ *     `<textarea>` — which leaves a focused text field whose box contains the
+ *     target. The same run cleared the trapped field and left the named one
+ *     untouched;
+ *   - a hybrid app's focused `android.webkit.WebView` wrapping the form.
+ *
+ * The cost is a `clear` refused when the selector names a LABEL inside the
+ * focused field. That direction is safe: the step fails, says so, and points at
+ * the selector. The overlap reading's cost was destroying a field the step
+ * never named while reporting a pass.
+ *
+ * Reports rather than decides: plain typing types on any outcome (misplaced
+ * text is visible and additive), while `runType` refuses to dispatch a
+ * destructive clear on anything but "confirmed" and "unobservable".
  */
 async function waitForFocus(
   env: ActionEnv,
@@ -506,8 +571,16 @@ async function waitForFocus(
   // blur, so the same flow against the same app failed or passed depending on
   // whether round 1 beat the blur. `undefined` until a read succeeds, so a
   // window in which every read throws stays "unobservable".
-  let lastReadSawFocus: boolean | undefined;
-  const giveUp = (): FocusOutcome => (lastReadSawFocus ? "unconfirmed" : "unobservable");
+  let lastRead: "focus-elsewhere" | "focus-encloses" | "no-focus" | undefined;
+  const giveUp = (): FocusOutcome => {
+    // `undefined` means no read ever succeeded — an outage, not an observation.
+    // Reporting it as "unobservable" would let a clear through on the strength
+    // of a window in which nothing was seen at all; `settleTree` sets the same
+    // convention for the same condition, and for the same reason.
+    if (lastRead === undefined) return "unreadable";
+    if (lastRead === "focus-encloses") return "encloses";
+    return lastRead === "focus-elsewhere" ? "unconfirmed" : "unobservable";
+  };
   for (;;) {
     if (env.signal?.aborted) return giveUp();
     try {
@@ -515,21 +588,21 @@ async function waitForFocus(
       if (!FOCUS_REPORTING_SOURCES.has(source)) return "unobservable";
       const target = flowSelectorToFrame(tree, into) ?? tappedFrame;
       const focused = collectFocused(tree, []);
-      lastReadSawFocus = focused.length > 0;
-      // Overlap, not containment either way: the focused input can sit inside a
-      // testID container the selector matched, or the selector can match a label
-      // inside the focused field. The cost is that a focus-flagged node large
-      // enough to cover the target confirms it by construction — a focused
-      // full-screen container (an Android host WebView, an iOS first-responder
-      // container, a Chromium `<div tabindex>` focus trap) reads as "confirmed"
-      // for every target on screen. On Chromium that is benign (one
-      // activeElement per document, so a focused container means no input holds
-      // focus and the clear no-ops); the destructive shape needs two focused
-      // nodes at once, which only the Android/iOS adapters can emit and which
-      // has not been observed on a real device.
-      if (focused.some((n) => framesOverlap(n.frame, target))) return "confirmed";
+      // Classified from the MOST RECENT successful read, never from "any read,
+      // ever": the question the caller is about to act on is what holds focus
+      // NOW, and a sticky flag answers it with history. It also made the
+      // verdict a race — an app that blurs on the focusing tap reports focus
+      // for however many rounds precede the blur.
+      if (focused.some((n) => frameWithin(n.frame, target))) return "confirmed";
+      lastRead =
+        focused.length === 0
+          ? "no-focus"
+          : focused.some((n) => framesOverlap(n.frame, target))
+            ? "focus-encloses"
+            : "focus-elsewhere";
     } catch {
-      // transient describe failure — retry until the deadline
+      // transient describe failure — retry until the deadline, leaving
+      // `lastRead` alone so a window of nothing but failures stays "unreadable"
     }
     if (Date.now() >= deadline) return giveUp();
     const sleepMs = Math.min(POLL_INTERVAL_MS, Math.max(0, deadline - Date.now()));
@@ -991,6 +1064,42 @@ async function runRotate(
 }
 
 /**
+ * Why a `clear` was refused, phrased per outcome so the advice matches the
+ * observation. Every arm keeps the substring "refusing to clear", which is what
+ * a caller (and the suite) greps for.
+ *
+ * Deliberately names no element text: a flow report is written to disk and
+ * echoed to the agent, and a focused node's label can BE the field's value.
+ */
+function clearRefusalReason(into: FlowSelector, focus: FocusOutcome): string {
+  const sel = describeSelector(into);
+  const head = `refusing to clear ${sel}`;
+  if (focus === "encloses") {
+    return (
+      `${head}: the only element reporting focus within ${TYPE_FOCUS_TIMEOUT_MS}ms CONTAINS ${sel} ` +
+      `rather than sitting inside it — a shadow host, a focused WebView or a focus trap looks ` +
+      `exactly like this while a different element holds the keys, so clearing here can empty ` +
+      `that element instead. Point the selector at the input itself, or clear it with the app's ` +
+      `own affordance`
+    );
+  }
+  if (focus === "unreadable") {
+    return (
+      `${head}: the UI tree could not be read at all during the ${TYPE_FOCUS_TIMEOUT_MS}ms focus ` +
+      `wait, so nothing is known about what holds focus. Retry the step; if it persists the ` +
+      `device's tree source is down`
+    );
+  }
+  return (
+    `focus never reached ${sel} within ${TYPE_FOCUS_TIMEOUT_MS}ms — ` +
+    "refusing to clear, since the keys would empty whatever else holds focus. Check that the " +
+    "selector resolves to the input itself rather than to its label or a wrapper around it — " +
+    "an id/testID selector is the reliable way to say so when the field's only stable name sits " +
+    "on a neighbouring element"
+  );
+}
+
+/**
  * Resolve `into` → tap to focus → wait for focus to land → clear and/or type
  * text in one keyboard call → optionally press Enter in a second.
  *
@@ -1009,11 +1118,15 @@ async function runType(
   if (!frame) {
     return { ok: false, reason: offscreenHint(step.into) };
   }
-  // Bare, like every other directive's `gesture-tap` (runTap, runLongPress,
-  // scrollIncrement, runPinch): only the keyboard dispatches below need the
-  // abort reclassification, and wrapping this one alone would single out the
-  // focus tap for a guard its five siblings don't have.
-  await invokeOnDevice(env, "gesture-tap", getDescribeTapPoint(frame));
+  // Wrapped like the two keyboard dispatches below, so all three of this step's
+  // device calls classify a cancelled run the same way. Leaving the focus tap
+  // bare made one step report `error` or `skip` depending on which dispatch
+  // happened to be in flight when the caller gave up. (The single dispatch in
+  // `runTap` / `runLongPress` / `scrollIncrement` / `runPinch` is still bare —
+  // one call each, so there is no within-step split to fix there.)
+  if (!(await dispatchOrAbort(env, "gesture-tap", getDescribeTapPoint(frame)))) {
+    return ABORTED_OUTCOME;
+  }
   // Keys are injected at the HID level and go to whatever holds focus, so the
   // tap→type gap must cover the app's focus round-trip (see the constants).
   if (!(await sleepOrAbort(TYPE_FOCUS_SETTLE_MS, env.signal))) {
@@ -1025,31 +1138,45 @@ async function runType(
   // own), so a cancelled run can never type into, or submit, whatever the app
   // has focused after the caller gave up.
   if (env.signal?.aborted) return ABORTED_OUTCOME;
-  // Typing on an unconfirmed focus is best-effort — keys land in whatever holds
+  // Typing without confirmed focus is best-effort — keys land in whatever holds
   // focus, and misplaced text is additive and visible. A clear is neither, so it
-  // does not get to run blind: when the tree reported focus but never on the
-  // target, the tap did not move focus, and clearing then either wipes the field
-  // the run was previously in (unrecoverable, and reported as a pass on a field
-  // it never touched) or lands nowhere at all while the report still claims a
-  // clear. Both were reproduced on a Pixel 3a against a real app. "unobservable"
-  // — no focus evidence anywhere in the tree — is NOT that; it falls through to
-  // the same best-effort path as typing, which is what keeps `clear` working on
-  // an iOS build whose injected framework omits `firstResponder`.
+  // only runs on evidence, or on the absence of any:
   //
-  // Known residual: an app that BLURS on an outside tap leaves nothing focused,
-  // which is indistinguishable from a tree that cannot report focus, so that
-  // clear still goes through as a no-op and the step still passes. Deliberate —
-  // the alternative refuses every clear on the iOS builds above (verified: it
-  // did), and a clear with nothing focused loses no data, where clearing the
-  // WRONG field does. Assert the result if a flow must prove the clear landed.
-  if (step.clear && focus === "unconfirmed") {
-    return {
-      ok: false,
-      reason:
-        `focus never reached ${describeSelector(step.into)} within ${TYPE_FOCUS_TIMEOUT_MS}ms — ` +
-        "refusing to clear, since the keys would empty whatever else holds focus. Check that the " +
-        "selector resolves to the input itself rather than to its label or a wrapper around it",
-    };
+  //   - "unconfirmed": the tree reported focus and never on the target, so the
+  //     tap did not move focus. Clearing then wipes the field the run was
+  //     previously in (unrecoverable, reported as a pass on a field it never
+  //     touched) or lands nowhere while the report still claims a clear. Both
+  //     reproduced on a Pixel 3a against a real app.
+  //   - "encloses": the only overlapping focus flag CONTAINS the target. Not
+  //     evidence — see waitForFocus for the three shapes that produce it and
+  //     the field each of them destroyed instead of the named one.
+  //   - "unreadable": every read in the window threw, so nothing was observed.
+  //     A tree-source outage is not the same as a tree that reported nothing,
+  //     and only the second is safe to clear on.
+  //
+  // "unobservable" — reads succeeded and flagged nothing anywhere — DOES fall
+  // through to the same best-effort path as typing, which is what keeps `clear`
+  // working on an iOS build whose injected framework omits `firstResponder`.
+  //
+  // Known residual, and the reason `argent-create-flow` says to assert the
+  // result: "unobservable" also covers three states where something IS focused
+  // and the tree cannot say so.
+  //
+  //   - an app that BLURS on an outside tap, leaving nothing focused;
+  //   - a focused field that scrolled off screen — both flow adapters suppress
+  //     the leaf for a frame clipping to zero area, so the flag goes with it;
+  //   - focus inside a Chromium sub-document. The describe walker's iframe
+  //     descent is dead: `el instanceof Element` rejects the inner
+  //     `documentElement`, because that constructor belongs to the OUTER realm.
+  //     Pre-existing and not fixed here — reviving the descent also needs every
+  //     inner frame translated into the host document's coordinates, or the
+  //     tree gains nodes whose boxes point at the wrong place.
+  //
+  // Deliberate — the alternative refuses every clear on the iOS builds above
+  // (verified: it did), and a clear with nothing focused loses no data, where
+  // clearing the WRONG field does.
+  if (step.clear && focus !== "confirmed" && focus !== "unobservable") {
+    return { ok: false, reason: clearRefusalReason(step.into, focus) };
   }
   // Clear and text ride ONE keyboard call. Each backend validates the WHOLE
   // request before touching the device precisely so a rejected call leaves no

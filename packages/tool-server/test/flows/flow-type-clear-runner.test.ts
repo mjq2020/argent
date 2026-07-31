@@ -20,8 +20,11 @@ interface Call {
  * shaped like a real device: the hint arrives as `content-desc` (the node's
  * LABEL) and the entered contents as `text` (its VALUE).
  *
- * The focus matters — `runType` refuses to dispatch a destructive clear unless
- * the focus wait confirms it landed on the target (see `unfocusedXml`).
+ * The focus matters, and so does WHERE it sits: `runType` dispatches a
+ * destructive clear only when a focus-flagged node is INSIDE the target's frame
+ * — here they are the same node — or when the tree flags focus nowhere at all
+ * (`noFocusXml`). Focus reported elsewhere (`unfocusedXml`) or on a node that
+ * merely covers the target (`enclosingFocusXml`) refuses.
  */
 const fieldXml = (text: string) =>
   `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
@@ -60,6 +63,42 @@ const noFocusXml = () =>
 <hierarchy rotation="0">
   <node index="0" class="android.widget.FrameLayout" package="com.acme.app" bounds="[0,0][1080,1920]">
     <node index="0" class="android.widget.EditText" resource-id="email" content-desc="Username or email address" text="old.remembered.login" package="com.acme.app" bounds="[40,200][1040,280]" />
+  </node>
+</hierarchy>`;
+
+/**
+ * The shape an overlap test cannot tell from a real confirmation: the only
+ * focus-flagged node CONTAINS the target rather than sitting inside it.
+ *
+ * Measured on a live Chromium page as a screen-spanning shadow host (whose
+ * `document.activeElement` is the host, never the inner element) with an input
+ * of its own holding the keys, and again as a `focusin` focus trap on an
+ * ordinary `<textarea>`. In both, a clear aimed at `email` emptied the ENCLOSING
+ * element and left `email` untouched while the step reported a pass.
+ */
+const enclosingFocusXml = () =>
+  `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout" package="com.acme.app" bounds="[0,0][1080,1920]">
+    <node index="0" class="android.webkit.WebView" resource-id="host" content-desc="Editor" text="do not erase me" focused="true" package="com.acme.app" bounds="[0,100][1080,1900]" />
+    <node index="1" class="android.widget.EditText" resource-id="email" content-desc="Username or email address" text="old.remembered.login" package="com.acme.app" bounds="[40,200][1040,280]" />
+  </node>
+</hierarchy>`;
+
+/**
+ * The legitimate non-identity case the containment test has to keep working:
+ * the selector names a testID wrapper and focus is reported by the input INSIDE
+ * it. A second focused node sits elsewhere on screen, so the verdict cannot
+ * come from "something, somewhere, is focused".
+ */
+const wrapperFocusXml = () =>
+  `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout" package="com.acme.app" bounds="[0,0][1080,1920]">
+    <node index="0" class="android.view.ViewGroup" resource-id="email-wrapper" package="com.acme.app" bounds="[40,180][1040,300]">
+      <node index="0" class="android.widget.EditText" resource-id="email" content-desc="Username or email address" text="old.remembered.login" focused="true" package="com.acme.app" bounds="[40,200][1040,280]" />
+    </node>
+    <node index="1" class="android.widget.EditText" resource-id="other" content-desc="Display name" text="do not erase me" focused="true" package="com.acme.app" bounds="[40,600][1040,680]" />
   </node>
 </hierarchy>`;
 
@@ -161,6 +200,83 @@ describe("type directive — clear dispatch", () => {
     expect(result.steps.map((s) => s.status)).toEqual(["fail"]);
     expect(result.steps[0]!.reason).toContain("refusing to clear");
     // Nothing may reach the device — not the clear, not the text, not Enter.
+    expect(keyboardArgs(calls)).toEqual([]);
+  });
+
+  it("refuses to clear when the only focus flag merely COVERS the target", async () => {
+    // An overlap test confirms this by construction, and every shape that
+    // produces it — an open shadow root, a focused WebView, a focus trap — can
+    // hide a different element holding the keys. Driven on a live Chromium
+    // page, the clear emptied the enclosing element and reported a pass.
+    const calls: Call[] = [];
+    const registry = mockRegistry(calls, () => ({ xml: enclosingFocusXml() }));
+
+    await writeFlow("f", {
+      executionPrerequisite: "",
+      steps: [
+        { kind: "type", into: { identifier: "email" }, text: "new@example.com", clear: true },
+      ],
+    });
+
+    const result = asRun(await run(registry));
+    expect(result.steps.map((s) => s.status)).toEqual(["fail"]);
+    expect(result.steps[0]!.reason).toContain("refusing to clear");
+    expect(result.steps[0]!.reason).toContain("CONTAINS");
+    expect(keyboardArgs(calls)).toEqual([]);
+  });
+
+  it("still clears when focus lands on the input inside the wrapper the selector named", async () => {
+    // Containment, not identity: the legitimate case the strict test must keep
+    // working. The decoy focused node elsewhere on screen is what stops this
+    // passing on "something, somewhere, reports focus".
+    const calls: Call[] = [];
+    const registry = mockRegistry(calls, () => ({ xml: wrapperFocusXml() }));
+
+    await writeFlow("f", {
+      executionPrerequisite: "",
+      steps: [
+        {
+          kind: "type",
+          into: { identifier: "email-wrapper" },
+          text: "new@example.com",
+          clear: true,
+        },
+      ],
+    });
+
+    const result = asRun(await run(registry));
+    expect(result.steps.map((s) => s.status)).toEqual(["pass"]);
+    expect(keyboardArgs(calls)).toEqual([
+      { clear: true, text: "new@example.com" },
+      { key: "enter" },
+    ]);
+  });
+
+  it("refuses to clear when every read in the focus window failed", async () => {
+    // A tree-source outage is not the same as a tree that reported nothing:
+    // nothing was observed, so nothing is known about what holds focus.
+    // `settleTree` draws the same line for the same condition.
+    const calls: Call[] = [];
+    let reads = 0;
+    const registry = mockRegistry(calls, () => {
+      reads++;
+      // The pre-tap settle succeeds (so `waitForFrame` resolves), then every
+      // read inside the focus window throws.
+      if (reads > 2) throw new Error("device disconnected");
+      return { xml: fieldXml("old.remembered.login") };
+    });
+
+    await writeFlow("f", {
+      executionPrerequisite: "",
+      steps: [
+        { kind: "type", into: { identifier: "email" }, text: "new@example.com", clear: true },
+      ],
+    });
+
+    const result = asRun(await run(registry));
+    expect(result.steps.map((s) => s.status)).toEqual(["fail"]);
+    expect(result.steps[0]!.reason).toContain("refusing to clear");
+    expect(result.steps[0]!.reason).toContain("could not be read");
     expect(keyboardArgs(calls)).toEqual([]);
   });
 
