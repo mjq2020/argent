@@ -218,16 +218,21 @@ describe("keyboard backends — input rejection is a 400 with a uniform telemetr
     const registry = new Registry();
     vi.spyOn(registry, "resolveService").mockResolvedValue({
       dispatchKeyEvent: vi.fn(async () => {}),
-      // The clear runs two probes: resolve-and-park, then re-read the parked
-      // element. Answer them separately so the field can be reported as still
-      // populated afterwards.
-      evaluate: vi.fn(async (expression: string) =>
-        JSON.stringify(
-          expression.includes("delete window[")
-            ? { tracked: true, length: 7 }
-            : { verdict: "editable", label: "INPUT#q", length: 7, mac: true }
-        )
-      ),
+      // The clear runs three probes: resolve-and-park, a read-back that KEEPS
+      // the element parked, then the release. Routed by call order, not by
+      // matching text in the expression — the read-back and the release differ
+      // only in whether they delete the slot.
+      evaluate: (() => {
+        let calls = 0;
+        return vi.fn(async () => {
+          calls++;
+          return JSON.stringify(
+            calls === 1
+              ? { verdict: "editable", label: "INPUT#q", length: 7, mac: true }
+              : { tracked: true, length: 7 }
+          );
+        });
+      })(),
     } as never);
 
     const err = await makeChromiumImpl(registry)

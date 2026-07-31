@@ -80,17 +80,33 @@ async function runSimulatorServerType(
   // the whole down/up pair so the guest sees a real chord, not two taps.
   //
   // The release is in a `finally` because modifier state lives in the GUEST and
-  // nothing in the repo ever emits a "release everything": a modifier left down
-  // stays down, turning every subsequent keystroke into a chord — a stuck Shift
-  // only mis-cases text, a stuck Command runs system shortcuts (Cmd+H
-  // backgrounds the app). Neither transport currently throws from `pressKey`
-  // (the local one writes to a pipe, the remote one is fire-and-forget), so this
-  // is a guard against a future one that does, not a fix for a reachable bug.
+  // a modifier left down stays down, turning every subsequent keystroke into a
+  // chord — a stuck Shift only mis-cases text, a stuck Command runs system
+  // shortcuts (Cmd+H backgrounds the app). The `finally` covers a throw; it does
+  // NOT cover the tool-server process dying between the two writes, which is
+  // what `releaseHeldModifiers` below exists for.
   //
   // The hold spans awaits, so a keystroke from a CONCURRENT call would land
   // inside the chord (measured: `{ text: "w" }` 15ms behind a `{ clear: true }`
   // reached the guest as Cmd+W and was never typed). That is why the whole run
   // is serialized per device — see `serializePerDevice`.
+  // Release every modifier this backend is capable of holding, before pressing
+  // anything. HID `Up` on a key that is not down is a no-op, so this costs two
+  // fire-and-forget writes and heals a modifier the guest is still holding from
+  // an earlier run that never got to release it.
+  //
+  // Reachable, and measured: kill the tool-server inside the ~83ms window the
+  // clear holds Left GUI (Ctrl-C, `argent kill`, a crash, the simulator-server
+  // dying mid-flow) and Command stays latched in the guest. The next
+  // `{ text: "h" }` then returns `{"typed":"h","keys":1}` while the device goes
+  // to the Home screen — Cmd+H backgrounded the app and the page never saw the
+  // character. It survives a tool-server restart and a simulator-server respawn,
+  // nothing reads modifier state back, and no tool released it.
+  const releaseHeldModifiers = () => {
+    api.pressKey("Up", SHIFT_KEYCODE);
+    api.pressKey("Up", LEFT_GUI_KEYCODE);
+  };
+
   const pressKeyCode = async (keyCode: number, modifierKeyCode?: number) => {
     if (modifierKeyCode !== undefined) {
       api.pressKey("Down", modifierKeyCode);
@@ -171,6 +187,10 @@ async function runSimulatorServerType(
         error_kind: "unsupported",
       });
   }
+
+  // Everything above only validates; this is the first device write, so a
+  // rejected request still touches nothing.
+  releaseHeldModifiers();
 
   // Clear before text: Cmd+A selects the field's whole contents, backspace
   // deletes the selection. Verified on a UIKit `UITextField` (Safari address

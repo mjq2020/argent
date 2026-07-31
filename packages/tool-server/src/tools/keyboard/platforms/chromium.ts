@@ -2,7 +2,7 @@ import { FAILURE_CODES, FailureError, type Registry } from "@argent/registry";
 import { chromiumCdpRef, type ChromiumCdpApi } from "../../../blueprints/chromium-cdp";
 import type { PlatformImpl } from "../../../utils/cross-platform-tool";
 import { InvalidToolInputError } from "../../../utils/capability";
-import { clearChromiumField } from "../chromium-clear";
+import { clearChromiumField, newTargetHandle, releaseParkedTarget } from "../chromium-clear";
 import { CHROMIUM_NAMED_KEYS, charToChromiumKey } from "../chromium-keys";
 import type { KeyboardParams, KeyboardResult } from "../types";
 
@@ -65,75 +65,124 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
   // reaching the typing loop means the field was either seen empty or could not
   // be read at all (a cross-origin iframe, a detached node). It never means the
   // field was seen to still hold its value.
-  if (params.clear) {
-    const outcome = await clearChromiumField(api);
-    await sleep(delay);
-    // Emptying a field routinely moves focus off it — a field that blurs once
-    // empty, an app that advances to the next input, a re-render. The keys
-    // below are dispatched at the PAGE, not at an element, so they would then
-    // land wherever focus went: nowhere at all (the value the caller asked for
-    // is simply gone), or appended to a different field. Both were observed on
-    // Chrome 150, and both returned the same `{typed, keys, cleared}` a real
-    // replacement returns, so the caller could not tell them apart.
-    //
-    // The clear itself already happened and is not undoable, so this reports
-    // the split outcome rather than pretending either half. `keptFocus` is
-    // undefined when the page could not be read — that stays best-effort, like
-    // the emptiness check.
-    if ((descs.length > 0 || named) && outcome.keptFocus === false) {
-      throw new FailureError(
-        `keyboard: ${outcome.label ?? "the field"} was emptied, but it no longer holds focus ` +
-          `afterwards — the page moved focus in response to the clear (a field that blurs when ` +
-          `empty, or an app that advances to the next input). Nothing was typed, because the ` +
-          `keys would have gone to whatever holds focus now rather than to that field. Tap the ` +
-          `field again and type without \`clear\` — it is already empty.`,
-        {
-          error_code: FAILURE_CODES.KEYBOARD_CLEAR_INEFFECTIVE,
-          failure_stage: "keyboard_clear_focus_lost_chromium",
-          failure_area: "tool_server",
-          error_kind: "unsupported",
-        }
-      );
+  //
+  // The handle is owned here, not inside the clear, because the parked element
+  // has to outlive the typing: focus is asked about twice, once immediately
+  // before the first character and once after the last, and the `finally`
+  // guarantees the element is let go either way.
+  const handle = params.clear ? newTargetHandle() : undefined;
+  const typing = descs.length > 0 || named !== undefined;
+  let released = false;
+  let clearedLabel: string | undefined;
+  const releaseTarget = async () => {
+    released = true;
+    return releaseParkedTarget(api, handle!);
+  };
+
+  try {
+    if (handle) {
+      // `delay` is spent INSIDE the clear, between the key dispatch and the
+      // read-back, so the focus answer is the last thing before the loop below.
+      const outcome = await clearChromiumField(api, handle, delay);
+      clearedLabel = outcome.label;
+      // Emptying a field routinely moves focus off it — a field that blurs once
+      // empty, an app that advances to the next input, a re-render. The keys
+      // below are dispatched at the PAGE, not at an element, so they would then
+      // land wherever focus went: nowhere at all (the value the caller asked
+      // for is simply gone), or appended to a different field. Both were
+      // observed on Chrome 150, and both returned the same
+      // `{typed, keys, cleared}` a real replacement returns, so the caller
+      // could not tell them apart.
+      //
+      // The clear itself already happened and is not undoable, so this reports
+      // the split outcome rather than pretending either half. `keptFocus` is
+      // undefined when the page could not be read — that stays best-effort,
+      // like the emptiness check.
+      if (typing && outcome.keptFocus === false) {
+        throw new FailureError(
+          `keyboard: ${outcome.label ?? "the field"} was emptied, but it no longer holds focus ` +
+            `afterwards — the page moved focus in response to the clear (a field that blurs when ` +
+            `empty, or an app that advances to the next input). Nothing was typed, because the ` +
+            `keys would have gone to whatever holds focus now rather than to that field. Tap the ` +
+            `field again and type without \`clear\` — it is already empty.`,
+          {
+            error_code: FAILURE_CODES.KEYBOARD_CLEAR_INEFFECTIVE,
+            failure_stage: "keyboard_clear_focus_lost_chromium",
+            failure_area: "tool_server",
+            error_kind: "unsupported",
+          }
+        );
+      }
     }
-  }
 
-  for (const { desc } of descs) {
-    await api.dispatchKeyEvent({
-      type: "keyDown",
-      key: desc!.key,
-      code: desc!.code,
-      windowsVirtualKeyCode: desc!.windowsVirtualKeyCode,
-    });
-    // `char` delivers the actual codepoint to the focused input; without
-    // this the field receives no value.
-    await api.dispatchKeyEvent({ type: "char", text: desc!.text });
-    await api.dispatchKeyEvent({
-      type: "keyUp",
-      key: desc!.key,
-      code: desc!.code,
-      windowsVirtualKeyCode: desc!.windowsVirtualKeyCode,
-    });
-    keysPressed++;
-    await sleep(delay);
-  }
+    for (const { desc } of descs) {
+      await api.dispatchKeyEvent({
+        type: "keyDown",
+        key: desc!.key,
+        code: desc!.code,
+        windowsVirtualKeyCode: desc!.windowsVirtualKeyCode,
+      });
+      // `char` delivers the actual codepoint to the focused input; without
+      // this the field receives no value.
+      await api.dispatchKeyEvent({ type: "char", text: desc!.text });
+      await api.dispatchKeyEvent({
+        type: "keyUp",
+        key: desc!.key,
+        code: desc!.code,
+        windowsVirtualKeyCode: desc!.windowsVirtualKeyCode,
+      });
+      keysPressed++;
+      await sleep(delay);
+    }
 
-  // Key after text: a combined call means "type, then submit" (text +
-  // key:"enter"). Pressing the key first submits the still-empty field.
-  if (named) {
-    await api.dispatchKeyEvent({
-      type: "keyDown",
-      key: named.key,
-      code: named.code,
-      windowsVirtualKeyCode: named.windowsVirtualKeyCode,
-    });
-    await sleep(delay);
-    await api.dispatchKeyEvent({
-      type: "keyUp",
-      key: named.key,
-      code: named.code,
-      windowsVirtualKeyCode: named.windowsVirtualKeyCode,
-    });
-    keysPressed++;
+    // Key after text: a combined call means "type, then submit" (text +
+    // key:"enter"). Pressing the key first submits the still-empty field.
+    if (named) {
+      await api.dispatchKeyEvent({
+        type: "keyDown",
+        key: named.key,
+        code: named.code,
+        windowsVirtualKeyCode: named.windowsVirtualKeyCode,
+      });
+      await sleep(delay);
+      await api.dispatchKeyEvent({
+        type: "keyUp",
+        key: named.key,
+        code: named.code,
+        windowsVirtualKeyCode: named.windowsVirtualKeyCode,
+      });
+      keysPressed++;
+    }
+
+    // One sample before the loop cannot cover a blur that lands DURING it: the
+    // characters go out `delay` apart, so a page that moves focus part-way
+    // through splits the value across two fields. Measured on Chrome 150, where
+    // a field blurring 300ms after emptying left `us` in the target and
+    // `er@example.comOTHER-FIELD` in its neighbour, reported as a clean
+    // replacement. Asking the same parked element again is what turns that into
+    // a failure the caller can see; it also releases the element.
+    if (handle && typing) {
+      const after = await releaseTarget();
+      if (after?.tracked && after.focused === false) {
+        throw new FailureError(
+          `keyboard: the page moved focus away from ${clearedLabel ?? "the field"} while the text was being ` +
+            `typed, so the value is split across fields — part of it landed somewhere other than ` +
+            `the field that was cleared. Re-read the screen before continuing; do not treat this ` +
+            `call as a replacement.`,
+          {
+            error_code: FAILURE_CODES.KEYBOARD_CLEAR_INEFFECTIVE,
+            failure_stage: "keyboard_clear_focus_lost_typing_chromium",
+            failure_area: "tool_server",
+            error_kind: "unsupported",
+          }
+        );
+      }
+    }
+  } finally {
+    // Never leave the slot behind: it is the sole retainer of the parked node,
+    // and a per-call name means a leaked one is never overwritten by the next
+    // clear.
+    if (handle && !released) await releaseTarget().catch(() => undefined);
   }
 
   return {

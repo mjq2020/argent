@@ -87,6 +87,17 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     };
   }
 
+  /**
+   * The HID traffic of one run with its leading modifier-release prelude
+   * dropped — every run opens by letting go of Shift and Left GUI so a modifier
+   * stranded by an earlier run's death cannot chord the next keystroke (see
+   * "releases any stranded modifier before pressing anything").
+   */
+  const pressed = (events: string[]) => {
+    expect(events.slice(0, 2)).toEqual(["Up:225", "Up:227"]);
+    return events.slice(2);
+  };
+
   it("holds Cmd across A, then presses backspace, before typing any text", async () => {
     const { events, api } = recordingApi();
 
@@ -104,12 +115,13 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     // make any value it declared correct by construction — a wrong one (Cmd+B,
     // RightCtrl+A) selects nothing, the backspace then removes a single
     // character, and the tool still reports `cleared: true`.
-    expect(events.slice(0, 4)).toEqual(["Down:227", "Down:4", "Up:4", "Up:227"]);
+    const hid = pressed(events);
+    expect(hid.slice(0, 4)).toEqual(["Down:227", "Down:4", "Up:4", "Up:227"]);
     // Then the delete that removes the now-selected contents (usage 42).
-    expect(events.slice(4, 6)).toEqual(["Down:42", "Up:42"]);
+    expect(hid.slice(4, 6)).toEqual(["Down:42", "Up:42"]);
     // …and only then the text. Clear-after-text would empty the field the tool
     // just populated, so the ordering is the whole contract.
-    expect(events.slice(6)).toEqual(["Down:4", "Up:4"]);
+    expect(hid.slice(6)).toEqual(["Down:4", "Up:4"]);
     expect(result.cleared).toBe(true);
   });
 
@@ -141,6 +153,38 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     expect(events.slice(guiUp)).toContain("Down:26");
   });
 
+  it("keeps a THIRD call behind the one in flight, not alongside it", async () => {
+    // The chain slot is dropped only when nothing is queued behind the call that
+    // drained it. Deleting it unconditionally is invisible while every call is
+    // issued up front — they have all chained by then. It shows up when a call
+    // arrives AFTER an earlier one drained but while a later one is still
+    // running: it then finds no chain and starts alongside that run, putting a
+    // keystroke back inside the held Left GUI chord.
+    const { events, api } = recordingApi();
+    const registry = registryWith(api);
+
+    // A is instant, B holds the chord, C arrives once A has drained.
+    const a = typeSimulatorServer(registry, IOS_SIM, { udid: IOS_SIM.id, text: "a", delayMs: 0 });
+    const b = typeSimulatorServer(registry, IOS_SIM, {
+      udid: IOS_SIM.id,
+      clear: true,
+      delayMs: 40,
+    });
+    await a;
+    // A macrotask, so A's chain-slot bookkeeping (a `.then` two microtasks
+    // behind its result) has actually run before C asks for the chain.
+    await new Promise((r) => setTimeout(r, 0));
+    const c = typeSimulatorServer(registry, IOS_SIM, { udid: IOS_SIM.id, text: "w", delayMs: 0 });
+    await Promise.all([b, c]);
+
+    // Usage 42 is the backspace that ends B's clear, and 26 is C's `w`. C may
+    // only press after B is done; an overtaking C lands its `w` first. (The
+    // Left GUI down/up pair is not the marker to use here — C's own opening
+    // modifier release emits an `Up:227` that would sit inside B's chord.)
+    expect(events.indexOf("Down:26")).toBeGreaterThan(events.indexOf("Up:42"));
+    expect(events).toContain("Down:26");
+  });
+
   it("does not let a rejected call block the ones queued behind it", async () => {
     // The chain stores a tail that never rejects, so a 400 (or a transport
     // failure) on one call cannot wedge the device's queue — while the caller
@@ -161,8 +205,30 @@ describe("keyboard clear — iOS (simulator-server)", () => {
 
     await expect(rejected).rejects.toThrow(/Unknown key/);
     expect(await queued).toMatchObject({ typed: "b", keys: 1 });
-    // Only the second call's keystroke reached the device.
-    expect(events).toEqual(["Down:5", "Up:5"]);
+    // Only the second call's keystroke reached the device (the rejected call
+    // never got past validation, so it wrote nothing at all).
+    expect(pressed(events)).toEqual(["Down:5", "Up:5"]);
+  });
+
+  it("releases any stranded modifier before pressing anything", async () => {
+    // Modifier state lives in the guest and the `finally` that releases it only
+    // covers a throw — not the process dying inside the ~83ms window the clear
+    // holds Left GUI. Measured on an iPhone 16: kill the tool-server there and
+    // Command stays latched, so the next `{ text: "h" }` returns
+    // `{"typed":"h","keys":1}` while Cmd+H sends the app to the Home screen and
+    // the page never sees the character. It survives a restart, and nothing
+    // reads modifier state back — so every run starts by letting go of both
+    // modifiers it is capable of holding. `Up` on a key that is not down is a
+    // no-op, so this is free on the normal path.
+    const { events, api } = recordingApi();
+
+    await typeSimulatorServer(registryWith(api), IOS_SIM, {
+      udid: IOS_SIM.id,
+      text: "a",
+      delayMs: 0,
+    });
+
+    expect(events.slice(0, 2)).toEqual(["Up:225", "Up:227"]);
   });
 
   it("clears with no text and reports cleared", async () => {
@@ -174,7 +240,7 @@ describe("keyboard clear — iOS (simulator-server)", () => {
       delayMs: 0,
     });
 
-    expect(events).toEqual(["Down:227", "Down:4", "Up:4", "Up:227", "Down:42", "Up:42"]);
+    expect(pressed(events)).toEqual(["Down:227", "Down:4", "Up:4", "Up:227", "Down:42", "Up:42"]);
     // `keys` counts what the caller asked to ENTER, so a clear contributes 0 —
     // the same number Android and Chromium report for the same call. Counting
     // the clear's own presses here would make one request report a different
@@ -276,7 +342,7 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     });
 
     // 225 is SHIFT_KEYCODE — held across A's down/up, and NOT the Cmd keycode.
-    expect(events).toEqual(["Down:225", "Down:4", "Up:4", "Up:225"]);
+    expect(pressed(events)).toEqual(["Down:225", "Down:4", "Up:4", "Up:225"]);
   });
 });
 
@@ -417,6 +483,63 @@ describe("keyboard clear — Android (adb input)", () => {
       // (20s − 7s) rather than a fresh full-size cap — being killed part-way
       // through is what leaves a half-deleted field.
       expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(13_000);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("keeps the modern path's DEL on the shared deadline too", async () => {
+    // The common path (a level that HAS `keycombination`) is probe + DEL, and
+    // the DEL is a device write like any other. A fresh full-size cap here
+    // stacks 15s on top of the probe's 9s and the text injection's 15s, which
+    // is the 30s-per-request overrun the shared budget exists to prevent.
+    let clock = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      adbShell.mockImplementationOnce(async () => {
+        clock += 2_000; // a slow probe on a level that supports the subcommand
+        return "";
+      });
+
+      await makeAndroidImpl(registryWith({})).handler(
+        {},
+        { udid: ANDROID.id, clear: true },
+        ANDROID
+      );
+
+      const timeoutOf = (call: [string, string, unknown?]) =>
+        (call[2] as { timeoutMs: number }).timeoutMs;
+      expect(adbShell.mock.calls[1]![1]).toBe(DEL_CMD);
+      // 20s budget − 2s spent, with no reserve withheld: this IS the mutating
+      // leg. A fresh ADB_INPUT_TIMEOUT_MS would read 15_000.
+      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(18_000);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("floors an overrun leg at 1s rather than handing adb no timeout at all", async () => {
+    // `runAdb` forwards this straight to `execFile`'s `timeout`, and
+    // `??`-defaulting preserves a `0` — which Node reads as NO timeout. An
+    // already-overrun budget would therefore hand the last leg an unbounded adb
+    // child instead of failing it fast.
+    let clock = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      adbShell.mockImplementationOnce(async () => {
+        clock += 60_000; // the probe alone blows the whole budget
+        return "";
+      });
+
+      await makeAndroidImpl(registryWith({})).handler(
+        {},
+        { udid: ANDROID.id, clear: true },
+        ANDROID
+      );
+
+      const timeoutOf = (call: [string, string, unknown?]) =>
+        (call[2] as { timeoutMs: number }).timeoutMs;
+      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(1_000);
     } finally {
       nowSpy.mockRestore();
     }
@@ -652,6 +775,27 @@ describe("keyboard clear — Android (adb input)", () => {
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
     expect(deleteRun(inputCmds()[1]!)).toHaveLength(42 + 8);
+  });
+
+  it("takes the LONGEST focused editable even when a shorter one comes first", async () => {
+    // `Math.max`, not last-write-wins. The walk is a DFS over `stack.pop()`, so
+    // siblings are visited in reverse document order — every other fixture here
+    // happens to put the longest field first, which makes plain assignment look
+    // correct. With the short one first, assignment measures 2 and leaves an
+    // 80-character residue reported as `cleared: true`, which is exactly the
+    // truncation this measurement exists to prevent. The realistic shape is an
+    // IME or overlay window contributing its own focused node.
+    seedLegacyLevel();
+    seedDump(
+      `<?xml version='1.0' encoding='UTF-8'?><hierarchy rotation="0">` +
+        `<node index="0" text="ab" class="android.widget.EditText" focused="true" bounds="[0,0][100,50]" />` +
+        `<node index="1" text="${"x".repeat(90)}" class="android.widget.EditText" focused="true" bounds="[0,60][100,110]" />` +
+        `</hierarchy>`
+    );
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(90 + 8);
   });
 
   it("does not let a short focused sibling downgrade an unmeasurable field", async () => {
@@ -895,16 +1039,24 @@ describe("keyboard clear — Chromium (CDP)", () => {
     };
   }
 
-  it("issues two DISTINCT probes — resolve, then release", () => {
-    // Guards the routing the rest of this block depends on. If both probes were
-    // the same expression, every "after" case here would silently be testing the
-    // "before" one.
+  it("issues a resolve probe, then a read-back that KEEPS the element, then a release", () => {
+    // Guards the routing the rest of this block depends on. If the resolve and
+    // read-back probes were the same expression, every "after" case here would
+    // silently be testing the "before" one.
+    //
+    // Three, not two: the read-back leaves the element parked so focus can be
+    // asked about again once the typing is done — a blur can land mid-loop,
+    // which no single sample before the loop can see — and the last probe is
+    // what lets the element go.
     const { probes, api } = recordingApi();
     return makeChromiumImpl(registryWith(api))
       .handler({}, { udid: CHROMIUM.id, clear: true, delayMs: 0 }, CHROMIUM)
       .then(() => {
-        expect(probes).toHaveLength(2);
+        expect(probes).toHaveLength(3);
         expect(probes[0]).not.toBe(probes[1]);
+        // The read-back keeps the slot; only the release deletes it.
+        expect(probes[1]).not.toContain("delete window[");
+        expect(probes[2]).toContain("delete window[");
       });
   });
 
@@ -962,6 +1114,78 @@ describe("keyboard clear — Chromium (CDP)", () => {
 
     // The clear's own rawKeyDown + keyUp, and not one character beyond them.
     expect(events).toHaveLength(2);
+  });
+
+  it("fails when the page moved focus away part-way through the typing", async () => {
+    // One sample before the loop cannot cover a blur that lands DURING it: the
+    // characters go out `delay` apart, so a page that moves focus part-way
+    // through splits the value across two fields. On Chrome 150 a field that
+    // blurred 300ms after emptying kept `us` and its neighbour got the rest,
+    // reported as a clean replacement.
+    const events: KeyEventArgs[] = [];
+    const probes: string[] = [];
+    const api = {
+      dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
+      evaluate: async (expression: string) => {
+        probes.push(expression);
+        // 1: resolve. 2: read-back — empty, focus still held. 3: the release
+        // after typing — focus has since moved.
+        if (probes.length === 1) {
+          return JSON.stringify({
+            verdict: "editable",
+            label: "INPUT#email",
+            length: 8,
+            mac: true,
+            parked: true,
+          });
+        }
+        return JSON.stringify({ tracked: true, length: 0, focused: probes.length === 2 });
+      },
+    };
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: "abc", delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/split across fields/);
+    // The clear went out, and so did every character — the failure reports what
+    // already happened rather than pretending the call did nothing.
+    expect(events.filter((e) => e.type === "char")).toHaveLength(3);
+  });
+
+  it("refuses to press a named key when the clear moved focus off the field", async () => {
+    // The `key` half of the same guard: Enter dispatched at whatever holds focus
+    // after the clear submits the wrong form, and reports success doing it.
+    const { events, api } = recordingApi(undefined, { tracked: true, length: 0, focused: false });
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, key: "enter", delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/no longer holds focus/);
+
+    expect(events).toHaveLength(2); // the clear's own pair, and nothing after it
+  });
+
+  it("reports no character count for a password field that survived the clear", async () => {
+    // A password's LENGTH is credential material and the failure message reaches
+    // the agent's transcript. Both probes compute `secret` for this one line.
+    const { api } = recordingApi(
+      { verdict: "editable", label: "INPUT#pw", mac: true, parked: true, secret: true },
+      { tracked: true, length: 9, focused: true, secret: true }
+    );
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/still holds its contents/);
   });
 
   it("still clears when nothing follows, even if the field blurred itself", async () => {
@@ -1170,7 +1394,10 @@ describe("keyboard clear — Chromium (CDP)", () => {
         CHROMIUM
       )
     ).rejects.toThrow(/CDP socket closed/);
-    expect(probes).toHaveLength(2);
+    // Resolve, the read-back that keeps the element, and the release that runs
+    // in the caller's `finally` however the call ends.
+    expect(probes).toHaveLength(3);
+    expect(probes[2]).toContain("delete window[");
   });
 
   it("does not fail when the field blurred or went away as a result of clearing", async () => {
@@ -1407,7 +1634,8 @@ describe("keyboard clear — unsupported platforms", () => {
       IOS_SIM
     );
 
-    expect(events.slice(0, 4)).toEqual(["Down:227", "Down:4", "Up:4", "Up:227"]);
+    // Past the leading modifier-release prelude every run opens with.
+    expect(events.slice(2, 6)).toEqual(["Down:227", "Down:4", "Up:4", "Up:227"]);
     expect(result.cleared).toBe(true);
   });
 
@@ -1427,7 +1655,7 @@ describe("keyboard clear — unsupported platforms", () => {
       IOS_REMOTE
     );
 
-    expect(events.slice(0, 4)).toEqual(["Down:227", "Down:4", "Up:4", "Up:227"]);
+    expect(events.slice(2, 6)).toEqual(["Down:227", "Down:4", "Up:4", "Up:227"]);
     expect(isTvOsSimulator).not.toHaveBeenCalled();
     expect(result.cleared).toBe(true);
   });
