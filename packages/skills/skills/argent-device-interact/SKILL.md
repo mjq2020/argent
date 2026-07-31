@@ -186,7 +186,7 @@ Special keys: `enter`, `escape`, `backspace`, `tab`, `space`, `arrow-up`, `arrow
 - On Chromium a **readonly** field is refused, like a non-text one.
 - The clear does not count towards `keys` — that reports only the characters and named key you asked to be entered, so `{ "clear": true }` alone returns `"keys": 0`.
 - On older Android levels (those whose `input` has no `keycombination` subcommand) the clear falls back to deleting backwards from the end of the line, sized to the field's measured contents. Single-line fields are emptied exactly, but **a multi-line field keeps whatever sits below the caret** — assert the result if you are clearing a multi-line input on an old device. A field longer than 150 characters is refused there rather than partly deleted.
-- Where that length cannot be read — a **password** field (uiautomator reports the mask, not the value), a dump the device refused, or no focused text field in the dump at all — the fallback sends a fixed 120 backspaces instead. That run is neither exact nor refusable, so a value longer than it keeps its head while the call still reports success.
+- Where that length cannot be read — a **password** field (uiautomator reports the mask, not the value), a dump the device refused, or no focused text field in the dump at all — the fallback sends a fixed 128 backspaces instead (the blind count of 120 plus the 8-key margin). That run is neither exact nor refusable, so a value longer than 128 characters keeps its head while the call still reports success.
 
 **Typing secrets.** To enter a credential without its plaintext ever entering your context, transcript, or logs, use a secret placeholder in `text` (works in `keyboard`, `paste`, `run-sequence` keyboard steps, and flow `type` steps):
 

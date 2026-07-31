@@ -141,6 +141,30 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     expect(events.slice(guiUp)).toContain("Down:26");
   });
 
+  it("does not let a rejected call block the ones queued behind it", async () => {
+    // The chain stores a tail that never rejects, so a 400 (or a transport
+    // failure) on one call cannot wedge the device's queue — while the caller
+    // of the failing call still gets its own rejection.
+    const { events, api } = recordingApi();
+    const registry = registryWith(api);
+
+    const rejected = typeSimulatorServer(registry, IOS_SIM, {
+      udid: IOS_SIM.id,
+      key: "no-such-key",
+      delayMs: 0,
+    });
+    const queued = typeSimulatorServer(registry, IOS_SIM, {
+      udid: IOS_SIM.id,
+      text: "b",
+      delayMs: 0,
+    });
+
+    await expect(rejected).rejects.toThrow(/Unknown key/);
+    expect(await queued).toMatchObject({ typed: "b", keys: 1 });
+    // Only the second call's keystroke reached the device.
+    expect(events).toEqual(["Down:5", "Up:5"]);
+  });
+
   it("clears with no text and reports cleared", async () => {
     const { events, api } = recordingApi();
 
