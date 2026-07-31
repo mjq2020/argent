@@ -1,4 +1,4 @@
-import { FAILURE_CODES, type Registry } from "@argent/registry";
+import { FAILURE_CODES, FailureError, type Registry } from "@argent/registry";
 import { chromiumCdpRef, type ChromiumCdpApi } from "../../../blueprints/chromium-cdp";
 import type { PlatformImpl } from "../../../utils/cross-platform-tool";
 import { InvalidToolInputError } from "../../../utils/capability";
@@ -38,13 +38,13 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     }
   }
 
-  // Resolve EVERY character before touching the page. Typing used to resolve
-  // per character inside the loop, which was harmless when the worst outcome
-  // was a partially-typed field. With `clear` it is not: clearing and then
-  // rejecting on character 4 destroys the field's original value and leaves a
-  // fragment behind, so the caller ends up worse off than before a call that
-  // returned 400. Same up-front-validation rule the android backend applies
-  // with `assertTypeableAndroidText`.
+  // Resolve EVERY character before touching the page: no device write happens
+  // until the whole request is known to be executable. Resolving per character
+  // inside the loop below would let a `{ clear, text }` whose character 4 has no
+  // CDP descriptor destroy the field's original value and leave a fragment
+  // behind, so a call that returned 400 would leave the caller worse off than
+  // before it. Same up-front-validation rule the android backend applies with
+  // `assertTypeableAndroidText`.
   const descs = params.text
     ? [...params.text].map((char) => ({ char, desc: charToChromiumKey(char) }))
     : [];
@@ -66,8 +66,35 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
   // be read at all (a cross-origin iframe, a detached node). It never means the
   // field was seen to still hold its value.
   if (params.clear) {
-    await clearChromiumField(api);
+    const outcome = await clearChromiumField(api);
     await sleep(delay);
+    // Emptying a field routinely moves focus off it — a field that blurs once
+    // empty, an app that advances to the next input, a re-render. The keys
+    // below are dispatched at the PAGE, not at an element, so they would then
+    // land wherever focus went: nowhere at all (the value the caller asked for
+    // is simply gone), or appended to a different field. Both were observed on
+    // Chrome 150, and both returned the same `{typed, keys, cleared}` a real
+    // replacement returns, so the caller could not tell them apart.
+    //
+    // The clear itself already happened and is not undoable, so this reports
+    // the split outcome rather than pretending either half. `keptFocus` is
+    // undefined when the page could not be read — that stays best-effort, like
+    // the emptiness check.
+    if ((descs.length > 0 || named) && outcome.keptFocus === false) {
+      throw new FailureError(
+        `keyboard: ${outcome.label ?? "the field"} was emptied, but it no longer holds focus ` +
+          `afterwards — the page moved focus in response to the clear (a field that blurs when ` +
+          `empty, or an app that advances to the next input). Nothing was typed, because the ` +
+          `keys would have gone to whatever holds focus now rather than to that field. Tap the ` +
+          `field again and type without \`clear\` — it is already empty.`,
+        {
+          error_code: FAILURE_CODES.KEYBOARD_CLEAR_INEFFECTIVE,
+          failure_stage: "keyboard_clear_focus_lost_chromium",
+          failure_area: "tool_server",
+          error_kind: "unsupported",
+        }
+      );
+    }
   }
 
   for (const { desc } of descs) {
