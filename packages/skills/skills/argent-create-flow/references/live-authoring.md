@@ -161,7 +161,7 @@ Only these unrecorded insertions are allowed, at states observed live:
 - `await: { idle: true }` after a navigation identity check.
 - The Chromium launch that packages the live boot.
 
-Keep raw forms only when conversion changes behavior. Examples include point-anchored or panning pinch, velocity-sensitive swipe, or rotation with a tested start angle, radius, pivot, duration, or speed. Keep screenshots for human evidence. Use `snapshot:` for automated visual comparison. Read [Flow YAML](flow-yaml.md) for syntax.
+Keep raw forms only when conversion changes behavior. Examples include point-anchored or panning pinch, velocity-sensitive swipe, or rotation with a tested start angle, radius, pivot, duration, or speed. A `tool: keyboard` step carrying `clear: true` is one of them: `type:` has no `clear`, so rewriting it silently drops the emptying and the replay appends into the pre-filled field (`user@example.comuser@example.com`) while recording, YAML and diff all look correct. Keep screenshots for human evidence. Use `snapshot:` for automated visual comparison. Read [Flow YAML](flow-yaml.md) for syntax.
 
 If polish reveals a missing action or structural check, restore its preceding state and record it. Do not add remembered behavior directly to YAML.
 

@@ -180,13 +180,13 @@ Special keys: `enter`, `escape`, `backspace`, `tab`, `space`, `arrow-up`, `arrow
 
 - Order within one call is always **clear → text → key**, so the call above replaces the value and submits in a single tool call.
 - `{ "udid": "<UDID>", "clear": true }` alone just empties the field.
-- **Focus a text field first.** On Chromium a clear with nothing editable focused is refused outright, since a select-all there would select the page rather than empty an input. On iOS and Android it is dispatched blind, so an unfocused clear does nothing and still reports success.
+- **Focus a text field first.** On Chromium a clear with nothing editable focused is refused outright, since a select-all there would select the page rather than empty an input. On iOS and Android it is dispatched blind at whatever holds focus — on an older Android level that is up to 129 real key events delivered to the app, not a no-op — and still reports success.
 - Supported on iOS, Android and Chromium. Rejected — before anything is typed — on Vega and on TV targets; a silent no-op would be worse than an error.
 - The result reports `"cleared": true`. Only Chromium reads the field back, and it **throws** when it sees the value survive — but a page it cannot read (a cross-origin iframe, a node the page replaced) falls back to best-effort there too. On iOS and Android nothing is read back at all. So `"cleared": true` never means "seen NOT empty", and it is not proof the field is empty — `describe` it if that matters.
 - On Chromium a **readonly** field is refused, like a non-text one.
 - The clear does not count towards `keys` — that reports only the characters and named key you asked to be entered, so `{ "clear": true }` alone returns `"keys": 0`.
 - On older Android levels (those whose `input` has no `keycombination` subcommand) the clear falls back to deleting backwards from the end of the line, sized to the field's measured contents. Single-line fields are emptied exactly, but **a multi-line field keeps whatever sits below the caret** — assert the result if you are clearing a multi-line input on an old device. A field longer than 150 characters is refused there rather than partly deleted.
-- Where that length cannot be read — a **password** field (uiautomator reports those empty), or a dump the device refused — the fallback sends a fixed 128 backspaces instead. That run is neither exact nor refusable, so a value longer than it keeps its head while the call still reports success.
+- Where that length cannot be read — a **password** field (uiautomator reports the mask, not the value), a dump the device refused, or no focused text field in the dump at all — the fallback sends a fixed 120 backspaces instead. That run is neither exact nor refusable, so a value longer than it keeps its head while the call still reports success.
 
 **Typing secrets.** To enter a credential without its plaintext ever entering your context, transcript, or logs, use a secret placeholder in `text` (works in `keyboard`, `paste`, `run-sequence` keyboard steps, and flow `type` steps):
 
