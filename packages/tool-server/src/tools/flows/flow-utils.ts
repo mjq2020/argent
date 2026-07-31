@@ -807,8 +807,9 @@ function toYamlStep(step: FlowStep): YamlStep {
         into: selectorToYaml(step.into),
       };
       if (step.text !== undefined) body.text = step.text;
-      // `clear` defaults to false; only serialize the opt-in, mirroring how
-      // `submit` serializes only the opt-out.
+      // `clear` defaults to false, so only the opt-in is ever worth writing.
+      // `submit` below is NOT the same shape — its default depends on `text`,
+      // so either value can be the one that differs from it.
       if (step.clear === true) body.clear = true;
       // `submit` defaults to true when there is text and false without it, so
       // only serialize a value that differs from the step's own default.
@@ -1754,9 +1755,16 @@ function fromYamlStep(raw: YamlStep, whenDepth = 0): FlowStep {
     const body = (
       raw as { type: { into?: unknown; text?: unknown; clear?: unknown; submit?: unknown } }
     ).type;
-    if (!body || typeof body !== "object") badEntry(raw, "type needs { into, text }");
+    // Reached by extrapolating the bare-scalar form `tap`, `long-press`,
+    // `scroll-to` and `snapshot` accept, so it has to name BOTH shapes the body
+    // can take: `text` stopped being required the moment `clear` arrived, and
+    // pointing an author at one of two valid shapes is its own dead end.
+    if (!body || typeof body !== "object") {
+      badEntry(raw, "type needs { into, text } or { into, clear: true }");
+    }
     // A misspelled `sumbit` or `claer` would silently drop the opt-out / the
-    // clear, turning a replace into an append — fail loudly instead.
+    // clear, so the new value lands on top of the old one instead of replacing
+    // it — fail loudly instead.
     rejectUnknownKeys(
       raw,
       body as Record<string, unknown>,

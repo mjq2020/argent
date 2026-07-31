@@ -173,7 +173,7 @@ Values: `home`, `back`, `power`, `volumeUp`, `volumeDown`, `appSwitch`, `actionB
 
 Special keys: `enter`, `escape`, `backspace`, `tab`, `space`, `arrow-up`, `arrow-down`, `arrow-left`, `arrow-right`, `f1`–`f12`. Optional: `"delayMs": 100` between keystrokes (default 50ms) — applies to the iOS simulator and Chromium; it is ignored on Android phones/tablets (typed via `adb input text`, no per-key cadence), on Vega, and on TV targets.
 
-**Replacing a field's value.** Typing does **not** replace — the old value survives and the new text goes in at the caret, which lands after it or splices into the middle of it depending on where focus left the caret (tap a long value to focus it and the caret sits where you tapped). Pass `"clear": true` to empty the focused field first:
+**Replacing a field's value.** Typing does **not** replace — the old value survives and the new text goes in at the caret, which lands after it or splices into the middle of it depending on where focus left the caret (on Android and Chromium, tap a long value to focus it and the caret sits where you tapped; on iOS it jumps to the end). Pass `"clear": true` to empty the focused field first:
 
 ```json
 { "udid": "<UDID>", "clear": true, "text": "new@example.com" }

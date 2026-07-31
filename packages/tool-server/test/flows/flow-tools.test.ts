@@ -532,6 +532,11 @@ describe("flow-finish-recording", () => {
     // `text` is optional once `clear` is set, so the summary must not
     // interpolate it blindly — a clear-only step would read `← "undefined"`.
     // `⇐` (replace) vs `←` (append) makes a cleared field visible at a glance.
+    //
+    // The steps are written to the file rather than recorded because that is
+    // the ONLY way a `type` step reaches a summary: nothing in `src/` builds
+    // one except the YAML parser, so every `type` here arrived by a hand edit
+    // and did not run live. Hence `(clear only)`, not a past-tense `(cleared)`.
     await flowStartRecordingTool.execute(
       {},
       { name: "clear-summary", project_root: tmpDir, executionPrerequisite: PREREQ }
@@ -553,7 +558,7 @@ describe("flow-finish-recording", () => {
     expect(result.summary).toEqual([
       '1. type: "email" ← "a@b.com"',
       '2. type: "email" ⇐ "a@b.com"',
-      '3. type: "search" ⇐ (cleared)',
+      '3. type: "search" ⇐ (clear only)',
     ]);
   });
 

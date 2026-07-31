@@ -448,7 +448,7 @@ ready; \`tool\` calls dispatch through the registry; \`tap\`/\`long-press\`/\`ty
 element and act on it (\`tap: { on, times: 2 }\` double-taps; \`long-press: { on, duration }\` presses and
 holds; \`type: { into, text, clear, submit }\` types into a field — \`clear: true\` empties it first, since
 typing otherwise leaves the old value in place, the new text landing at the caret the focusing tap
-set (spliced INTO the old value on Android, appended on iOS); \`text\` may be omitted for a
+set (spliced INTO the old value on Android and Chromium, appended on iOS); \`text\` may be omitted for a
 clear-only step, which sends no Enter unless \`submit: true\`;
 \`tap\`/\`long-press\` alternatively take a raw normalized point — bare \`{ x, y }\` or \`on: { x, y }\`;
 any selector may scope its matches geometrically, the CSS combinators read off frames: \`within: <selector>\`
