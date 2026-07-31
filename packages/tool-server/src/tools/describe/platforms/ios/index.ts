@@ -42,10 +42,16 @@ const DEGRADED_STANDING_HINT =
   "it and everything running on it.";
 
 // Devices already told DEGRADED_STANDING_HINT. Bounded by the number of
-// simulators driven in one server lifetime, and deliberately never cleared on
-// shutdown or disposal: the caveat holds until the sim is booted *through
-// argent*, which clears `degraded` at the source so the hint stops being
-// produced at all.
+// simulators driven in one server lifetime, and not cleared on shutdown or
+// disposal: the caveat holds for as long as the sim stays externally booted,
+// which outlives any one service instance.
+//
+// It IS cleared when a read comes back off that state, because the state can
+// come back: a udid booted through argent (or a fresh sim reusing the udid)
+// reads healthy, and if it is later booted externally again the caveat is true
+// once more and has never been told about that boot. Keying "already told" to
+// the tool-server's lifetime instead would silence it for good on the first
+// reboot cycle.
 const bootCaveatToldDevices = new Set<string>();
 
 export function __resetBootCaveatStateForTests(): void {
@@ -64,7 +70,15 @@ export function withBootCaveatOncePerDevice(
   deviceId: string,
   data: DescribeTreeData
 ): DescribeTreeData {
-  if (data.hint !== DEGRADED_STANDING_HINT) return data;
+  if (data.hint !== DEGRADED_STANDING_HINT) {
+    // A read that is not degraded at all — the sim was booted through argent, or
+    // a different sim now holds this udid — means the caveat no longer describes
+    // this device, so a later external boot has to be able to say it again. The
+    // blind caveat is the one exception: it is the same degraded state, just
+    // read blind, and it is never deduped anyway.
+    if (data.hint !== DEGRADED_BLIND_HINT) bootCaveatToldDevices.delete(deviceId);
+    return data;
+  }
   if (!bootCaveatToldDevices.has(deviceId)) {
     bootCaveatToldDevices.add(deviceId);
     return data;

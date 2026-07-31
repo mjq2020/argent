@@ -566,6 +566,33 @@ describe("describe tool", () => {
     expect(elementLineCount(second.description)).toBe(1);
   });
 
+  it("tells the caveat again after the device has read healthy in between", async () => {
+    // A udid can leave the state the caveat describes and come back to it: boot
+    // through argent (or hand the udid to a fresh sim), then boot externally
+    // again. That second external boot has never been told, so keying "already
+    // told" to the tool-server's lifetime silences it for good after one cycle.
+    const elements = [
+      { label: "General", frame: { x: 0.045, y: 0.337, width: 0.9, height: 0.046 }, traits: [] },
+    ];
+    const response = { alertVisible: false, screenFrame: { width: 440, height: 956 }, elements };
+    const udid = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA";
+    const degradedTool = () =>
+      createDescribeTool(
+        makeMockRegistry({ axService: makeAXServiceApi(response, { degraded: true }) })
+      );
+    const healthyTool = createDescribeTool(
+      makeMockRegistry({ axService: makeAXServiceApi(response, { degraded: false }) })
+    );
+
+    expect((await degradedTool().execute({}, { udid })).hint).toMatch(/booted through argent/);
+    expect((await degradedTool().execute({}, { udid })).hint).toBeUndefined();
+    // Rebooted through argent: no caveat, and the device is no longer one the
+    // caveat has been told about.
+    expect((await healthyTool.execute({}, { udid })).hint).toBeUndefined();
+    // Booted externally again — a state this session has not reported yet.
+    expect((await degradedTool().execute({}, { udid })).hint).toMatch(/booted through argent/);
+  });
+
   it("tells each degraded device its own caveat", async () => {
     const axApi = makeAXServiceApi(
       {
