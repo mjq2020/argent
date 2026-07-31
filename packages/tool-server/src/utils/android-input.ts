@@ -303,7 +303,8 @@ const DELETE_MARGIN = 8;
 // single-line form field.
 //
 // This IS the fixed run the measurement exists to avoid, so it carries that
-// shape's failure with it: a field longer than this keeps its head.
+// shape's failure with it: a field longer than this PLUS DELETE_MARGIN — the
+// count actually sent — keeps its head.
 //
 // It MUST NOT exceed MAX_DELETE_COUNT. An unmeasurable focused editable floors
 // the measurement to this value rather than vanishing from it (see

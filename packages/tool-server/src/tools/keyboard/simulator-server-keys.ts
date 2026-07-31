@@ -35,10 +35,10 @@ const typeChains = new Map<string, Promise<void>>();
 
 function serializePerDevice<T>(deviceId: string, run: () => Promise<T>): Promise<T> {
   const previous = typeChains.get(deviceId) ?? Promise.resolve();
-  // `.then(run, run)`, so a predecessor that threw still lets this call start.
-  const result = previous.then(run, run);
-  // The stored tail never rejects: one failed call must not reject the next, and
-  // an unhandled rejection here would be a stored promise nobody awaits.
+  const result = previous.then(run);
+  // What gets STORED is a tail that never rejects, so a call that threw neither
+  // blocks the queue behind it nor leaves an unhandled rejection on a promise
+  // nobody awaits. The caller still gets `result`, rejection and all.
   const tail = result.then(
     () => undefined,
     () => undefined
