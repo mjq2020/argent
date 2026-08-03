@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -43,12 +43,23 @@ function makeRegistry(invoke: (id: string, args: unknown) => Promise<unknown> = 
   } as unknown as Registry;
 }
 
+// Flow files live in a scratch dir this run owns. A sibling's name is fixed by
+// the `run:` directive that targets it, so only the directory can carry the
+// uniqueness — writing siblings straight into os.tmpdir() would let a
+// concurrent run of this file delete `<tmpdir>/nested-chromium.yaml` mid-test.
+let flowDir: string;
+
+beforeAll(async () => {
+  flowDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-chromium-boot-"));
+});
+
+afterAll(async () => {
+  await fs.rm(flowDir, { recursive: true, force: true });
+});
+
 const writtenFiles: string[] = [];
 async function writeFlow(yaml: string): Promise<string> {
-  const file = path.join(
-    os.tmpdir(),
-    `flow-chromium-boot-${writtenFiles.length}-${process.pid}.yaml`
-  );
+  const file = path.join(flowDir, `flow-${writtenFiles.length}.yaml`);
   await fs.writeFile(file, yaml, "utf8");
   writtenFiles.push(file);
   return file;
