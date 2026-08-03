@@ -30,6 +30,7 @@ import {
   getFlowPath,
   parseFlow,
   runTargetName,
+  swipeByLabel,
   type FlowFile,
   type FlowSelector,
   type GestureTarget,
@@ -1598,12 +1599,7 @@ function stepTarget(step: FlowStep): string | undefined {
       if (step.direction !== undefined) {
         travel = step.direction;
       } else if (step.by !== undefined) {
-        const by = step.by;
-        const axes = (["x", "y"] as const)
-          .filter((axis) => by[axis] !== undefined)
-          .map((axis) => `${axis}=${by[axis]}`)
-          .join(", ");
-        travel = `by ${axes}`;
+        travel = `by ${swipeByLabel(step.by)}`;
       } else if (step.to !== undefined) {
         travel = `to ${gestureTargetLabel(step.to)}`;
       } else {
