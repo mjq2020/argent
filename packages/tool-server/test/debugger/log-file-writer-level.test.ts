@@ -1,22 +1,8 @@
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { describe, it, expect, afterEach } from "vitest";
 import { LogFileWriter } from "../../src/utils/debugger/log-file-writer";
+import { scopeTempHome } from "../helpers/temp-home";
 
-// The writer's constructor mkdir -p's `os.homedir()/.argent/tmp` — the
-// developer's real home. Point HOME (and USERPROFILE, which os.homedir() reads
-// on Windows) at a temp tree so the suite never touches it.
-let tmpHome: string;
-const savedHome: Record<string, string | undefined> = {};
-
-beforeEach(() => {
-  savedHome.HOME = process.env.HOME;
-  savedHome.USERPROFILE = process.env.USERPROFILE;
-  tmpHome = mkdtempSync(join(tmpdir(), "argent-log-level-home-"));
-  process.env.HOME = tmpHome;
-  process.env.USERPROFILE = tmpHome;
-});
+scopeTempHome("argent-log-level-home-");
 
 /**
  * Regression for level truncation: CDP emits console levels longer than 5 chars
@@ -29,11 +15,6 @@ beforeEach(() => {
 let w: LogFileWriter;
 afterEach(() => {
   if (w) w.close();
-  for (const k of ["HOME", "USERPROFILE"] as const) {
-    if (savedHome[k] === undefined) delete process.env[k];
-    else process.env[k] = savedHome[k];
-  }
-  rmSync(tmpHome, { recursive: true, force: true });
 });
 
 describe("LogFileWriter round-trips levels of any length", () => {

@@ -1,32 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { LogFileWriter, type RichLogEntry } from "../../src/utils/debugger/log-file-writer";
+import { scopeTempHome } from "../helpers/temp-home";
 
-// The writer's constructor mkdir -p's `os.homedir()/.argent/tmp` — the
-// developer's real home. Point HOME (and USERPROFILE, which os.homedir() reads
-// on Windows) at a temp tree so the suite never touches it. Registered at the
-// top level so it runs before the describe-scoped hook that constructs a writer.
-let tmpHome: string;
-const savedHome: Record<string, string | undefined> = {};
-
-beforeEach(() => {
-  savedHome.HOME = process.env.HOME;
-  savedHome.USERPROFILE = process.env.USERPROFILE;
-  tmpHome = mkdtempSync(join(tmpdir(), "argent-log-writer-home-"));
-  process.env.HOME = tmpHome;
-  process.env.USERPROFILE = tmpHome;
-});
-
-afterEach(() => {
-  for (const k of ["HOME", "USERPROFILE"] as const) {
-    if (savedHome[k] === undefined) delete process.env[k];
-    else process.env[k] = savedHome[k];
-  }
-  rmSync(tmpHome, { recursive: true, force: true });
-});
+scopeTempHome("argent-log-writer-home-");
 
 let writer: LogFileWriter;
 
