@@ -192,7 +192,7 @@ describe("when: parse/serialize", () => {
     // actual mistake.
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).message).toContain(
-      "`when:` blocks nest deeper than 20 levels — check for a cyclic YAML alias (`steps: &s … steps: *s`)"
+      "`when:`/`repeat:` blocks nest deeper than 20 levels — check for a cyclic YAML alias (`steps: &s … steps: *s`)"
     );
     // A raw RangeError would carry no signal — this is what makes it structured.
     const signal = getFailureSignal(thrown);
@@ -229,7 +229,9 @@ describe("when: parse/serialize", () => {
       thrown = err;
     }
     expect(thrown).toBeInstanceOf(Error); // a raised cap would leave this unset
-    expect((thrown as Error).message).toContain("`when:` blocks nest deeper than 20 levels");
+    expect((thrown as Error).message).toContain(
+      "`when:`/`repeat:` blocks nest deeper than 20 levels"
+    );
     expect(getFailureSignal(thrown)?.error_code).toBe(FAILURE_CODES.FLOW_ENTRY_UNRECOGNIZED);
   });
 
@@ -260,7 +262,9 @@ describe("when: parse/serialize", () => {
         thrown = err;
       }
       expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toContain("`when:` blocks nest deeper than 20 levels");
+      expect((thrown as Error).message).toContain(
+        "`when:`/`repeat:` blocks nest deeper than 20 levels"
+      );
       // Not just "the depth error is in there": the shallower check must not be
       // what answered, which is the whole difference the early call makes.
       expect((thrown as Error).message).not.toContain(shallow);
