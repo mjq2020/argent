@@ -1358,11 +1358,15 @@ async function runType(
     // a combined `{ text, key }` outright (see ../keyboard/index.ts), so two calls
     // are the only way to express "type, then submit". That does not extend to
     // `clear`, which the tool allows alongside `text` — which is what lets the
-    // clear ride the same call and stay atomic with the text it replaces. On an
-    // Android TV target this call is also the one that fails: `typeTv` rejects
-    // `key` unconditionally, so the text lands and the submit errors. (Android TV
-    // is the TV kind that reaches here at all — an Apple TV stops at the focus tap
-    // above, whose `gesture-tap` resolves simulator-server and rejects a tvOS UDID.)
+    // clear ride the same call and stay atomic with the text it replaces.
+    //
+    // On an Android TV target this call is where a step with no `clear` fails:
+    // `typeTv` rejects `key` unconditionally, so the text lands and the submit
+    // errors. A `clear: true` step never gets this far — `typeTv` throws on
+    // `params.clear` before it types anything, so the FIRST dispatch above is
+    // the one that fails and nothing is typed. (Android TV is the TV kind that
+    // reaches here at all — an Apple TV stops at the focus tap above, whose
+    // `gesture-tap` resolves simulator-server and rejects a tvOS UDID.)
     if (!(await dispatchOrAbort(env, "keyboard", { key: "enter" }))) {
       return ABORTED_OUTCOME;
     }
