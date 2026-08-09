@@ -245,6 +245,18 @@ function inputEl(opts: Opts & { type?: string; value?: string; placeholder?: str
   return node;
 }
 
+// A <textarea> the script's `instanceof HTMLTextAreaElement` branches recognise.
+// `text` is its markup DEFAULT (the child text node), `value` the live contents —
+// the two diverge the moment anything types into the field, which is the whole
+// point of the split.
+function textareaEl(opts: Opts & { value?: string; placeholder?: string }) {
+  const node = el({ ...opts, tag: "textarea" }) as MockElement & Record<string, unknown>;
+  Object.setPrototypeOf(node, MockHTMLTextAreaElement.prototype);
+  node.value = opts.value ?? "";
+  if (opts.placeholder) node.placeholder = opts.placeholder;
+  return node;
+}
+
 function run(
   rootChildren: MockElement[],
   /**
@@ -440,17 +452,59 @@ afterEach(() => {
 });
 
 describe("DESCRIBE_DOM_SCRIPT — a <textarea>'s own text is not its value", () => {
-  it("does not emit a textarea's markup default as the node's value", () => {
+  it("emits the LIVE value, never the markup default", () => {
     // `ownText` reads child text nodes, which for a <textarea> is its authored
     // DEFAULT and never tracks `el.value`. Once typing (or a keyboard clear)
-    // makes them diverge, emitting the default alongside the live value in the
-    // name makes the node read as holding both — and on Chrome 150 an
-    // `equals` assert on what the field really contains then failed with
-    // `its text was "final textarea-value"` on a clear that had worked.
+    // makes them diverge, emitting the default makes the node read as holding
+    // text the field lost — on Chrome 150 an `equals` assert on what the field
+    // really contains failed with `its text was "final textarea-value"` on a
+    // clear that had worked.
     const { tree } = run([
-      el({ tag: "textarea", text: "textarea-value", attrs: { "aria-label": "Notes" } }),
+      textareaEl({
+        text: "textarea-default",
+        value: "final",
+        attrs: { "aria-label": "Notes", "id": "ta" },
+        rect: BOX,
+      }),
     ]);
-    expect(JSON.stringify(tree)).not.toContain("textarea-value");
+    expect(JSON.stringify(tree)).not.toContain("textarea-default");
+    expect(findById(tree, "ta")!.value).toBe("final");
+  });
+
+  it("keeps a LABELLED textarea's contents reachable", () => {
+    // `accessibleName` returns aria-label / aria-labelledby / placeholder before
+    // it ever falls through to `el.value`, so suppressing the text outright left
+    // a labelled field exposing neither: the name was the label and the value
+    // was gone, and the contents reached no describe consumer at all. Measured
+    // on Chrome 151 — `assert: { text: { in: { id: t1 }, contains: "initial
+    // content" } }` failed with `its text was "Notes"` while `el.value` held it.
+    const { tree } = run([
+      textareaEl({
+        value: "initial content one",
+        attrs: { "aria-label": "Notes", "id": "t1" },
+        rect: BOX,
+      }),
+      textareaEl({
+        value: "initial content two",
+        placeholder: "Type here",
+        attrs: { id: "t2" },
+        rect: { x: 0, y: 200, w: 200, h: 30 },
+      }),
+    ]);
+    expect(findById(tree, "t1")!.label).toBe("Notes");
+    expect(findById(tree, "t1")!.value).toBe("initial content one");
+    expect(findById(tree, "t2")!.label).toBe("Type here");
+    expect(findById(tree, "t2")!.value).toBe("initial content two");
+  });
+
+  it("does not double-report an UNLABELLED textarea's contents", () => {
+    // With no label of any kind the accessible name IS `el.value`, so the value
+    // key is dropped as a duplicate — the same shape an <input> has.
+    const { tree } = run([
+      textareaEl({ value: "initial content three", attrs: { id: "t3" }, rect: BOX }),
+    ]);
+    expect(findById(tree, "t3")!.label).toBe("initial content three");
+    expect(findById(tree, "t3")!.value).toBeUndefined();
   });
 
   it("still emits an ordinary element's own text as its value", () => {

@@ -448,12 +448,19 @@ const buildDescribeDomScript = ({ maxDepth, maxNodes }: ChromiumWalkLimits) => `
     const invisibleSelf = style.visibility === "hidden";
     // A <textarea>'s child text is its markup DEFAULT, not its value, and it
     // never tracks el.value — so once typing (or a keyboard clear) changes the
-    // field, ownText still returns the authored content. The accessible name
-    // already carries the live value; emitting the stale default as the node's
-    // value too makes the node read as holding both, so an equals-assert on
-    // what the field really contains fails against text the field lost. Every
-    // other element's own text IS what it shows.
-    const text = invisibleSelf || getTagName.call(el) === "TEXTAREA" ? "" : ownText(el);
+    // field, ownText still returns the authored content, and an equals-assert
+    // on what the field really contains fails against text the field lost.
+    // Read the LIVE value instead of dropping the text altogether: the
+    // accessible name only falls through to el.value when the field carries no
+    // aria-label, aria-labelledby or placeholder, so suppressing the text left
+    // a labelled textarea exposing neither its label's value nor its own — the
+    // contents reached no describe consumer at all. Every other element's own
+    // text IS what it shows.
+    const text = invisibleSelf
+      ? ""
+      : el instanceof HTMLTextAreaElement
+        ? (el.value || "").replace(/\\s+/g, " ").trim()
+        : ownText(el);
     const name = invisibleSelf ? null : accessibleName(el);
     const clickable = invisibleSelf ? false : isInteractive(el);
     const role = nodeRole(el);
