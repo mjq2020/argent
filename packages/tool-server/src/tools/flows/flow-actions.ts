@@ -680,7 +680,8 @@ async function waitForFocus(
   // blurs on the focusing tap reports focus for however many rounds precede the
   // blur, so the same flow against the same app failed or passed depending on
   // whether round 1 beat the blur. `undefined` until a read succeeds, so a
-  // window in which every read throws stays "unobservable".
+  // window in which every read throws stays distinguishable — see `giveUp`,
+  // which maps it to "unreadable" and NOT to "unobservable".
   let lastRead: "focus-elsewhere" | "focus-encloses" | "focus-overlaps" | "no-focus" | undefined;
   const giveUp = (): FocusOutcome => {
     // `undefined` means no read ever succeeded — an outage, not an observation.
