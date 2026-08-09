@@ -531,7 +531,10 @@ describe("flow-finish-recording", () => {
   it("renders `type` steps with clear, including a clear-only step", async () => {
     // `text` is optional once `clear` is set, so the summary must not
     // interpolate it blindly — a clear-only step would read `← "undefined"`.
-    // `⇐` (replace) vs `←` (append) makes a cleared field visible at a glance.
+    // `⇐` (replaces the value) vs `←` (types into whatever is already there)
+    // makes a cleared field visible at a glance — matching the production
+    // comment the glyphs come from, which is explicit that `←` is NOT
+    // necessarily an append.
     //
     // The steps are written to the file rather than recorded because that is
     // the ONLY way a `type` step reaches a summary: nothing in `src/` builds

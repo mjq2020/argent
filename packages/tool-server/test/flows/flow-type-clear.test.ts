@@ -41,9 +41,11 @@ describe("flow `type` — clear parsing", () => {
     );
   });
 
-  it("rejects a misspelled `claer` instead of silently appending", () => {
+  it("rejects a misspelled `claer` instead of silently keeping the old value", () => {
     // The whole point of the allowlist: a dropped `clear` turns a replace into
-    // an append, which fails much later at an assert.
+    // a type into whatever is already there — which on Android and Chromium
+    // splices the new text into the old value rather than appending it — and
+    // that fails much later at an assert.
     expect(() => parseType(`      into: search\n      claer: true\n      text: "x"`)).toThrow(
       /claer/
     );
