@@ -1775,8 +1775,16 @@ function fromYamlStep(raw: YamlStep, whenDepth = 0): FlowStep {
       badEntry(raw, "type.clear must be a boolean");
     }
     // `text` is required UNLESS the step is a clear: `type: { into: search,
-    // clear: true }` — empty the box, then assert the empty state — is a
-    // legitimate step with nothing to type.
+    // clear: true }` — empty the box, then assert the OLD value is gone
+    // (`assert: { hidden: "the old value" }`) or that the screen it filtered
+    // came back — is a legitimate step with nothing to type.
+    //
+    // Deliberately not "assert the empty state": the flow language cannot say
+    // that. `equals: ""` / `contains: ""` are rejected at parse time (see the
+    // assert arm below), and the regex form parses but cannot match —
+    // `regexMatchesNonEmpty` treats absent/empty text as a non-haystack, so
+    // `matches: "^$"` is false for exactly the state it describes. Measured on
+    // Chrome 151: the assert fails reporting `its text was ""`.
     if (body.clear === true) {
       if (body.text !== undefined && (typeof body.text !== "string" || body.text.length === 0)) {
         badEntry(raw, "type.text must be a non-empty string when given");
