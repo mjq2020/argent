@@ -118,6 +118,23 @@ const wrapperFocusXml = () =>
   </node>
 </hierarchy>`;
 
+/**
+ * The everyday label-above-input shape: a `{ text: Email }` selector matches the
+ * LABEL as a substring and the field exactly, so the two halves of a `type` step
+ * must resolve it the same way. The ranked resolver picks the field for both;
+ * an unranked reading-order pick took the label for the focus check while the
+ * tap went to the field, and the identity test could then never match — a
+ * `clear` hard-failed pointing at a selector that already resolves correctly.
+ */
+const labelAboveFieldXml = () =>
+  `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout" package="com.acme.app" bounds="[0,0][1080,1920]">
+    <node index="0" class="android.widget.TextView" text="Email address" package="com.acme.app" bounds="[40,100][540,140]" />
+    <node index="1" class="android.widget.EditText" resource-id="email" content-desc="Email" text="old.remembered.login" focused="true" package="com.acme.app" bounds="[40,300][1040,380]" />
+  </node>
+</hierarchy>`;
+
 function mockRegistry(calls: Call[], getHierarchy: () => { xml: string }): Registry {
   return {
     invokeTool: vi.fn(async (id: string, args: Record<string, unknown>) => {
@@ -285,6 +302,31 @@ describe("type directive — clear dispatch", () => {
 
     const result = asRun(await run(registry));
     expect(result.steps.map((s) => s.status)).toEqual(["pass"]);
+    expect(keyboardArgs(calls)).toEqual([
+      { clear: true, text: "new@example.com" },
+      { key: "enter" },
+    ]);
+  });
+
+  it("resolves the focus check against the same node the tap targeted", async () => {
+    // One ranked resolver behind both halves of the step. `{ text: Email }`
+    // matches the label above the field as a substring and the field itself
+    // exactly, so an unranked pick takes the label — the tap still lands on the
+    // field (it goes through the ranked resolver), and the identity check then
+    // compares the focused field against the label and can never match.
+    const calls: Call[] = [];
+    const registry = mockRegistry(calls, () => ({ xml: labelAboveFieldXml() }));
+
+    await writeFlow("f", {
+      executionPrerequisite: "",
+      steps: [{ kind: "type", into: { text: "Email" }, text: "new@example.com", clear: true }],
+    });
+
+    const result = asRun(await run(registry));
+    expect(result.steps.map((s) => s.status)).toEqual(["pass"]);
+    // The tap centre is the FIELD's, not the label's: 340/1920 down the screen.
+    const tap = calls.find((c) => c.id === "gesture-tap");
+    expect(tap!.args.y).toBeCloseTo(340 / 1920, 5);
     expect(keyboardArgs(calls)).toEqual([
       { clear: true, text: "new@example.com" },
       { key: "enter" },

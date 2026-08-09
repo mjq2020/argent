@@ -6,7 +6,7 @@ import {
   type DescribeSource,
 } from "../describe/contract";
 import {
-  selectorToFrame,
+  selectorToNode,
   findAll,
   evaluateCondition,
   firstInReadingOrder,
@@ -333,27 +333,30 @@ function flowFindAll(tree: DescribeNode, sel: FlowSelector): DescribeNode[] {
   return fallback;
 }
 
-/** Identifier-first-then-text frame resolution for a (possibly loose) selector. */
-function flowSelectorToFrame(tree: DescribeNode, sel: FlowSelector): DescribeFrame | undefined {
+/**
+ * Identifier-first-then-text NODE resolution for a (possibly loose) selector —
+ * the element a directive acts on.
+ */
+function flowSelectorToNode(tree: DescribeNode, sel: FlowSelector): DescribeNode | undefined {
   for (const s of selectorAlternatives(sel)) {
-    const frame = selectorToFrame(tree, s);
-    if (frame) return frame;
+    const node = selectorToNode(tree, s);
+    if (node) return node;
   }
   return undefined;
 }
 
 /**
- * The NODE {@link flowSelectorToFrame} would take the frame of — same
- * alternatives, same visible-first pick — for the one caller that needs the
- * node's identity and role rather than only its box.
+ * {@link flowSelectorToNode}'s frame. One resolver behind both, because a
+ * `type` step uses both halves at once: this frame is what gets TAPPED, and the
+ * node is what the focus check judges identity against. A second, unranked pick
+ * made them disagree on the everyday label-above-input shape — the tap landed
+ * on the input while the identity check resolved to the label above it, so the
+ * check could never match: a `clear` hard-failed pointing at a selector that
+ * was already resolving correctly, and a plain `type` burned the whole focus
+ * timeout on every step.
  */
-function flowSelectorToNode(tree: DescribeNode, sel: FlowSelector): DescribeNode | undefined {
-  for (const s of selectorAlternatives(sel)) {
-    const matches = findAll(tree, s);
-    const node = firstInReadingOrder(matches.filter(isVisible)) ?? firstInReadingOrder(matches);
-    if (node) return node;
-  }
-  return undefined;
+function flowSelectorToFrame(tree: DescribeNode, sel: FlowSelector): DescribeFrame | undefined {
+  return flowSelectorToNode(tree, sel)?.frame;
 }
 
 /**
