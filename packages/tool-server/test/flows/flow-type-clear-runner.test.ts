@@ -8,6 +8,8 @@ import { createRunFlowTool, type FlowRunResult } from "../../src/tools/flows/flo
 import { serializeFlow } from "../../src/tools/flows/flow-utils";
 
 const ANDROID_DEVICE = "emulator-5554";
+/** Mirrors `flow-actions`'s own constant — the budget the early exit dodges. */
+const TYPE_FOCUS_TIMEOUT_MS = 3000;
 let tmpDir: string;
 
 interface Call {
@@ -558,6 +560,38 @@ describe("type directive — clear dispatch", () => {
 
     const result = asRun(await run(registry));
     expect(result.steps.map((s) => s.status)).toEqual(["pass"]);
+    expect(keyboardArgs(calls)).toEqual([{ text: "new@example.com" }, { key: "enter" }]);
+  });
+
+  it("does not poll to the timeout for a verdict a plain type never reads", async () => {
+    // Only a `clear` acts on the outcome, so only a `clear` keeps polling once
+    // something focused has been seen covering the target. The shape is the
+    // ordinary hybrid one: uiautomator flags the enclosing WebView, not the
+    // EditText inside it, and an enclosing node cannot confirm — so without the
+    // early exit a WebView-hosted form of n fields pays n × TYPE_FOCUS_TIMEOUT_MS
+    // on the path with no clear at all.
+    const calls: Call[] = [];
+    let reads = 0;
+    const registry = mockRegistry(calls, () => {
+      reads++;
+      return { xml: enclosingFocusXml() };
+    });
+
+    await writeFlow("f", {
+      executionPrerequisite: "",
+      steps: [{ kind: "type", into: { identifier: "email" }, text: "new@example.com" }],
+    });
+
+    const started = Date.now();
+    const result = asRun(await run(registry));
+    const elapsed = Date.now() - started;
+
+    expect(result.steps.map((s) => s.status)).toEqual(["pass"]);
+    // Reads 1-2 are the pre-tap settle; read 3 is the focus wait's first and
+    // only look. A poll to the deadline would take ~10 more.
+    expect(reads).toBe(3);
+    // The 500ms settle still applies; the 3000ms focus timeout must not.
+    expect(elapsed).toBeLessThan(TYPE_FOCUS_TIMEOUT_MS);
     expect(keyboardArgs(calls)).toEqual([{ text: "new@example.com" }, { key: "enter" }]);
   });
 

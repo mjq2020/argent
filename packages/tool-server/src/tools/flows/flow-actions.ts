@@ -627,11 +627,22 @@ type FocusOutcome =
  * Reports rather than decides: plain typing types on any outcome (misplaced
  * text is visible and additive), while `runType` refuses to dispatch a
  * destructive clear on anything but "confirmed" and "unobservable".
+ *
+ * `requireEvidence` says which of those two callers is asking. Only a `clear`
+ * reads the verdict, so only a `clear` has to keep polling once a read has
+ * settled the question of whether SOMETHING holds the target: a plain `type`
+ * ends its wait the moment any focus-flagged node overlaps, and pays one poll
+ * instead of the whole {@link TYPE_FOCUS_TIMEOUT_MS} for an answer it discards.
+ * The shape that needs it is ordinary — uiautomator flags the enclosing
+ * `android.webkit.WebView` rather than the `EditText` inside it, so a
+ * WebView-hosted form of n fields would otherwise pay n × 3s on the path with
+ * no `clear` at all.
  */
 async function waitForFocus(
   env: ActionEnv,
   into: FlowSelector,
-  tappedFrame: DescribeFrame
+  tappedFrame: DescribeFrame,
+  requireEvidence: boolean
 ): Promise<FocusOutcome> {
   const deadline = Date.now() + TYPE_FOCUS_TIMEOUT_MS;
   // Did the MOST RECENT successful read see focus on anything? Deliberately the
@@ -680,6 +691,13 @@ async function waitForFocus(
             : focused.some((n) => framesOverlap(n.frame, target))
               ? "focus-overlaps"
               : "focus-elsewhere";
+      // Enough for a caller that will not act on the verdict: something focused
+      // covers the target, which is as far as a plain `type` ever needed to get.
+      // The refusal arms below are the same verdicts, just reached now instead
+      // of at the deadline.
+      if (!requireEvidence && (lastRead === "focus-encloses" || lastRead === "focus-overlaps")) {
+        return giveUp();
+      }
     } catch {
       // transient describe failure — retry until the deadline, leaving
       // `lastRead` alone so a window of nothing but failures stays "unreadable"
@@ -1221,7 +1239,7 @@ async function runType(
   if (!(await sleepOrAbort(TYPE_FOCUS_SETTLE_MS, env.signal))) {
     return ABORTED_OUTCOME;
   }
-  const focus = await waitForFocus(env, step.into, frame);
+  const focus = await waitForFocus(env, step.into, frame, step.clear === true);
   // waitForFocus returns on abort as well as on focus/timeout — re-check before
   // every keyboard dispatch (the keyboard tool has no abort handling of its
   // own), so a cancelled run can never type into, or submit, whatever the app
