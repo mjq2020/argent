@@ -107,6 +107,14 @@ const buildDescribeDomScript = ({ maxDepth, maxNodes }: ChromiumWalkLimits) => `
   const getOwnerDocument = protoGetter(Node.prototype, "ownerDocument");
   const getActiveElement = protoGetter(docProto, "activeElement");
   const getDocBody = protoGetter(docProto, "body");
+  // A ShadowRoot has an activeElement of its own (DocumentOrShadowRoot), read
+  // through its own prototype for the same reason as the Document's. A shadow
+  // root is a DocumentFragment and can never be a clobbering <form>, so this is
+  // belt-and-braces — but it keeps the "every inherited read goes through a
+  // captured getter" invariant whole rather than carving out an exception.
+  const shadowProto = typeof ShadowRoot === "undefined" ? {} : ShadowRoot.prototype;
+  const getShadowActiveElement = protoGetter(shadowProto, "activeElement");
+  const isShadowRoot = (n) => typeof ShadowRoot !== "undefined" && n instanceof ShadowRoot;
 
   function nodeRole(el) {
     const r = getAttr.call(el, "role");
@@ -484,8 +492,10 @@ const buildDescribeDomScript = ({ maxDepth, maxNodes }: ChromiumWalkLimits) => `
     // is the one that carries the flag — flagging both would double-report.
     if (!invisibleSelf) {
       const tag = getTagName.call(el);
-      const shadow = el.shadowRoot;
-      const delegates = !!(shadow && shadow.activeElement);
+      // \`shadow\` is the one captured above for the descent — both reads must go
+      // through getShadowRoot, or a <form> with a control named "shadowRoot"
+      // decides whether this element reports focus.
+      const delegates = !!(shadow && getShadowActiveElement.call(shadow));
       if (tag !== "IFRAME" && tag !== "FRAME" && !delegates) {
         const doc = getOwnerDocument.call(el);
         let root = null;
@@ -494,7 +504,18 @@ const buildDescribeDomScript = ({ maxDepth, maxNodes }: ChromiumWalkLimits) => `
         } catch (e) {
           root = doc;
         }
-        const active = root ? root.activeElement : null;
+        // Through the prototype accessor for a Document: its named getter is
+        // [LegacyOverrideBuiltIns], so a <form name="activeElement"> shadows
+        // the property and a raw read hands back that FORM. getRootNode()
+        // returns the Document for every light-DOM element, so reading
+        // \`root.activeElement\` directly made that the whole page's answer —
+        // the form was flagged, the input holding the caret was not, and every
+        // clear inside such a form hard-stopped the flow blaming a focus trap.
+        const active = isShadowRoot(root)
+          ? getShadowActiveElement.call(root)
+          : root && root === doc
+            ? getActiveElement.call(doc)
+            : null;
         if (active === el && doc && getDocBody.call(doc) !== el) {
           node.focused = true;
         }

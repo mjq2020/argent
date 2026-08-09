@@ -26,6 +26,14 @@ class MockElement extends MockNode {}
 class MockHTMLInputElement extends MockElement {}
 class MockHTMLTextAreaElement extends MockElement {}
 class MockHTMLImageElement extends MockElement {}
+// A real Document / ShadowRoot constructor, so the script's `activeElement`
+// reads go through a PROTOTYPE accessor exactly as they do in a renderer. With
+// a plain stub object protoGetter falls back to a direct property read, and the
+// whole point of the focus hunk — that a DOM-clobbering <form> must not be able
+// to answer "who is focused", and that an open shadow root answers for its own
+// subtree — becomes unreachable from a test.
+class MockDocument {}
+class MockShadowRoot {}
 
 // The script reads childNodes / tagName / children through the native prototype getter
 // (Object.getOwnPropertyDescriptor(proto, prop).get.call(el)) so a DOM-clobbering <form>
@@ -56,6 +64,51 @@ defineNative(MockElement.prototype, "scrollHeight", "__scrollHeight");
 defineNative(MockElement.prototype, "clientHeight", "__clientHeight");
 defineNative(MockElement.prototype, "scrollWidth", "__scrollWidth");
 defineNative(MockElement.prototype, "clientWidth", "__clientWidth");
+// activeElement / body live on Document.prototype and ShadowRoot.prototype —
+// where the script captures each, and where a clobbering own property can be
+// laid over them.
+defineNative(MockDocument.prototype, "activeElement", "__activeElement");
+defineNative(MockDocument.prototype, "body", "__body");
+defineNative(MockShadowRoot.prototype, "activeElement", "__activeElement");
+
+/**
+ * A Document the script's captured accessors work on. `activeElement`/`body`
+ * are written to the backing fields, so a test can shadow the PUBLIC property
+ * with a control element (a `<form name="activeElement">`) and still have the
+ * prototype getter return the truth.
+ */
+function mockDoc(fields: {
+  activeElement?: unknown;
+  body?: unknown;
+  documentElement?: unknown;
+}): Record<string, unknown> {
+  const doc = Object.create(MockDocument.prototype) as Record<string, unknown>;
+  doc.__activeElement = fields.activeElement ?? null;
+  doc.__body = fields.body ?? null;
+  if (fields.documentElement !== undefined) doc.documentElement = fields.documentElement;
+  return doc;
+}
+
+// ownerDocument: whatever a fixture assigned, else the document `run()` installs.
+// Shadow content has an ownerDocument like any other node — only its ROOT differs.
+Object.defineProperty(MockNode.prototype, "ownerDocument", {
+  get(this: Record<string, unknown>) {
+    return this.__ownerDocument ?? (globalThis as Record<string, unknown>).document;
+  },
+  set(this: Record<string, unknown>, v: unknown) {
+    this.__ownerDocument = v;
+  },
+  configurable: true,
+});
+
+// getRootNode(): the containing open shadow root when there is one, else the
+// element's document. The script prefers it over the document precisely because
+// the two differ inside a shadow tree.
+(MockElement.prototype as unknown as Record<string, unknown>).getRootNode = function (
+  this: Record<string, unknown>
+) {
+  return this.__root ?? (globalThis as Record<string, unknown>).document;
+};
 // getAttribute / hasAttribute / getBoundingClientRect are methods on Element.prototype.
 // The script invokes them via the captured `Element.prototype.X` so a [LegacyOverrideBuiltins]
 // form can't shadow them to a control element (which would crash with "not a function").
@@ -84,6 +137,7 @@ type Opts = {
   attrs?: Record<string, string>;
   children?: MockElement[];
   shadow?: MockElement[]; // open shadow root children (walker pierces these)
+  shadowActive?: MockElement; // that shadow root's own activeElement
   iframeDoc?: MockElement; // <iframe> contentDocument.documentElement (same-origin pierce)
   clobber?: boolean; // set .title/.id to non-string objects (DOM-clobbering)
   clobberStructural?: boolean; // shadow .children/.childNodes/.tagName with named controls (LegacyOverrideBuiltins)
@@ -107,7 +161,24 @@ function el(opts: Opts = {}): MockElement {
     : [];
   // An open shadow root is a DocumentFragment exposing `.children`; the walker reads
   // `getShadowRoot.call(el)` then iterates `shadow.children`. null unless a fixture sets it.
-  node.shadowRoot = opts.shadow ? ({ children: opts.shadow } as unknown) : null;
+  // A real ShadowRoot instance, so the script's `activeElement` accessor and its
+  // `instanceof ShadowRoot` root test both see what a renderer would. Everything
+  // inside it reports the shadow root — not the document — as its root node.
+  if (opts.shadow) {
+    const sr = Object.create(MockShadowRoot.prototype) as Record<string, unknown>;
+    sr.children = opts.shadow;
+    sr.__activeElement = opts.shadowActive ?? null;
+    const markRoot = (n: MockElement): void => {
+      (n as unknown as Record<string, unknown>).__root = sr;
+      for (const c of (n as unknown as { __children?: MockElement[] }).__children ?? []) {
+        markRoot(c);
+      }
+    };
+    for (const c of opts.shadow) markRoot(c);
+    node.shadowRoot = sr as unknown;
+  } else {
+    node.shadowRoot = null;
+  }
   // A same-origin <iframe> exposes contentDocument.documentElement (read directly, not via
   // a prototype getter). Only meaningful when tag === "iframe".
   if (opts.iframeDoc) {
@@ -174,10 +245,21 @@ function inputEl(opts: Opts & { type?: string; value?: string; placeholder?: str
   return node;
 }
 
-function run(rootChildren: MockElement[]): { tree: unknown; truncated: boolean } {
+function run(
+  rootChildren: MockElement[],
+  /**
+   * The page-level activeElement, and optionally a control element shadowing
+   * the PUBLIC `document.activeElement` property (a `<form name="activeElement">`
+   * — Document's named getter is [LegacyOverrideBuiltIns]). Elements built by
+   * `el()` take the global document as their root node unless a shadow root
+   * claims them, so this is what the light DOM's focus reads answer with.
+   */
+  focus?: { activeElement?: MockElement; clobberedBy?: MockElement }
+): { tree: unknown; truncated: boolean } {
   const root = el({ tag: "html", rect: { x: 0, y: 0, w: W, h: H } }) as MockElement &
     Record<string, unknown>;
-  root.children = [el({ tag: "body", rect: { x: 0, y: 0, w: W, h: H }, children: rootChildren })];
+  const bodyEl = el({ tag: "body", rect: { x: 0, y: 0, w: W, h: H }, children: rootChildren });
+  root.children = [bodyEl];
 
   const g = globalThis as Record<string, unknown>;
   const saved = {
@@ -188,13 +270,22 @@ function run(rootChildren: MockElement[]): { tree: unknown; truncated: boolean }
     HTMLInputElement: g.HTMLInputElement,
     HTMLTextAreaElement: g.HTMLTextAreaElement,
     HTMLImageElement: g.HTMLImageElement,
+    Document: g.Document,
+    ShadowRoot: g.ShadowRoot,
   };
   g.window = {
     innerWidth: W,
     innerHeight: H,
     getComputedStyle: (e: Record<string, unknown>) => e.__style,
   };
-  g.document = {
+  const doc = mockDoc({ activeElement: focus?.activeElement ?? null, body: bodyEl });
+  if (focus?.clobberedBy) {
+    Object.defineProperty(doc, "activeElement", {
+      value: focus.clobberedBy,
+      configurable: true,
+    });
+  }
+  g.document = Object.assign(doc, {
     documentElement: root,
     // Resolve aria-labelledby targets by walking the mock tree's backing __children
     // (the real children, unaffected by any structural clobber) for a matching id.
@@ -258,12 +349,14 @@ function run(rootChildren: MockElement[]): { tree: unknown; truncated: boolean }
         },
       };
     },
-  };
+  });
   g.Node = MockNode;
   g.Element = MockElement;
   g.HTMLInputElement = MockHTMLInputElement;
   g.HTMLTextAreaElement = MockHTMLTextAreaElement;
   g.HTMLImageElement = MockHTMLImageElement;
+  g.Document = MockDocument;
+  g.ShadowRoot = MockShadowRoot;
   try {
     const payload = (0, eval)(DESCRIBE_DOM_SCRIPT) as string;
     return JSON.parse(payload);
@@ -838,23 +931,61 @@ describe("DESCRIBE_DOM_SCRIPT visibility rules", () => {
       rect: { x: 0, y: 0, w: W, h: H },
       children: [focusedInput, otherInput],
     });
-    // The mock defines no Document constructor, so the script's protoGetter
-    // falls back to direct reads: a stub document with activeElement/body is
-    // enough. The body being activeElement (the no-focus default) must NOT
-    // mark it focused.
-    const doc = { activeElement: focusedInput, body };
+    const doc = mockDoc({ activeElement: focusedInput, body });
     for (const n of [focusedInput, otherInput, body]) {
       (n as unknown as Record<string, unknown>).ownerDocument = doc;
+      (n as unknown as Record<string, unknown>).__root = doc;
     }
 
     const { tree } = run([body]);
     expect(findById(tree, "focused-input")!.focused).toBe(true);
     expect(findById(tree, "other-input")!.focused).toBeUndefined();
 
+    // The body being activeElement is the no-focus default and must NOT flag it.
     doc.activeElement = body;
     const { tree: unfocusedTree } = run([body]);
     expect(findById(unfocusedTree, "focused-input")!.focused).toBeUndefined();
     expect(findById(unfocusedTree, "the-body")!.focused).toBeUndefined();
+  });
+
+  it("flags the element inside an open shadow root, never its host", () => {
+    // `document.activeElement` is the HOST for focus inside an open shadow root
+    // — the inner element is only ever reachable through the root's OWN
+    // activeElement. Reading the document alone flagged a host that lays out a
+    // whole screen, so `clear` was refused on every input under one; flagging
+    // both would double-report. Measured in a live renderer: activeElement is
+    // the host, inner.getRootNode().activeElement is the inner input.
+    const shadowInput = el({ tag: "input", attrs: { id: "shadow-input" }, rect: BOX });
+    const host = el({
+      attrs: { id: "the-host" },
+      rect: { x: 0, y: 0, w: 400, h: 400 },
+      shadow: [shadowInput],
+      shadowActive: shadowInput,
+    });
+
+    const { tree } = run([host], { activeElement: host });
+    expect(findById(tree, "shadow-input")!.focused).toBe(true);
+    expect(findById(tree, "the-host")!.focused).toBeUndefined();
+  });
+
+  it("a <form name=activeElement> cannot decide which element reports focus", () => {
+    // Document's named getter is [LegacyOverrideBuiltIns], so a form control
+    // named `activeElement` shadows the property and a raw read hands back that
+    // FORM. getRootNode() returns the Document for every light-DOM element, so
+    // reading `root.activeElement` directly made the form the whole page's
+    // answer: it was flagged, the input holding the caret was not, and every
+    // clear inside such a form hard-stopped the flow blaming a focus trap.
+    const emailInput = el({ tag: "input", attrs: { id: "email" }, rect: BOX });
+    const form = el({
+      tag: "form",
+      attrs: { id: "signin" },
+      rect: { x: 0, y: 90, w: 300, h: 100 },
+      children: [emailInput],
+    });
+
+    const { tree } = run([form], { activeElement: emailInput, clobberedBy: form });
+    expect(findById(tree, "email")!.focused).toBe(true);
+    expect(findById(tree, "signin")!.focused).toBeUndefined();
   });
 
   it("flags a focused input inside a same-origin iframe once — never its host <iframe>", () => {
@@ -873,9 +1004,14 @@ describe("DESCRIBE_DOM_SCRIPT visibility rules", () => {
       rect: { x: 0, y: 0, w: 500, h: 500 },
       children: [innerBody],
     });
-    const innerDoc = { documentElement: innerHtml, activeElement: innerInput, body: innerBody };
+    const innerDoc = mockDoc({
+      documentElement: innerHtml,
+      activeElement: innerInput,
+      body: innerBody,
+    });
     for (const n of [innerHtml, innerBody, innerInput]) {
       (n as unknown as Record<string, unknown>).ownerDocument = innerDoc;
+      (n as unknown as Record<string, unknown>).__root = innerDoc;
     }
     const iframe = el({
       tag: "iframe",
@@ -884,8 +1020,9 @@ describe("DESCRIBE_DOM_SCRIPT visibility rules", () => {
     });
     (iframe as unknown as Record<string, unknown>).contentDocument = innerDoc;
     // The outer document reports the host iframe as ITS activeElement.
-    const outerDoc = { activeElement: iframe, body: null };
+    const outerDoc = mockDoc({ activeElement: iframe, body: null });
     (iframe as unknown as Record<string, unknown>).ownerDocument = outerDoc;
+    (iframe as unknown as Record<string, unknown>).__root = outerDoc;
 
     const { tree } = run([iframe]);
     expect(findById(tree, "iframe-input")!.focused).toBe(true);
