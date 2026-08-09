@@ -398,6 +398,17 @@ function rolesOf(tree: unknown): string[] {
   return out;
 }
 
+/** Every node in the tree carrying the focus flag. */
+function focusedNodes(tree: unknown): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  (function rec(n: Record<string, unknown> | null) {
+    if (!n) return;
+    if (n.focused === true) out.push(n);
+    for (const c of (n.children as Record<string, unknown>[]) ?? []) rec(c);
+  })(tree as Record<string, unknown>);
+  return out;
+}
+
 function findById(tree: unknown, id: string): Record<string, unknown> | null {
   let found: Record<string, unknown> | null = null;
   (function rec(n: Record<string, unknown> | null) {
@@ -966,6 +977,45 @@ describe("DESCRIBE_DOM_SCRIPT visibility rules", () => {
     const { tree } = run([host], { activeElement: host });
     expect(findById(tree, "shadow-input")!.focused).toBe(true);
     expect(findById(tree, "the-host")!.focused).toBeUndefined();
+  });
+
+  it("keeps a focused element the walker would otherwise collapse away", () => {
+    // The focus flag is computed BEFORE both collapse returns, and being the
+    // caret's element keeps a node alive just as a name or an id does. A bare
+    // `<div contenteditable><p>…</p></div>` — what Quill / ProseMirror / Lexical
+    // render on a single-paragraph document — is a box-less single-child wrapper
+    // with no id, role or own text, i.e. exactly the shape promotion drops.
+    const para = el({ tag: "p", text: "draft the user is writing", rect: BOX });
+    const editor = el({
+      style: { display: "contents" },
+      rect: ZERO,
+      children: [para],
+    });
+
+    const { tree } = run([editor], { activeElement: editor });
+    const focused = focusedNodes(tree);
+    expect(focused).toHaveLength(1);
+    expect(focused[0]!.role).toBe("div");
+  });
+
+  it("keeps the HOST flagged when its shadow subtree never carried the flag out", () => {
+    // Suppressing the host assumes the inner element will report the focus, and
+    // that is an assumption rather than a guarantee: a collapsible or zero-area
+    // activeElement means BOTH candidates vanish and the tree carries no focus
+    // anywhere — which the flow's focus wait reads as "nothing was focused", the
+    // one non-confirmed outcome it dispatches a destructive clear on. On Chrome
+    // 151 that emptied a shadow composer's draft while the step passed on the
+    // field it named.
+    const hidden = el({ style: { display: "none" }, rect: ZERO });
+    const host = el({
+      attrs: { id: "the-host" },
+      rect: { x: 0, y: 0, w: 400, h: 400 },
+      shadow: [hidden],
+      shadowActive: hidden,
+    });
+
+    const { tree } = run([host], { activeElement: host });
+    expect(findById(tree, "the-host")!.focused).toBe(true);
   });
 
   it("a <form name=activeElement> cannot decide which element reports focus", () => {
