@@ -138,6 +138,24 @@ const labelAboveFieldXml = () =>
 </hierarchy>`;
 
 /**
+ * The same enclosing shape as `enclosingFocusXml`, but only just: the focused
+ * WebView clears the target by `pad` px on every side. The containment
+ * epsilon's slack is per-EDGE, so a symmetric pad well under it made an
+ * ENCLOSING node satisfy "sits inside the target" and take the clear — a pass
+ * on a field the step never touched. Comparing extents instead is what pins the
+ * value: at FRAME_CONTAINMENT_EPSILON = 0.005 on a 1080x1920 screen, a pad of
+ * 4px already widens the frame past the tolerance.
+ */
+const enclosingByPadXml = (pad: number) =>
+  `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout" package="com.acme.app" bounds="[0,0][1080,1920]">
+    <node index="0" class="android.webkit.WebView" resource-id="host" content-desc="Editor" text="do not erase me" focused="true" package="com.acme.app" bounds="[${40 - pad},${200 - pad}][${1040 + pad},${280 + pad}]" />
+    <node index="1" class="android.view.ViewGroup" resource-id="email-wrapper" package="com.acme.app" bounds="[40,200][1040,280]" />
+  </node>
+</hierarchy>`;
+
+/**
  * A row wrapper over TWO inputs, with focus on the one the tap does NOT land
  * on. Containment alone accepts it — `currency` is inside `amount-row` — and
  * the step then clears and rewrites a field the report never names. The tap
@@ -343,6 +361,34 @@ describe("type directive — clear dispatch", () => {
       { key: "enter" },
     ]);
   });
+
+  it.each([4, 5, 12, 100])(
+    "refuses to clear when the only focused node encloses the target by %ipx",
+    async (pad) => {
+      // The containment epsilon must not admit an ENCLOSING node. Its slack is
+      // per-edge, so a symmetric pad of half the tolerance satisfied it on every
+      // side at once: at 4px the WebView took the clear and the step passed.
+      const calls: Call[] = [];
+      const registry = mockRegistry(calls, () => ({ xml: enclosingByPadXml(pad) }));
+
+      await writeFlow("f", {
+        executionPrerequisite: "",
+        steps: [
+          {
+            kind: "type",
+            into: { identifier: "email-wrapper" },
+            text: "new@example.com",
+            clear: true,
+          },
+        ],
+      });
+
+      const result = asRun(await run(registry));
+      expect(result.steps.map((s) => s.status)).toEqual(["fail"]);
+      expect(result.steps[0]!.reason).toContain("refusing to clear");
+      expect(keyboardArgs(calls)).toEqual([]);
+    }
+  );
 
   it("refuses to clear a container whose focused input is not the one the tap hit", async () => {
     // Containment on its own has no discriminator: `currency` is inside

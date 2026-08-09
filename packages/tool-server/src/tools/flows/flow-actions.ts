@@ -443,10 +443,15 @@ function framesOverlap(a: DescribeFrame, b: DescribeFrame): boolean {
 }
 
 /**
- * Frames are normalized fractions of the screen produced by three different
- * adapters, so "the same node" can differ in the last place. A rect-containment
- * test needs to absorb that; half a percent of the screen is far below any real
- * nesting and far above any rounding.
+ * Containment slack, in normalized screen fractions. Both frames being compared
+ * come out of ONE tree read by ONE adapter, so there is no cross-adapter
+ * disagreement to absorb — what there is, is a hair of overhang: a border, a
+ * focus ring, sub-pixel rounding of an integer bounds pair. Matches
+ * `ui-tree-match`'s `WITHIN_EPS` (which reads it the same way for `within:`
+ * scopes) and this file's own `EDGE_EPS`.
+ *
+ * Per-EDGE slack, so it does not on its own say whether a node is bigger than
+ * the one it is being compared to — see {@link frameNoLargerThan}.
  */
 const FRAME_CONTAINMENT_EPSILON = 0.005;
 
@@ -459,6 +464,25 @@ function frameWithin(inner: DescribeFrame, outer: DescribeFrame): boolean {
     inner.x + inner.width <= outer.x + outer.width + e &&
     inner.y + inner.height <= outer.y + outer.height + e
   );
+}
+
+/**
+ * Is `inner` no bigger than `outer` along either axis?
+ *
+ * {@link frameWithin} alone cannot answer this: its slack is per-edge, so a
+ * frame overhanging by the epsilon on EVERY side — the `encloses` shape the
+ * same file refuses as "not evidence" — satisfies it while being a full
+ * epsilon larger in each dimension. Measured: a focused `android.webkit.WebView`
+ * enclosing its target by 4px on every side on a 1080x1920 screen passed
+ * containment and took the clear.
+ *
+ * Comparing extents catches a symmetric pad at half the per-edge threshold,
+ * while still admitting the overhang the epsilon exists for (a child a border's
+ * width wider than the box it sits in).
+ */
+function frameNoLargerThan(inner: DescribeFrame, outer: DescribeFrame): boolean {
+  const e = FRAME_CONTAINMENT_EPSILON;
+  return inner.width <= outer.width + e && inner.height <= outer.height + e;
 }
 
 /**
@@ -514,8 +538,9 @@ function collectFocused(node: DescribeNode, acc: DescribeNode[]): DescribeNode[]
  * serve, where the selector names a testID container and the input inside it is
  * what the tree flags?
  *
- * The node has to sit inside the target's box AND cover the point the tap
- * lands on. Containment alone has no discriminator at all: a container that
+ * The node has to sit inside the target's box, be no bigger than it, AND cover
+ * the point the tap lands on. Containment alone has no discriminator at all: a
+ * container that
  * holds more than one input is the everyday row (an `amount-row` over currency
  * and amount, an OTP row that forces focus to the first empty box wherever you
  * tap, a card number/expiry/cvc row with auto-advance), and a suggestion
@@ -550,7 +575,10 @@ function collectFocused(node: DescribeNode, acc: DescribeNode[]): DescribeNode[]
 function focusedFromInside(target: DescribeNode, focused: DescribeNode[]): boolean {
   const tap = getDescribeTapPoint(target.frame);
   return focused.some(
-    (n) => frameWithin(n.frame, target.frame) && frameContains(n.frame, tap.x, tap.y)
+    (n) =>
+      frameWithin(n.frame, target.frame) &&
+      frameNoLargerThan(n.frame, target.frame) &&
+      frameContains(n.frame, tap.x, tap.y)
   );
 }
 
