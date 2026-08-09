@@ -109,18 +109,22 @@ export function invokeOnDevice(
  * cancelled run as the aborted skip {@link ABORTED_OUTCOME} defines, rather than
  * a step failure quoting the tool.
  *
- * The two callers reach it from opposite directions.
+ * Four call sites over three tools — `gesture-rotate` in `runRotate`, and
+ * `gesture-tap` plus both `keyboard` dispatches in `runType` — reaching it from
+ * opposite directions.
  *
  * `gesture-rotate` DOES honour the signal: it polls `ctx?.signal?.aborted` every
  * frame, lifts the fingers and throws a named `AbortError`. Without this wrapper
  * `runRotate` would report that deliberate unwind as a failed step.
  *
- * `keyboard` honours nothing — the `ToolContext` reaches its platform handlers
- * and every one of them discards it — so its dispatch rejects only for an
- * unrelated reason that happens to land inside a cancelled window: a `typeTv`
- * refusal on a TV target, or an `adb shell input` timeout. Rare, but the
- * classification still has to be the skip, because the alternative is a report
- * blaming the tool for a run the caller cancelled.
+ * `keyboard` and `gesture-tap` honour nothing — the `ToolContext` reaches their
+ * platform handlers and every one of them discards it — so their dispatches
+ * reject only for an unrelated reason that happens to land inside a cancelled
+ * window: a `typeTv` refusal on a TV target, an `adb shell input` timeout, a
+ * simulator-server socket error. Rare, but the classification still has to be
+ * the skip, because the alternative is a report blaming the tool for a run the
+ * caller cancelled — and in `runType`'s case a report whose verdict depended on
+ * which of its three dispatches happened to be in flight.
  *
  * (Cancelling a run does NOT tear down the transport under an in-flight call.
  * Flow-run's Chromium teardown is run-level, in the `finally` after `execSteps`
