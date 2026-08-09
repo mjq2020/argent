@@ -636,11 +636,14 @@ type FocusOutcome =
  * COVER the target satisfies an overlap test by construction, and every shape
  * that produces one can hide a different element holding the keys:
  *
- *   - an open shadow root, where `document.activeElement` is the host and never
- *     the inner element, so the host is flagged while an input inside it has
- *     the caret. On a Chromium page whose shadow host spanned the screen, a
- *     clear aimed at an overlaid `<input>` emptied the SHADOW field instead and
- *     reported a pass (3/3);
+ *   - a CLOSED shadow root, where `el.shadowRoot` is null so the walker cannot
+ *     descend and cannot read the root's own activeElement: the HOST is
+ *     flagged, the element with the caret never reaches the tree at all. (An
+ *     OPEN root no longer produces this — since the describe walker reads the
+ *     activeElement of an element's own ROOT, the inner element is what carries
+ *     the flag and the host is excluded. Before that, a clear aimed at an
+ *     `<input>` overlaid on a screen-spanning host emptied the SHADOW field and
+ *     reported a pass, 3/3 on a Chromium page.);
  *   - an ordinary focus trap — a `focusin` handler bouncing focus back to a
  *     `<textarea>` — which leaves a focused text field whose box contains the
  *     target. The same run cleared the trapped field and left the named one
