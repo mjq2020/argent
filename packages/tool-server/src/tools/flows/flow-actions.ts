@@ -450,20 +450,6 @@ function framesOverlap(a: DescribeFrame, b: DescribeFrame): boolean {
  */
 const FRAME_CONTAINMENT_EPSILON = 0.005;
 
-/**
- * Roles the three adapters give a node that holds editable text.
- *
- * Chromium emits the tag name (or an explicit `role` attribute), the Android
- * parser maps `EditText`/`TextInput` to `TextField`, and the iOS adapter maps
- * `UITextField`/`UITextView`/`UISearchField` to `AXTextField`.
- */
-const TEXT_INPUT_ROLE =
-  /^(input|textarea|textbox|searchbox|combobox)$|TextField|TextView|SearchField/i;
-
-function isTextInput(node: DescribeNode): boolean {
-  return TEXT_INPUT_ROLE.test(node.role);
-}
-
 /** Is `inner` inside `outer` (equal frames included)? */
 function frameWithin(inner: DescribeFrame, outer: DescribeFrame): boolean {
   const e = FRAME_CONTAINMENT_EPSILON;
@@ -524,11 +510,57 @@ function collectFocused(node: DescribeNode, acc: DescribeNode[]): DescribeNode[]
 }
 
 /**
+ * Does a focus-flagged node stand for `target` — the one case identity cannot
+ * serve, where the selector names a testID container and the input inside it is
+ * what the tree flags?
+ *
+ * The node has to sit inside the target's box AND cover the point the tap
+ * lands on. Containment alone has no discriminator at all: a container that
+ * holds more than one input is the everyday row (an `amount-row` over currency
+ * and amount, an OTP row that forces focus to the first empty box wherever you
+ * tap, a card number/expiry/cvc row with auto-advance), and a suggestion
+ * popover or autocomplete list drawn over a composer is inside it too. Either
+ * way the step clears whichever node reports focus and reports a pass on the
+ * container — reproduced on Chrome 151 both ways round: the tap landed in
+ * `#amount` while the keys emptied and rewrote `#currency`, and `#composer`
+ * kept its draft while the overlay `#mention` took the replacement.
+ *
+ * The tap point is the centre of the target's CURRENT frame, recomputed per
+ * round rather than carried from the dispatch, so keyboard avoidance scrolling
+ * the field mid-step cannot stale it.
+ *
+ * Structure would be the sharper test, but the flow trees do not carry it:
+ * both the Android and the iOS full-hierarchy adapters flatten to leaves under
+ * one root, so a wrapper and the input it wraps arrive as SIBLINGS and there is
+ * no ancestry to consult.
+ *
+ * Deliberately NOT a role test on the target. Asking "is the target itself a
+ * text input" both over- and under-matches against the roles the adapters
+ * really emit: Material's `TextInputLayout` wrapper derives `TextField`, ARIA
+ * 1.1 puts `combobox` on the wrapper around the input, a `contenteditable`
+ * composer is role `div`, and React Native's iOS host views come through as
+ * `AXStaticText`. The first two refused a legitimate wrapper clear, the last
+ * two admitted the overlay the test exists to catch.
+ *
+ * Residual: an overlay that covers the tap point itself still confirms. That is
+ * the case where the TAP hit the overlay, so focus reaching the overlay's field
+ * is the honest consequence of the gesture, and no reading of the geometry can
+ * separate it from the input inside the container.
+ */
+function focusedFromInside(target: DescribeNode, focused: DescribeNode[]): boolean {
+  const tap = getDescribeTapPoint(target.frame);
+  return focused.some(
+    (n) => frameWithin(n.frame, target.frame) && frameContains(n.frame, tap.x, tap.y)
+  );
+}
+
+/**
  * Outcome of the focus handshake. The distinctions only matter to a destructive
  * `clear`; plain typing treats everything but a hard abort as best-effort.
  *
- * - "confirmed" — a focus-flagged node sits INSIDE the target's frame (equal
- *   frames included). The keys will land in the field the step named.
+ * - "confirmed" — the target itself reports focus, or a node belonging to it
+ *   does ({@link focusedFromInside}). The keys will land in the field the step
+ *   named.
  * - "encloses" — the only focus-flagged node overlapping the target CONTAINS
  *   it. That is not evidence: it is what a hybrid app's focused WebView and an
  *   ordinary focus trap look like, and each can coexist with a different
@@ -562,20 +594,19 @@ type FocusOutcome =
   | "unreadable";
 
 /**
- * Poll until an element reporting `focused` sits inside the typed-into element.
+ * Poll until the typed-into element, or something belonging to it, reports
+ * `focused`.
  *
- * Containment, not identity: the selector often matches a testID container
- * while focus is reported by the input inside it, and the two are then
- * different nodes with different frames. The target's frame is re-resolved each
- * round — the keyboard sliding up routinely scrolls the field away from where
- * it was tapped (keyboard avoidance), and the focused element must be compared
- * against where the field is NOW; `tappedFrame` covers rounds where the
- * selector momentarily doesn't resolve.
+ * Identity first, then {@link focusedFromInside}: the selector often matches a
+ * testID container while focus is reported by the input inside it, and the two
+ * are then different nodes with different frames. The target NODE is
+ * re-resolved each round — the keyboard sliding up routinely scrolls the field
+ * away from where it was tapped (keyboard avoidance), and the focused element
+ * must be compared against where the field is NOW.
  *
- * Containment, not overlap, is what separates evidence from coincidence. A
- * focus-flagged node large enough to COVER the target satisfies an overlap test
- * by construction, and every shape that produces one can hide a different
- * element holding the keys:
+ * Neither arm accepts a bare overlap. A focus-flagged node large enough to
+ * COVER the target satisfies an overlap test by construction, and every shape
+ * that produces one can hide a different element holding the keys:
  *
  *   - an open shadow root, where `document.activeElement` is the host and never
  *     the inner element, so the host is flagged while an input inside it has
@@ -628,10 +659,9 @@ async function waitForFocus(
       const { tree, source } = await fetchFlowTree(env.registry, env.device);
       if (!FOCUS_REPORTING_SOURCES.has(source)) return "unobservable";
       // The target NODE, not just its frame: identity is the only unambiguous
-      // evidence, and geometry alone cannot tell an input INSIDE the container
-      // the selector named from an unrelated input OVERLAYING the field it
-      // named. `tappedFrame` still covers a round where the selector does not
-      // resolve, but only the geometric arm can use it.
+      // evidence. `tappedFrame` still covers a round where the selector does
+      // not resolve, but only the refusal classification below can use it —
+      // with no node there is nothing to confirm against.
       const targetNode = flowSelectorToNode(tree, into);
       const target = targetNode?.frame ?? tappedFrame;
       const focused = collectFocused(tree, []);
@@ -641,19 +671,7 @@ async function waitForFocus(
       // verdict a race — an app that blurs on the focusing tap reports focus
       // for however many rounds precede the blur.
       if (focused.some((n) => n === targetNode)) return "confirmed";
-      // Geometry, for the case identity cannot serve: the selector matched a
-      // testID container and the input inside it is what reports focus. Scoped
-      // to a target that is NOT itself a text input, because when it is, a
-      // different focused input inside its box is an overlay — a suggestion
-      // popover over a composer — and clearing on that emptied the popover and
-      // reported a pass on the composer it never touched.
-      if (
-        targetNode &&
-        !isTextInput(targetNode) &&
-        focused.some((n) => frameWithin(n.frame, target))
-      ) {
-        return "confirmed";
-      }
+      if (targetNode && focusedFromInside(targetNode, focused)) return "confirmed";
       lastRead =
         focused.length === 0
           ? "no-focus"
@@ -1147,9 +1165,10 @@ function clearRefusalReason(into: FlowSelector, focus: FocusOutcome): string {
   if (focus === "overlaps") {
     return (
       `${head}: within ${TYPE_FOCUS_TIMEOUT_MS}ms focus was reported on an element that OVERLAPS ` +
-      `${sel} but is not it — an overlay over the field (a suggestion popover, an autocomplete ` +
-      `list) looks exactly like this, and clearing would empty that element instead. Dismiss the ` +
-      `overlay first, or name the element that actually holds the caret`
+      `${sel} without being it and without covering where the tap landed — an overlay over the ` +
+      `field (a suggestion popover, an autocomplete list), or a SIBLING inside the container ` +
+      `${sel} names (a currency/amount row, an OTP row). Clearing would empty that element ` +
+      `instead. Dismiss the overlay first, or name the input that actually holds the caret`
     );
   }
   if (focus === "unreadable") {

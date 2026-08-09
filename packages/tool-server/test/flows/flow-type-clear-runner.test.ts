@@ -87,10 +87,10 @@ const enclosingFocusXml = () =>
 
 /**
  * The overlay: a focused input sitting INSIDE the named field's box without
- * being it — a mention/autocomplete popover over a composer. Geometry alone
- * cannot tell this from `wrapperFocusXml` below; what separates them is that
- * here the NAMED node is itself a text field, so a different focused text field
- * inside it is covering it rather than belonging to it.
+ * being it — a mention/autocomplete popover over a composer. What separates it
+ * from `wrapperFocusXml` below is where the TAP lands: the overlay sits clear
+ * of the named element's centre, so the gesture went to the named element and
+ * the focus is somebody else's.
  */
 const overlayFocusXml = () =>
   `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
@@ -132,6 +132,40 @@ const labelAboveFieldXml = () =>
   <node index="0" class="android.widget.FrameLayout" package="com.acme.app" bounds="[0,0][1080,1920]">
     <node index="0" class="android.widget.TextView" text="Email address" package="com.acme.app" bounds="[40,100][540,140]" />
     <node index="1" class="android.widget.EditText" resource-id="email" content-desc="Email" text="old.remembered.login" focused="true" package="com.acme.app" bounds="[40,300][1040,380]" />
+  </node>
+</hierarchy>`;
+
+/**
+ * A row wrapper over TWO inputs, with focus on the one the tap does NOT land
+ * on. Containment alone accepts it — `currency` is inside `amount-row` — and
+ * the step then clears and rewrites a field the report never names. The tap
+ * goes to the row's centre (540px), which is inside `amount`.
+ */
+const twoInputRowXml = () =>
+  `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout" package="com.acme.app" bounds="[0,0][1080,1920]">
+    <node index="0" class="android.view.ViewGroup" resource-id="amount-row" package="com.acme.app" bounds="[40,200][1040,280]">
+      <node index="0" class="android.widget.EditText" resource-id="currency" content-desc="Currency" text="USD" focused="true" package="com.acme.app" bounds="[40,200][240,280]" />
+      <node index="1" class="android.widget.EditText" resource-id="amount" content-desc="Amount" text="0.00" package="com.acme.app" bounds="[280,200][1040,280]" />
+    </node>
+  </node>
+</hierarchy>`;
+
+/**
+ * The role test's over-match: Material's `TextInputLayout` is the non-editable
+ * WRAPPER that carries the app's `resource-id`, and `deriveUiAutomatorRole`
+ * matches `textinput` on the short class name, so it derives `TextField`.
+ * Identical to `wrapperFocusXml` apart from that class.
+ */
+const textInputLayoutWrapperXml = () =>
+  `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout" package="com.acme.app" bounds="[0,0][1080,1920]">
+    <node index="0" class="com.google.android.material.textfield.TextInputLayout" resource-id="email-wrapper" package="com.acme.app" bounds="[40,180][1040,300]">
+      <node index="0" class="android.widget.EditText" resource-id="email" content-desc="Username or email address" text="old.remembered.login" focused="true" package="com.acme.app" bounds="[40,200][1040,280]" />
+    </node>
+    <node index="1" class="android.widget.EditText" resource-id="other" content-desc="Display name" text="do not erase me" focused="true" package="com.acme.app" bounds="[40,600][1040,680]" />
   </node>
 </hierarchy>`;
 
@@ -287,6 +321,56 @@ describe("type directive — clear dispatch", () => {
     // passing on "something, somewhere, reports focus".
     const calls: Call[] = [];
     const registry = mockRegistry(calls, () => ({ xml: wrapperFocusXml() }));
+
+    await writeFlow("f", {
+      executionPrerequisite: "",
+      steps: [
+        {
+          kind: "type",
+          into: { identifier: "email-wrapper" },
+          text: "new@example.com",
+          clear: true,
+        },
+      ],
+    });
+
+    const result = asRun(await run(registry));
+    expect(result.steps.map((s) => s.status)).toEqual(["pass"]);
+    expect(keyboardArgs(calls)).toEqual([
+      { clear: true, text: "new@example.com" },
+      { key: "enter" },
+    ]);
+  });
+
+  it("refuses to clear a container whose focused input is not the one the tap hit", async () => {
+    // Containment on its own has no discriminator: `currency` is inside
+    // `amount-row` just as much as the input inside a testID wrapper is. The
+    // tap lands at the row's centre, which is inside `amount`, so the focus
+    // belongs to a sibling and the keys would empty a field the report names
+    // nowhere. Reproduced on Chrome 151 before this test existed: the step
+    // passed and `#currency` came back holding the replacement.
+    const calls: Call[] = [];
+    const registry = mockRegistry(calls, () => ({ xml: twoInputRowXml() }));
+
+    await writeFlow("f", {
+      executionPrerequisite: "",
+      steps: [{ kind: "type", into: { identifier: "amount-row" }, text: "12.50", clear: true }],
+    });
+
+    const result = asRun(await run(registry));
+    expect(result.steps.map((s) => s.status)).toEqual(["fail"]);
+    expect(result.steps[0]!.reason).toContain("refusing to clear");
+    expect(keyboardArgs(calls)).toEqual([]);
+  });
+
+  it("still clears through a wrapper whose role reads as a text input", async () => {
+    // The role test this replaced called Material's `TextInputLayout` a text
+    // field (its short class name contains "textinput"), skipped the
+    // containment arm, and failed a legitimate wrapper clear while blaming an
+    // overlay that was not on screen. ARIA 1.1's `combobox`-on-the-wrapper does
+    // the same on Chromium. Geometry answers both without a role vocabulary.
+    const calls: Call[] = [];
+    const registry = mockRegistry(calls, () => ({ xml: textInputLayoutWrapperXml() }));
 
     await writeFlow("f", {
       executionPrerequisite: "",
