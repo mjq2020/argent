@@ -737,10 +737,21 @@ export type FlowFile = {
  * nested `run:`/`snapshot` from validation. Five sites asked `kind === "when"`
  * directly before this existed; a second block directive would have had to
  * remember all five, and a forgotten one drops a whole block from the report —
- * or from the preflight — silently. Now it is one case here.
+ * or from the preflight — silently. Now it is one case here — and it is the
+ * same case the PARSER exempts from the single-key sibling check, because the
+ * kinds come from {@link BLOCK_DIRECTIVE_KEYS} rather than being restated.
  */
 export function blockSteps(step: FlowStep): FlowStep[] | undefined {
-  return step.kind === "when" ? step.steps : undefined;
+  return isBlockStep(step) ? step.steps : undefined;
+}
+
+/**
+ * Narrow a step to the kinds {@link BLOCK_DIRECTIVE_KEYS} lists. `Extract` is
+ * what makes the list load-bearing: {@link blockSteps}' `.steps` typechecks
+ * only while EVERY listed kind's step type carries children.
+ */
+function isBlockStep(step: FlowStep): step is Extract<FlowStep, { kind: BlockDirectiveKind }> {
+  return isBlockDirectiveKey(step.kind);
 }
 
 /**
@@ -1984,12 +1995,31 @@ const STEP_DIRECTIVE_KEYS: readonly string[] = [
 ];
 
 /**
- * The directive keys that carry a sibling `steps:` list. Parse-time counterpart
- * to {@link blockSteps} (which answers the same question about an already
- * parsed step): these are exempt from the single-key sibling check, because
- * their own parser validates their siblings with pointed messages.
+ * The directive keys that carry a sibling `steps:` list — the single registry
+ * of what a block directive is: {@link blockSteps} reads THIS list rather than
+ * restating the kinds, so parse time and run time cannot answer differently.
+ * Two constraints keep an entry honest: `satisfies` rejects a key that is not a
+ * real step kind, and blockSteps' `Extract` rejects a kind whose step type
+ * carries no `steps` (a directive listed here without children is a compile
+ * error, not a silent runtime `undefined`).
+ *
+ * At parse time these keys are exempt from the single-key sibling check,
+ * because their own parser validates their siblings with pointed messages.
  */
-const BLOCK_DIRECTIVE_KEYS: readonly string[] = ["when"];
+export const BLOCK_DIRECTIVE_KEYS = ["when"] as const satisfies readonly FlowStep["kind"][];
+
+/** The step kinds {@link BLOCK_DIRECTIVE_KEYS} names. */
+type BlockDirectiveKind = (typeof BLOCK_DIRECTIVE_KEYS)[number];
+
+/**
+ * Is this directive key a block directive? The parser and runner's only read of
+ * {@link BLOCK_DIRECTIVE_KEYS}; the widening is the lookup itself — the const
+ * tuple's own `includes` accepts only keys already known to be block kinds,
+ * which is the question being asked.
+ */
+function isBlockDirectiveKey(key: string): key is BlockDirectiveKind {
+  return (BLOCK_DIRECTIVE_KEYS as readonly string[]).includes(key);
+}
 
 /**
  * Parse `times` on a tap body: an integer tap count dispatched as ONE
@@ -2517,7 +2547,7 @@ function fromYamlStep(raw: YamlStep, blockDepth = 0): FlowStep {
   // it), but its own parser validates them with pointed messages, so the
   // generic check stays out of its way.
   const kind = kinds[0]!;
-  if (!BLOCK_DIRECTIVE_KEYS.includes(kind)) {
+  if (!isBlockDirectiveKey(kind)) {
     const siblings = kind === "tool" ? ["tool", "args", "delayMs"] : [kind];
     const extras = Object.keys(entry).filter((k) => !siblings.includes(k));
     if (extras.length > 0) {

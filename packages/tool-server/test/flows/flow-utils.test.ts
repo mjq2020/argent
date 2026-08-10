@@ -21,6 +21,8 @@ import {
   appIdForPlatform,
   chromiumLaunchSpec,
   writeNewFlowFile,
+  blockSteps,
+  BLOCK_DIRECTIVE_KEYS,
   type FlowFile,
 } from "../../src/tools/flows/flow-utils";
 
@@ -895,6 +897,48 @@ describe("parseFlow", () => {
     };
     const serialized = serializeFlow(flow);
     expect(parseFlow(serialized)).toEqual(flow);
+  });
+});
+
+// ── block directives ─────────────────────────────────────────────────
+
+// A flow per key in BLOCK_DIRECTIVE_KEYS, with the children its block authors.
+// Deliberately not derived from the key: a fixture that agreed with the parser
+// by construction would test nothing.
+const BLOCK_DIRECTIVE_FLOWS: Partial<
+  Record<(typeof BLOCK_DIRECTIVE_KEYS)[number], { yaml: string; children: FlowFile["steps"] }>
+> = {
+  when: {
+    yaml:
+      [
+        "steps:",
+        "  - when: { visible: Cart }",
+        "    steps:",
+        "      - echo: Guarded",
+        "      - tap: Buy",
+      ].join("\n") + "\n",
+    children: [
+      { kind: "echo", message: "Guarded" },
+      { kind: "tap", selector: { text: "Buy", loose: true } },
+    ],
+  },
+};
+
+// The parser's block list and blockSteps' runtime answer are the same claim
+// asked twice; a directive only one of them knows drops its whole block from
+// every skip expansion and from the upload preflight, silently.
+describe("block directives", () => {
+  it.each(BLOCK_DIRECTIVE_KEYS)("%s parses to its own kind and yields its children", (key) => {
+    const fixture = BLOCK_DIRECTIVE_FLOWS[key];
+    expect(fixture, `no flow fixture for block directive \`${key}\``).toBeDefined();
+    const step = parseFlow(fixture!.yaml).steps[0]!;
+    expect(step.kind).toBe(key);
+    expect(blockSteps(step)).toEqual(fixture!.children);
+  });
+
+  it("returns undefined for a leaf step", () => {
+    const step = parseFlow("steps:\n  - tap: Buy\n").steps[0]!;
+    expect(blockSteps(step)).toBeUndefined();
   });
 });
 
