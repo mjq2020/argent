@@ -1804,11 +1804,11 @@ function describeWhenCondition(cond: WhenCondition): string {
 }
 
 /**
- * Report every step of a `when:` block that will not run as skipped — so a
- * run where the block was skipped (unmet guard, errored guard, hard stop, or
- * cancellation) produces the same report shape (one line per authored step,
- * at the same depth) as a run where it entered, and reports stay comparable
- * run-to-run. Nested block directives expand (their literal steps are known);
+ * Report every step of a block directive that will not run as skipped — so a
+ * run where the block was skipped (a `when:` guard unmet or errored, a hard
+ * stop, a cancellation) produces the same report shape (one line per authored
+ * step, at the same depth) as a run where it entered, and reports stay
+ * comparable run-to-run. Nested blocks expand (their literal steps are known);
  * a `run:` composition stays one line, matching how post-hard-stop skips report
  * a fragment that was never loaded. `scope` is the scope the steps would have
  * executed in — already the block's child scope, not the marker's.
