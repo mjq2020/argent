@@ -732,10 +732,12 @@ export type FlowFile = {
  * The single predicate for "this step has authored children". The runner reads
  * it wherever a block does NOT execute — a hard stop, a device-free flow, a
  * cancellation, an unmet guard — to expand the block's steps as skip lines, so
- * a report keeps one line per authored step no matter where the run ended. Four
- * sites asked `kind === "when"` directly before this existed; a second block
- * directive would have had to remember all four, and a forgotten one drops a
- * whole block from the report silently. Now it is one case here.
+ * a report keeps one line per authored step no matter where the run ended, and
+ * once more in the upload preflight's walk, where a block it cannot see hides a
+ * nested `run:`/`snapshot` from validation. Five sites asked `kind === "when"`
+ * directly before this existed; a second block directive would have had to
+ * remember all five, and a forgotten one drops a whole block from the report —
+ * or from the preflight — silently. Now it is one case here.
  */
 export function blockSteps(step: FlowStep): FlowStep[] | undefined {
   return step.kind === "when" ? step.steps : undefined;

@@ -874,23 +874,30 @@ function displayFlowName(params: { name?: string; flow_path?: string }): string 
   return params.name || stem || params.flow_path || "(unspecified)";
 }
 
-/** Yield every parsed step, recursing into `when:` blocks (the parser's only nesting). */
+/**
+ * Yield every parsed step, recursing into a block directive's children through
+ * {@link blockSteps} rather than testing one kind: this is the sole feeder of
+ * {@link assertUploadSelfContained}, so a block absent from the recursion would
+ * carry an uploaded flow's nested `run:`/`snapshot` past the preflight and let
+ * an unrunnable flow report green.
+ */
 function* walkSteps(steps: FlowStep[]): Generator<FlowStep> {
   for (const step of steps) {
     yield step;
-    if (step.kind === "when") yield* walkSteps(step.steps);
+    const inner = blockSteps(step);
+    if (inner) yield* walkSteps(inner);
   }
 }
 
 /**
  * Reject an uploaded root flow that is not self-contained — one with a `run:`
- * or `snapshot` step (even inside a `when:` block) — before anything executes:
- * a mid-run or guard-gated error could execute half the flow first, or first
- * surface in CI. Both step kinds anchor at the flow file's real directory,
- * which an uploaded flow does not have: a run: step's referenced files stayed
- * on the client, and snapshot baselines live beside the flow's file — against
- * a per-call temp materialization a plain snapshot can only fail (no baseline)
- * and updateBaselines writes PNGs no later run can find.
+ * or `snapshot` step (at any depth inside a block directive) — before anything
+ * executes: a mid-run or guard-gated error could execute half the flow first,
+ * or first surface in CI. Both step kinds anchor at the flow file's real
+ * directory, which an uploaded flow does not have: a run: step's referenced
+ * files stayed on the client, and snapshot baselines live beside the flow's
+ * file — against a per-call temp materialization a plain snapshot can only fail
+ * (no baseline) and updateBaselines writes PNGs no later run can find.
  */
 function assertUploadSelfContained(flow: FlowFile): void {
   for (const step of walkSteps(flow.steps)) {
