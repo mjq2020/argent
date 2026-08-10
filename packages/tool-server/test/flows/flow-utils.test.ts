@@ -216,14 +216,40 @@ describe("parseFlow", () => {
     expect((thrown as Error).message).toContain("line 1");
   });
 
-  it("throws a validation error (not a TypeError) on a primitive step entry", async () => {
-    const content = 'executionPrerequisite: ""\nsteps:\n  - tap\n';
-    expect(() => parseFlow(content)).toThrow("Unrecognized flow entry");
+  // `step must be an object` is spelled twice — here for a top-level entry, and
+  // in parseBlockSteps for a block directive's own steps: list. Nothing else
+  // asserts either copy, so the two are free to drift apart or be dropped with
+  // nothing noticing; the pair below pins each site independently.
+  const entryRejectionMessage = (content: string): string => {
+    try {
+      parseFlow(content);
+    } catch (err) {
+      // A raw TypeError would carry no signal — this is what makes it structured.
+      expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.FLOW_ENTRY_UNRECOGNIZED);
+      return err instanceof Error ? err.message : String(err);
+    }
+    throw new Error("expected the entry to be rejected");
+  };
+
+  it.each([
+    ["a bare string", 'executionPrerequisite: ""\nsteps:\n  - tap\n'],
+    ["a primitive", 'executionPrerequisite: ""\nsteps:\n  - 42\n'],
+    ["a null", 'executionPrerequisite: ""\nsteps:\n  - ~\n'],
+  ])("names the step shape when %s sits in the top-level steps list", (_shape, content) => {
+    expect(entryRejectionMessage(content)).toContain(
+      "Unrecognized flow entry (step must be an object)"
+    );
   });
 
-  it("throws a validation error on a null step entry", async () => {
-    const content = 'executionPrerequisite: ""\nsteps:\n  - ~\n';
-    expect(() => parseFlow(content)).toThrow("Unrecognized flow entry");
+  it.each([
+    ["a primitive", "steps:\n  - when: { visible: Cart }\n    steps: [42]\n"],
+    ["a null", "steps:\n  - when: { visible: Cart }\n    steps: [~]\n"],
+  ])("names the step shape when %s sits in a block's steps list", (_shape, content) => {
+    // `when:` is only the vehicle — it is today's sole block directive, and the
+    // guard it reaches is parseBlockSteps', shared by every block directive.
+    expect(entryRejectionMessage(content)).toContain(
+      "Unrecognized flow entry (step must be an object)"
+    );
   });
 
   it("sugars a bare-string selector into a loose { text } for tap", async () => {
