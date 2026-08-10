@@ -2,7 +2,7 @@ import type { DeviceInfo, Registry, ToolContext } from "@argent/registry";
 import { FAILURE_CODES, FailureError } from "@argent/registry";
 import { resolveDevice } from "../../utils/device-info";
 import { invokeSubTool } from "../../utils/sub-invoke";
-import type { FlowStep, WhenPlatform } from "./flow-utils";
+import { blockSteps, type FlowStep, type WhenPlatform } from "./flow-utils";
 
 /**
  * Device resolution + binding for the flow runner. Flows store no device id
@@ -204,7 +204,9 @@ export function stripDeviceKeys(args: Record<string, unknown>): Record<string, u
  * Three of the classifications are worth stating outright:
  *
  * - `when` needs a device whatever its body contains, because the guard itself
- *   reads one — the device's platform, or its view tree.
+ *   reads one — the device's platform, or its view tree. That classifies the
+ *   header alone; a block's body is answered by {@link flowRequiresDevice}'s
+ *   walk, not here.
  * - `idle` needs one despite carrying no selector: it reads the device twice
  *   over, the UI tree and a screenshot of it.
  * - `run` needs one without the fragment being read here. The flow it names is
@@ -241,9 +243,24 @@ export function stepRequiresDevice(registry: Registry, step: FlowStep): boolean 
   }
 }
 
-/** Whether any step in a flow acts on a device. */
+/**
+ * Whether any step in a flow acts on a device, block children included — each
+ * block header's own classification OR, via {@link blockSteps}, the steps it
+ * actually CONTAINS. Both halves matter: a `when: { platform: ios }` guard
+ * reads the device even over a device-free body.
+ *
+ * Header classification alone is not enough: a block directive whose header
+ * reads nothing off the device would naturally be classified `false` in
+ * {@link stepRequiresDevice}, and a flow that is only that block would then
+ * resolve device-free and hard-stop on the first device step in its body. The
+ * exhaustiveness check there forces a new kind to be classified, but not to be
+ * classified `true`; the walk is what makes either answer safe.
+ */
 export function flowRequiresDevice(registry: Registry, steps: FlowStep[]): boolean {
-  return steps.some((step) => stepRequiresDevice(registry, step));
+  return steps.some(
+    (step) =>
+      stepRequiresDevice(registry, step) || flowRequiresDevice(registry, blockSteps(step) ?? [])
+  );
 }
 
 /**
