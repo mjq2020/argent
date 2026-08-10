@@ -2310,7 +2310,9 @@ const MAX_BLOCK_DEPTH = 20;
  * Guard a block directive's recursion depth. Called FIRST in a block's parse —
  * before its own key/shape checks — so a cyclic alias reports as a depth error
  * rather than surfacing whatever the cycle happens to make the shallower checks
- * say.
+ * say. That early call buys the error PRECEDENCE only, not the cap itself:
+ * {@link parseBlockSteps} asserts again before it recurses, so forgetting the
+ * early call costs a directive the precedence and nothing more.
  */
 function assertBlockDepth(raw: unknown, depth: number): void {
   if (depth >= MAX_BLOCK_DEPTH) {
@@ -2327,12 +2329,18 @@ function assertBlockDepth(raw: unknown, depth: number): void {
  * chain. `emptyDetail` is the directive's own message for an absent or empty
  * list — the one part worth phrasing per directive, since it is where an author
  * lands when they wrote the guard but not the body.
+ *
+ * Asserts the depth cap here too, on the one path every block directive must go
+ * through to recurse, so no directive can opt out of the cap by forgetting the
+ * early {@link assertBlockDepth} call. `depth` is unchanged between the two
+ * calls, so for a directive that made the early one this is a no-op.
  */
 function parseBlockSteps(
   raw: Record<string, unknown>,
   depth: number,
   emptyDetail: string
 ): FlowStep[] {
+  assertBlockDepth(raw, depth);
   if (!Array.isArray(raw.steps) || raw.steps.length === 0) badEntry(raw, emptyDetail);
   return (raw.steps as unknown[]).map((s) => {
     if (s !== null && typeof s === "object") return fromYamlStep(s as YamlStep, depth + 1);
