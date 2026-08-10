@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Registry } from "@argent/registry";
+import { FAILURE_CODES, getFailureSignal, type Registry } from "@argent/registry";
 import type { DescribeNode, DescribeTreeData } from "../../src/tools/describe/contract";
 
 // Serve the flow tree directly: flows resolve selectors against the platform's
@@ -179,9 +179,56 @@ describe("when: parse/serialize", () => {
     // The yaml library materializes `steps: *s` as a cyclic object; without
     // the depth cap the parser would recurse forever and escape as a raw
     // RangeError instead of a flow parse error.
-    expect(() => parseFlow("steps: &s\n  - when: { visible: X }\n    steps: *s\n")).toThrow(
-      /nest deeper than 20 levels/i
+    let thrown: unknown;
+    try {
+      parseFlow("steps: &s\n  - when: { visible: X }\n    steps: *s\n");
+    } catch (err) {
+      thrown = err;
+    }
+    // The whole message is pinned, not only the "nest deeper than" half: the
+    // cap covers every block directive rather than when: alone, and the alias
+    // hint is what points the author at the actual mistake.
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain(
+      "block directives nest deeper than 20 levels — check for a cyclic YAML alias (`steps: &s … steps: *s`)"
     );
+    // A raw RangeError would carry no signal — this is what makes it structured.
+    const signal = getFailureSignal(thrown);
+    expect(signal?.error_kind).toBe("validation");
+    expect(signal?.error_code).toBe(FAILURE_CODES.FLOW_ENTRY_UNRECOGNIZED);
+  });
+
+  it("parses when: nested to the depth cap and rejects one level deeper", () => {
+    // The cyclic-alias test above only proves SOME cap exists; this pins its
+    // value from both sides so it cannot drift in either direction. The literal
+    // 20 IS the pin — reading MAX_BLOCK_DEPTH would move with the constant and
+    // assert nothing.
+    const nestedWhens = (levels: number): string => {
+      let steps = "[{ echo: deepest }]";
+      for (let i = 0; i < levels; i++) steps = `[{ when: { platform: ios }, steps: ${steps} }]`;
+      return `steps: ${steps}\n`;
+    };
+
+    let step = parseFlow(nestedWhens(20)).steps[0];
+    let depth = 0;
+    while (step.kind === "when") {
+      depth++;
+      step = step.steps[0];
+    }
+    expect(depth).toBe(20);
+    expect(step).toEqual({ kind: "echo", message: "deepest" });
+
+    // 21 levels is plain over-deep YAML, not a cycle, so it must still land as
+    // the structured parse error rather than escaping as a RangeError.
+    let thrown: unknown;
+    try {
+      parseFlow(nestedWhens(21));
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error); // a raised cap would leave this unset
+    expect((thrown as Error).message).toContain("block directives nest deeper than 20 levels");
+    expect(getFailureSignal(thrown)?.error_code).toBe(FAILURE_CODES.FLOW_ENTRY_UNRECOGNIZED);
   });
 
   it("rejects a per-step optional key, pointing at when:", () => {
