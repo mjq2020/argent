@@ -1450,7 +1450,7 @@ const SELECTOR_KEYS: readonly string[] = [
 /**
  * Total number of scopes one selector may carry, counted across its whole
  * relation TREE rather than down a single branch — the selector analog of
- * MAX_WHEN_DEPTH. A size bound, not a depth bound, because each level can open
+ * MAX_BLOCK_DEPTH. A size bound, not a depth bound, because each level can open
  * three branches: capping depth alone still admits 3^depth scopes, and the
  * runner's loose-alternative expansion is exponential in the number of
  * bare-string scopes (`selectorAlternatives`), so a few hundred bytes of YAML
