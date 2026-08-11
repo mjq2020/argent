@@ -1750,6 +1750,11 @@ async function execSteps(state: ExecState, steps: FlowStep[], scope: StepScope):
     // The flow was resolved as needing no device, yet a step that acts on one
     // reached execution — the two decisions disagree. Report it as this step's
     // error and stop, rather than letting it fail obscurely further in.
+    // They cannot disagree today, nor for a future block directive whichever way
+    // stepRequiresDevice classifies it — flowRequiresDevice recurses through
+    // blockSteps, so no nesting hides a step: under `true` a device is resolved
+    // and `!state.device` is false; under `false` this guard's own
+    // stepRequiresDevice conjunct fails. The expansion below stays regardless.
     if (!state.device && stepRequiresDevice(state.registry, step)) {
       state.stopped = true;
       pushReport(state, {
