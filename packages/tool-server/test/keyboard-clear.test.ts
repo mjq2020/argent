@@ -736,7 +736,13 @@ describe("keyboard clear — Android (adb input)", () => {
     // refusal bypassed. Measured end to end 6/6: a 200-character field kept 72
     // characters. `describe` → tap → `keyboard` is the ordinary call order, so
     // asking the holder rather than racing it is the whole fix.
-    const registryWithDevtools = (getHierarchy: () => Promise<{ xml: string }>, live = true) =>
+    // Typed WITH the options argument so the call site's `clearCache` is visible
+    // to the assertions below — a zero-parameter stub makes it invisible, and
+    // `toHaveBeenCalledTimes` alone would hold nothing.
+    const registryWithDevtools = (
+      getHierarchy: (options?: { clearCache?: boolean }) => Promise<{ xml: string }>,
+      live = true
+    ) =>
       ({
         getServiceState: () => (live ? ServiceState.RUNNING : ServiceState.IDLE),
         resolveService: vi.fn(async () => ({ getHierarchy })),
@@ -757,6 +763,13 @@ describe("keyboard clear — Android (adb input)", () => {
       ).rejects.toThrow(/reports 200 characters/);
 
       expect(getHierarchy).toHaveBeenCalledTimes(1);
+      // `clearCache`, and not the blueprint's default: the helper caches
+      // accessibility nodes, so a `describe` → tap → `keyboard` run — the order
+      // this block calls the ordinary one — otherwise sizes the delete run from
+      // the text that `describe` read, before the tap changed it. That
+      // under-deletes a field whose value moved on, which is the truncation the
+      // measurement exists to prevent.
+      expect(getHierarchy).toHaveBeenCalledWith({ clearCache: true });
       expect(adbExecOutBinary).not.toHaveBeenCalled();
     });
 
