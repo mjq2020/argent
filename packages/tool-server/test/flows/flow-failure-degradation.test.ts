@@ -31,7 +31,10 @@ import {
   type StepReport,
 } from "../../src/tools/flows/flow-run";
 import { serializeFlow } from "../../src/tools/flows/flow-utils";
-import type { FlowStepFailure } from "../../src/tools/flows/flow-failure";
+import {
+  FLOW_DIAGNOSTICS_BUDGET_MS,
+  type FlowStepFailure,
+} from "../../src/tools/flows/flow-failure";
 
 const DEVICE = "00000000-0000-0000-0000-0000000000ab"; // iOS UDID shape
 let tmpDir: string;
@@ -257,6 +260,139 @@ describe("cancellation", () => {
     expect(failure.tree).toBeUndefined();
     expectVerdict(result, { statuses: ["tool:error"], ok: false, errored: 1 });
   });
+});
+
+describe("the capture budget", () => {
+  /**
+   * A screenshot invoke that never returns on its own, so the capture is still
+   * running when {@link FLOW_DIAGNOSTICS_BUDGET_MS} expires. Released after the
+   * assertions so no promise or timer outlives the test.
+   */
+  function hangingScreenshot(): { registry: Registry; release: () => void } {
+    let release = (): void => {};
+    const registry = mockRegistry((id) => {
+      if (id !== "screenshot") return undefined;
+      return new Promise((resolve) => {
+        release = () => resolve({ ok: true });
+      });
+    });
+    return { registry, release: () => release() };
+  }
+
+  it("reports everything it assembled when the budget expires, not `capture-timeout`", async () => {
+    // The failure this pins: the timeout fallback used to throw the whole
+    // capture away and report `screen: unavailable — capture-timeout`, so the
+    // bigger and more confusing the screen, the less an operator got — and the
+    // report claimed the screen could not be read when it had been read in
+    // full. Everything computed before the overrun is now emitted instead.
+    currentFetch = () => ({
+      tree: screen([
+        n({ identifier: "checkout-btn", frame: { x: 0.1, y: 0.5, width: 0.8, height: 0.06 } }),
+      ]),
+      source: "native-devtools",
+    });
+    await writeFlow("budget-partial", {
+      executionPrerequisite: "",
+      steps: [
+        { kind: "assert", condition: "exists", selector: { identifier: "chekout-btn" } },
+        { kind: "wait", ms: 5 },
+      ],
+    });
+    const { registry, release } = hangingScreenshot();
+    try {
+      const result = await run("budget-partial", {
+        registry,
+        ctx: { artifacts: new ArtifactStore() },
+      });
+      const failure = singleFailure(result);
+
+      expect(failure.code).toBe("selector-not-found");
+      expect(failure.screen.state).toBe("available");
+      expect(failure.selector?.described).toContain("chekout-btn");
+      // The candidate ranking is the most expensive thing the capture does, so
+      // it is the thing most worth not discarding.
+      expect(failure.candidates[0]?.node.identifier).toBe("checkout-btn");
+      // The two slots the overrun genuinely cost — nothing pretends otherwise.
+      expect(failure.screenshot).toBeUndefined();
+      expectVerdict(result, FAILING_VERDICT);
+    } finally {
+      release();
+    }
+  }, 15_000);
+
+  it("still reports `capture-timeout` when nothing was assembled first", async () => {
+    // Overrunning inside the very first phase (the post-hoc tree read) leaves
+    // no partial to report, and the honest answer there IS "the screen could
+    // not be read in the time allowed".
+    currentFetch = () => new Promise<DescribeTreeData>(() => {});
+    const registry = mockRegistry((id) => {
+      if (id === "button") throw new Error("no such button");
+      return undefined;
+    });
+    await writeFlow("budget-nothing", {
+      executionPrerequisite: "",
+      steps: [
+        { kind: "tool", name: "button", args: { button: "back" } },
+        { kind: "wait", ms: 5 },
+      ],
+    });
+
+    const result = await run("budget-nothing", { registry });
+    const failure = singleFailure(result);
+
+    expect(failure.screen).toEqual({ state: "unavailable", reason: "capture-timeout" });
+    expect(failure.code).toBe("tool-step-failed");
+    expectVerdict(result, {
+      statuses: ["tool:error", "wait:skip"],
+      ok: false,
+      errored: 1,
+      skipped: 1,
+    });
+  }, 15_000);
+
+  it("never invokes `screenshot` after the budget has expired", async () => {
+    // The token's whole purpose, and previously dead code: past the deadline
+    // the run is tearing down (status bar restored, chromium instance killed),
+    // so a capture that kept going invoked `screenshot` against a device that
+    // was gone and registered artifacts nothing would ever reference — the
+    // store has no eviction.
+    //
+    // The post-hoc read is what overruns here, so the losing capture reaches
+    // the screenshot only AFTER the race has been decided against it.
+    currentFetch = () =>
+      new Promise<DescribeTreeData>((resolve) =>
+        setTimeout(() => resolve(HOME), FLOW_DIAGNOSTICS_BUDGET_MS + 200)
+      );
+    let screenshots = 0;
+    const registry = mockRegistry((id) => {
+      if (id === "button") throw new Error("no such button");
+      if (id === "screenshot") screenshots++;
+      return undefined;
+    });
+    await writeFlow("budget-no-orphan", {
+      executionPrerequisite: "",
+      steps: [
+        { kind: "tool", name: "button", args: { button: "back" } },
+        { kind: "wait", ms: 5 },
+      ],
+    });
+
+    const result = await run("budget-no-orphan", {
+      registry,
+      ctx: { artifacts: new ArtifactStore() },
+    });
+    // Let the losing capture run past the point it would have captured.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    expect(screenshots).toBe(0);
+    expect(singleFailure(result).screen.reason).toBe("capture-timeout");
+    expectVerdict(result, {
+      statuses: ["tool:error", "wait:skip"],
+      ok: false,
+      errored: 1,
+      skipped: 1,
+    });
+  }, 20_000);
 });
 
 describe("screenshot capture", () => {

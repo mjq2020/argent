@@ -282,6 +282,14 @@ function scorePass(node: DescribeNode, pass: RankPass): Scored | undefined {
 
 // ── Suggested selector ─────────────────────────────────────────────────────
 
+/** A candidate's proposed selector, before it has been checked against the tree. */
+interface Suggestion {
+  /** `deriveSelector`'s choice, kept so {@link resolvesToNode} can re-run it. */
+  derived: Selector;
+  /** The same selector spelled in flow YAML, scrubbed and JSON-compacted. */
+  yaml: string;
+}
+
 /**
  * The paste-able selector for a candidate row: `deriveSelector`'s stable
  * identifier/text/role choice, spelled in flow YAML by `selectorToYaml` and
@@ -289,33 +297,22 @@ function scorePass(node: DescribeNode, pass: RankPass): Scored | undefined {
  * straight into a `tap:` step and re-parses to the selector it was derived
  * from; a bare string stays a bare string.
  *
+ * Pure over the node — NO tree walk. That is what lets every ranked entry be
+ * spelled (which the dedupe needs) while only the rows actually offered pay
+ * for {@link resolvesToNode}; see the note on the dedupe loop in
+ * {@link rankCandidates}.
+ *
  * `selectorToYaml` THROWS on selectors flow YAML cannot represent. A candidate
  * without a suggestion is still a useful row (it names the element, its frame
  * and its flags), so an unrepresentable selector omits the field rather than
  * failing the ranking.
  */
-function suggestedSelectorYaml(
-  tree: DescribeNode,
+function suggestSelector(
   node: DescribeNode,
   scrub: (text: string) => string
-): string | undefined {
+): Suggestion | undefined {
   const derived = deriveSelector(node);
   if (derived === null) return undefined;
-  // RESOLVE IT BACK before offering it. Ranking scores one field at a time,
-  // but `deriveSelector` picks its own — a container scored 1.00 on its hoisted
-  // `subtreeText` ("Total $42.00") derives `{ text: "Total" }` from its label,
-  // and that selector resolves to the small caption elsewhere on screen, not to
-  // the row that was ranked. An LLM pastes the suggestion and taps the wrong
-  // element, which is worse than offering no suggestion at all. A visible node
-  // must be what `selectorToFrame` lands on (the exact path a `tap` takes); an
-  // invisible one, which no gesture can reach anyway, only has to be among the
-  // matches so an `exists`/`visible` assertion still gets a usable spelling.
-  if (isVisible(node)) {
-    const resolved = selectorToFrame(tree, derived);
-    if (resolved === undefined || !sameFrame(resolved, node.frame)) return undefined;
-  } else if (!findAll(tree, derived).includes(node)) {
-    return undefined;
-  }
   try {
     // Masked like every other projection of this node. `deriveSelector` returns
     // the node's own identifier/label/value — the exact strings `projectNode`
@@ -323,12 +320,39 @@ function suggestedSelectorYaml(
     // beside a suggestion quoting the credential in full, straight into the
     // model's context.
     const yaml = selectorToYaml(derived);
-    return typeof yaml === "string"
-      ? JSON.stringify(scrub(yaml))
-      : JSON.stringify(scrubStrings(yaml, scrub));
+    return {
+      derived,
+      yaml:
+        typeof yaml === "string"
+          ? JSON.stringify(scrub(yaml))
+          : JSON.stringify(scrubStrings(yaml, scrub)),
+    };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Whether the suggested selector RESOLVES BACK to the node it was derived
+ * from. Ranking scores one field at a time, but `deriveSelector` picks its own
+ * — a container scored 1.00 on its hoisted `subtreeText` ("Total $42.00")
+ * derives `{ text: "Total" }` from its label, and that selector resolves to the
+ * small caption elsewhere on screen, not to the row that was ranked. An LLM
+ * pastes the suggestion and taps the wrong element, which is worse than
+ * offering no suggestion at all. A visible node must be what `selectorToFrame`
+ * lands on (the exact path a `tap` takes); an invisible one, which no gesture
+ * can reach anyway, only has to be among the matches so an `exists`/`visible`
+ * assertion still gets a usable spelling.
+ *
+ * This is the O(nodes) half of a suggestion, so it is paid ONLY for the rows
+ * the caller is going to emit.
+ */
+function resolvesToNode(tree: DescribeNode, node: DescribeNode, derived: Selector): boolean {
+  if (isVisible(node)) {
+    const resolved = selectorToFrame(tree, derived);
+    return resolved !== undefined && sameFrame(resolved, node.frame);
+  }
+  return findAll(tree, derived).includes(node);
 }
 
 /** Mask every string inside a serializable selector, values not serialized text. */
@@ -469,24 +493,42 @@ export function rankCandidates(
   // Deduped BEFORE counting: `total` is the number of distinct suggestions, so
   // "5 of 23" cannot be inflated by a container/leaf pair proposing one thing
   // twice. Sorted first, so the row kept per key is the highest-ranked one.
+  //
+  // Only the CHEAP half of a suggestion runs here. Resolving every ranked
+  // entry back through the tree was O(ranked × nodes) of synchronous work for
+  // rows that were then thrown away by the `limit` slice below: an 11 000-node
+  // screen whose selector ranked every node spent ~4s inside this loop, could
+  // not be preempted by the capture's `Promise.race` budget, and so blew the
+  // 5s ceiling — losing the whole failure block on exactly the screens that
+  // need one most.
+  const scrub = opts.scrub ?? ((t) => t);
   const seen = new Set<string>();
-  const distinct: Array<Ranked & { selectorYaml?: string }> = [];
+  const distinct: Array<Ranked & { suggestion?: Suggestion }> = [];
   for (const entry of ranked) {
-    const selectorYaml = suggestedSelectorYaml(tree, entry.node, opts.scrub ?? ((t) => t));
-    const key = dedupeKey(selectorYaml, entry.node.frame);
+    const suggestion = suggestSelector(entry.node, scrub);
+    const key = dedupeKey(suggestion?.yaml, entry.node.frame);
     if (seen.has(key)) continue;
     seen.add(key);
-    distinct.push({ ...entry, ...(selectorYaml !== undefined ? { selectorYaml } : {}) });
+    distinct.push({ ...entry, ...(suggestion !== undefined ? { suggestion } : {}) });
   }
 
   const limit = opts.limit ?? FLOW_FAILURE_CANDIDATE_LIMIT;
-  const candidates = distinct.slice(0, Math.max(0, limit)).map((entry) => ({
-    node: projectNode(entry.node, opts.scrub),
-    score: entry.score,
-    basis: entry.basis,
-    ...(entry.selectorYaml !== undefined ? { selectorYaml: entry.selectorYaml } : {}),
-    ...(entry.note !== undefined ? { note: entry.note } : {}),
-  }));
+  const candidates = distinct.slice(0, Math.max(0, limit)).map((entry) => {
+    // The O(nodes) verification, paid once per OFFERED row rather than once
+    // per ranked one. A suggestion that does not resolve back is dropped, not
+    // the row: naming the element, its frame and its flags is still useful.
+    const offer =
+      entry.suggestion !== undefined && resolvesToNode(tree, entry.node, entry.suggestion.derived)
+        ? entry.suggestion.yaml
+        : undefined;
+    return {
+      node: projectNode(entry.node, opts.scrub),
+      score: entry.score,
+      basis: entry.basis,
+      ...(offer !== undefined ? { selectorYaml: offer } : {}),
+      ...(entry.note !== undefined ? { note: entry.note } : {}),
+    };
+  });
   return { candidates, total: distinct.length };
 }
 

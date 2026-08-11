@@ -155,7 +155,15 @@ async function withBudget<T>(
   // that had already torn down — invoking `screenshot` after the status bar was
   // restored and the chromium instance killed, and registering artifacts
   // nothing would ever reference (the store has no eviction).
-  const token: CaptureToken = { cancelled: false };
+  const deadline = Date.now() + ms;
+  const token: CaptureToken = {
+    cancelled: false,
+    // The CLOCK, not just the flag. A synchronous stretch (a tree walk) cannot
+    // be preempted, so the timer below does not fire until the loop frees —
+    // and a capture that checked only `cancelled` would sail past an expired
+    // budget into the very device calls the token exists to prevent.
+    expired: () => token.cancelled || Date.now() >= deadline,
+  };
   const work = start(token);
   work.catch(() => {});
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -179,7 +187,10 @@ async function withBudget<T>(
 
 /** Cooperative cancellation for the capture; see {@link withBudget}. */
 interface CaptureToken {
+  /** Set once the race has been decided against the capture. */
   cancelled: boolean;
+  /** Whether the capture has already lost — by the flag OR by the clock. */
+  expired: () => boolean;
 }
 
 /**
@@ -213,11 +224,27 @@ export async function attachFailureDiagnostics(
     const scrubbed = createSecretScrubber()(report.reason);
     if (scrubbed !== report.reason) report.reason = scrubbed;
   }
+  // What the capture has assembled SO FAR, published as it enriches. A capture
+  // that overruns its budget must not throw its diagnosis away: the screen,
+  // selector, expectation, observation and candidates are already computed and
+  // correct, and reporting `screen: unavailable — capture-timeout` about a
+  // screen that WAS read in full is the one failure direction that cannot be
+  // tolerated — the bigger and more confusing the screen, the likelier the
+  // overrun and the more an operator needs the block.
+  const partial: { failure?: FlowStepFailure } = {};
   try {
     report.failure = await withBudget(
-      (token) => buildFailure(env, report, meta, evidence, token),
+      (token) => buildFailure(env, report, meta, evidence, token, partial),
       FLOW_DIAGNOSTICS_BUDGET_MS,
-      () => baseFailure(report, meta, evidence, { state: "unavailable", reason: "capture-timeout" })
+      () =>
+        partial.failure !== undefined
+          ? // Trimmed synchronously: the budget the timeout skipped is still a
+            // budget, and an over-size payload rides every progress event.
+            trimToBudget(partial.failure).failure
+          : baseFailure(report, meta, evidence, {
+              state: "unavailable",
+              reason: "capture-timeout",
+            })
     );
   } catch {
     // Assembly itself broke. Emit the minimum honest payload rather than
@@ -511,10 +538,14 @@ async function registerTreeDump(
   env: DiagnosticsEnv,
   tree: DescribeNode,
   stem: string,
-  scrub: (t: string) => string
+  scrub: (t: string) => string,
+  token: CaptureToken
 ): Promise<ArtifactHandle | undefined> {
   const store = env.ctx?.artifacts;
   if (!store) return undefined;
+  // Past the budget the report is already being assembled from the partial, so
+  // this dump would register an artifact nothing will ever reference.
+  if (token.expired()) return undefined;
   try {
     const lines = flattenForReport(tree).map((node) => {
       const n = projectNode(node, scrub);
@@ -552,17 +583,23 @@ async function registerTreeDump(
  */
 async function captureScreenshot(
   env: DiagnosticsEnv,
-  report: LeafOutcome
+  report: LeafOutcome,
+  token: CaptureToken
 ): Promise<ArtifactHandle | undefined> {
   if (env.signal?.aborted) return undefined;
   if (!env.ctx?.artifacts) return undefined;
   // A snapshot failure already holds the exact image that was compared.
   // Capturing again would show a DIFFERENT screen than the one diffed, so the
   // existing handle is reused rather than the slot being left empty. Checked
-  // before the device guard below: reusing a handle needs no device.
+  // before the device and budget guards below: reusing a handle costs nothing
+  // and needs neither.
   if (report.artifacts?.current !== undefined) return report.artifacts.current;
   // Only the fresh capture below needs a device — a device-free run has none.
   if (!env.device) return undefined;
+  // The capture has already lost the race, so the run is tearing down: the
+  // status bar has been restored and the chromium instance killed. Invoking
+  // `screenshot` now either rejects or registers an orphan artifact.
+  if (token.expired()) return undefined;
   try {
     const shot = await invokeOnDevice({ ...env, device: env.device }, "screenshot", {
       scale: 1.0,
@@ -580,10 +617,15 @@ async function buildFailure(
   report: LeafOutcome,
   meta: { startedAt: number; ordinal: number },
   evidence: DirectiveEvidence | undefined,
-  token: CaptureToken
+  token: CaptureToken,
+  partial: { failure?: FlowStepFailure }
 ): Promise<FlowStepFailure> {
   const { screen, tree, scrub } = await resolveScreen(env, evidence, token);
   const failure = baseFailure(report, meta, evidence, screen);
+  // Published before the first enrichment and mutated IN PLACE from here on,
+  // so every slot filled below is visible to the timeout fallback the instant
+  // it lands. See the `partial` note in attachFailureDiagnostics.
+  partial.failure = failure;
 
   // The platform is what turns a launch / tree-source failure from a puzzle
   // into a diagnosis — "could not connect to native devtools" means something
@@ -661,14 +703,14 @@ async function buildFailure(
   }
 
   const stem = `step-${String(meta.ordinal).padStart(2, "0")}`;
-  const screenshot = await captureScreenshot(env, report);
+  const screenshot = await captureScreenshot(env, report, token);
   if (screenshot !== undefined) failure.screenshot = screenshot;
   if (tree !== undefined) {
-    const dump = await registerTreeDump(env, tree, stem, scrub);
+    const dump = await registerTreeDump(env, tree, stem, scrub, token);
     if (dump !== undefined) failure.tree = dump;
   }
 
-  return applyByteBudget(env, failure, stem);
+  return applyByteBudget(env, failure, stem, token);
 }
 
 const GESTURE_KINDS = new Set(["tap", "long-press", "type", "pinch", "rotate"]);
@@ -689,12 +731,56 @@ function isGestureKind(kind: string): boolean {
 async function applyByteBudget(
   env: DiagnosticsEnv,
   failure: FlowStepFailure,
-  stem: string
+  stem: string,
+  token: CaptureToken
 ): Promise<FlowStepFailure> {
-  const serialized = safeSize(failure);
-  if (serialized <= FLOW_FAILURE_BYTE_LIMIT) return failure;
+  const { failure: trimmed, omittedBytes, overflowed } = trimToBudget(failure);
+  if (!overflowed) return trimmed;
 
-  const full = failure;
+  const store = env.ctx?.artifacts;
+  // Past the budget the spill would register an artifact the report the caller
+  // is about to emit does not reference. `overflow` already says the detail
+  // was dropped, which stays honest without it.
+  if (store && !token.expired()) {
+    try {
+      const dir = await failureEvidenceDir();
+      const file = path.join(dir, `${stem}-failure-${randomUUID()}.json`);
+      await fs.writeFile(file, JSON.stringify(failure, null, 2), "utf8");
+      trimmed.overflow = {
+        omittedBytes,
+        artifact: await store.register(file, {
+          mimeType: "application/json",
+          filename: `${stem}-failure.json`,
+        }),
+      };
+    } catch {
+      // The report already says the detail was dropped; that is the honest
+      // outcome and must not be upgraded into a run failure.
+    }
+  }
+  return trimmed;
+}
+
+/**
+ * The SYNCHRONOUS half of {@link applyByteBudget}: shed until the payload fits.
+ * Split out so the capture-timeout fallback can apply the same budget to a
+ * partially-assembled failure without awaiting anything — the budget the
+ * timeout skipped is still a budget, and the payload rides every NDJSON
+ * progress event either way.
+ *
+ * Returns the input untouched (and `overflowed: false`) when it already fits,
+ * so the common case allocates nothing.
+ */
+function trimToBudget(failure: FlowStepFailure): {
+  failure: FlowStepFailure;
+  omittedBytes: number;
+  overflowed: boolean;
+} {
+  const serialized = safeSize(failure);
+  if (serialized <= FLOW_FAILURE_BYTE_LIMIT) {
+    return { failure, omittedBytes: 0, overflowed: false };
+  }
+
   const trimmed: FlowStepFailure = { ...failure };
   // Shed in increasing order of diagnostic value, RE-MEASURING after each step
   // rather than assuming the first cut was enough. Dropping only the element
@@ -725,26 +811,7 @@ async function applyByteBudget(
   }
   const omittedBytes = Math.max(0, serialized - safeSize(trimmed));
   trimmed.overflow = { omittedBytes };
-
-  const store = env.ctx?.artifacts;
-  if (store) {
-    try {
-      const dir = await failureEvidenceDir();
-      const file = path.join(dir, `${stem}-failure-${randomUUID()}.json`);
-      await fs.writeFile(file, JSON.stringify(full, null, 2), "utf8");
-      trimmed.overflow = {
-        omittedBytes,
-        artifact: await store.register(file, {
-          mimeType: "application/json",
-          filename: `${stem}-failure.json`,
-        }),
-      };
-    } catch {
-      // The report already says the detail was dropped; that is the honest
-      // outcome and must not be upgraded into a run failure.
-    }
-  }
-  return trimmed;
+  return { failure: trimmed, omittedBytes, overflowed: true };
 }
 
 function safeSize(value: unknown): number {
