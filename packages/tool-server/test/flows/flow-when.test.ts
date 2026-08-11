@@ -231,6 +231,40 @@ describe("when: parse/serialize", () => {
     expect(getFailureSignal(thrown)?.error_code).toBe(FAILURE_CODES.FLOW_ENTRY_UNRECOGNIZED);
   });
 
+  // The only pin on parseWhenStep's EARLY assertBlockDepth call: the cap itself
+  // outlives it (parseBlockSteps asserts again before recursing) and the cyclic
+  // alias above reports the depth error either way, so deleting the early call
+  // leaves the rest of the suite green while exactly these entries — at the cap
+  // and carrying a second defect — flip to the shallower check's message.
+  it.each([
+    ["an else branch", "when: { platform: ios }, else: 1, steps: [{ echo: x }]", "has no else"],
+    [
+      "a third sibling key",
+      "when: { platform: ios }, foo: 1, steps: [{ echo: x }]",
+      "takes exactly { when: <condition>, steps: [...] }",
+    ],
+    ["an unknown condition key", "when: { nope: X }, steps: [{ echo: x }]", "one condition key"],
+  ])(
+    "reports the depth, not %s, for the entry sitting at the cap",
+    (_defect, innermost, shallow) => {
+      // 20 wrappers occupy depths 0-19, so the defective entry is the one at 20.
+      let steps = `[{ ${innermost} }]`;
+      for (let i = 0; i < 20; i++) steps = `[{ when: { platform: ios }, steps: ${steps} }]`;
+
+      let thrown: unknown;
+      try {
+        parseFlow(`steps: ${steps}\n`);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toContain("block directives nest deeper than 20 levels");
+      // Not just "the depth error is in there": the shallower check must not be
+      // what answered, which is the whole difference the early call makes.
+      expect((thrown as Error).message).not.toContain(shallow);
+    }
+  );
+
   it("rejects a per-step optional key, pointing at when:", () => {
     // No silent drop: an ignored `optional: true` would leave a step the
     // author believes can't fail hard-stopping the flow.

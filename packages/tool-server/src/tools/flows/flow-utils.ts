@@ -2370,11 +2370,15 @@ const MAX_BLOCK_DEPTH = 20;
 
 /**
  * Guard a block directive's recursion depth. Called FIRST in a block's parse —
- * before its own key/shape checks — so a cyclic alias reports as a depth error
- * rather than surfacing whatever the cycle happens to make the shallower checks
- * say. That early call buys the error PRECEDENCE only, not the cap itself:
- * {@link parseBlockSteps} asserts again before it recurses, so forgetting the
- * early call costs a directive the precedence and nothing more.
+ * before its own key/shape checks — so an entry that has REACHED the cap
+ * reports the depth rather than its second defect: nest `when` to the cap and
+ * give the entry AT it an `else:`, a third sibling key, or an unknown condition
+ * key, and it reports the depth, not that check's message. (A cyclic alias is
+ * NOT that case — the same object repeats at every level, so a shape defect in
+ * it fires at depth 0 and a well-formed cycle reaches the cap with or without
+ * this call.) That early call buys the error PRECEDENCE only, not the cap
+ * itself: {@link parseBlockSteps} asserts again before it recurses, so
+ * forgetting the early call costs a directive the precedence and nothing more.
  */
 function assertBlockDepth(raw: unknown, depth: number): void {
   if (depth >= MAX_BLOCK_DEPTH) {
