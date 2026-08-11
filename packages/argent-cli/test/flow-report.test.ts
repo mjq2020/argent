@@ -139,6 +139,31 @@ describe("xmlEscape", () => {
 });
 
 describe("buildJUnitXml", () => {
+  it("clamps a rejection message like every other attribute here", () => {
+    // `incompleteMessage` is the transport error from a possibly-remote
+    // tool-server — the untrusted wire data this module's header says is
+    // "normalized ONCE, here". It was the one message attribute reaching
+    // `xmlEscape` without `wireText`, so a multi-line rejection put raw
+    // newlines and an unbounded string into a CI attribute.
+    const xml = buildJUnitXml(
+      {
+        flow: "b-checkout",
+        device: "",
+        ok: false,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        errored: 0,
+        steps: [],
+      },
+      { incompleteMessage: `unknown step kind "tapp"\n  at line 4\n${"x".repeat(2000)}` }
+    );
+    const message = /message="([^"]*)"/.exec(xml)?.[1] ?? "";
+    expect(message).toContain("unknown step kind");
+    expect(message).not.toContain("\n");
+    expect(message.length).toBeLessThan(400);
+  });
+
   it("maps each step to a testcase, excluding echo from the counters", () => {
     const xml = buildJUnitXml(mkReport(), { platform: "ios" });
     expect(xml).toBe(

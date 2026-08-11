@@ -314,6 +314,17 @@ export async function attachFailureDiagnostics(
       /* diagnostics must never change a verdict */
     }
   }
+  // Stamped LAST, on whichever payload the paths above produced. `typedSecret`
+  // is run state and never reaches the wire, so this marker is the only signal
+  // a renderer has that the run typed a credential — and the renderers use it
+  // to decline inlining a snapshot's OWN images, which no scrubber touches.
+  // Setting it inside `buildFailure` left it off the two payloads `baseFailure`
+  // produces alone (a capture-timeout with nothing assembled, and the catch
+  // above), so the guard failed open on exactly the slow, busy screens where
+  // the overrun is likeliest.
+  if (env.typedSecret === true && report.failure !== undefined) {
+    report.failure.data = { ...report.failure.data, screenshotOmitted: "secret-typed" };
+  }
 }
 
 /** The skeleton every failure shares — valid on its own when capture degrades. */
@@ -703,12 +714,6 @@ async function buildFailure(
   // no renderer can derive from the step alone. Omitted rather than faked for a
   // device-free run, which has no platform to report.
   if (env.device) failure.data = { ...failure.data, platform: env.device.platform };
-  // Say WHY the image is missing. Silence here is worse than useless on the MCP
-  // surface: an agent that sees no screenshot simply calls `screenshot` itself,
-  // which is the leak the omission exists to prevent.
-  if (env.typedSecret === true) {
-    failure.data = { ...failure.data, screenshotOmitted: "secret-typed" };
-  }
 
   if (evidence?.expected !== undefined) {
     // Flow-derived text, masked like `message`/`described`/`fields`, for the

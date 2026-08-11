@@ -538,6 +538,37 @@ describe("secret discipline", () => {
     expect(failure.tree?.mimeType).toBe("text/plain");
   });
 
+  it("marks the secret omission on EVERY payload, including a degraded one", async () => {
+    // `data.screenshotOmitted` is the only signal a renderer has that the run
+    // typed a secret — `typedSecret` is run state and never reaches the wire.
+    // Setting it inside `buildFailure` left it absent from the two payloads
+    // `baseFailure` produces alone (the capture-timeout fallback with nothing
+    // assembled, and the assembly-threw catch), so a snapshot failure on a
+    // slow screen shipped a payload that looked like an ordinary one — and the
+    // MCP renderer then inlined the snapshot's own image.
+    process.env[SECRET_ENV] = SECRET_VALUE;
+    // Overrun the whole capture inside the FIRST phase, so no partial exists.
+    currentFetch = () => new Promise<DescribeTreeData>(() => {});
+    // An `echo` latches the run's secret flag without needing a device read —
+    // the latch is a scan of the step itself, so any step carrying the marker
+    // sets it — and a `run:` to a missing fragment then fails FAST and with no
+    // tree of its own, which is what sends the assembler to the post-hoc read
+    // that never returns. A directive would instead hang on that same read.
+    await writeFlow("secret-degraded", {
+      executionPrerequisite: "",
+      steps: [
+        { kind: "echo", message: "signing in with {{secret:TESTPW}}" },
+        { kind: "run", flow: "not-on-disk" },
+      ],
+    });
+
+    const failure = singleFailure(await run("secret-degraded", { artifacts: new ArtifactStore() }));
+
+    expect(failure.screen.state).toBe("unavailable");
+    expect(failure.data?.screenshotOmitted).toBe("secret-typed");
+    expect(failure.screenshot).toBeUndefined();
+  }, 20_000);
+
   it("still captures a screenshot for a run that typed no secret", async () => {
     await writeFlow("no-secret-shot", {
       executionPrerequisite: "",

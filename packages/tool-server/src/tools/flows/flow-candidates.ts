@@ -396,6 +396,14 @@ function dedupeKey(selectorYaml: string | undefined, frame: DescribeFrame): stri
 
 // ── Ranking ────────────────────────────────────────────────────────────────
 
+/**
+ * How far past `limit` the emit loop may verify. Four rows considered per row
+ * offered is enough to see past a cluster of same-rectangle rows whose
+ * suggestions do not resolve, while keeping the work a constant multiple of
+ * the output rather than a function of the tree.
+ */
+const VERIFY_ALLOWANCE = 4;
+
 interface Ranked {
   node: DescribeNode;
   score: number;
@@ -430,14 +438,6 @@ interface Ranked {
  * suggestion survives verification — the emitted rows collapse (see the loop
  * below), the count does not.
  */
-/**
- * How far past `limit` the emit loop may verify. Four rows considered per row
- * offered is enough to see past a cluster of same-rectangle rows whose
- * suggestions do not resolve, while keeping the work a constant multiple of
- * the output rather than a function of the tree.
- */
-const VERIFY_ALLOWANCE = 4;
-
 export function rankCandidates(
   tree: DescribeNode,
   selector: FlowSelector,

@@ -629,6 +629,9 @@ interface JUnitMeta {
    * Why a suite with no steps failed — a flow the tool-server REJECTED before
    * it ran (bad YAML, an unknown step key) produces no report at all, and
    * "the run failed with no failing step" says nothing an operator can act on.
+   * Wire data like every other message here (it is the transport error from a
+   * possibly-remote server), so it goes through `wireText` before it lands in
+   * an attribute.
    */
   incompleteMessage?: string;
 }
@@ -767,7 +770,7 @@ function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; tot
   if (incomplete) {
     out.push(
       `    <error type="run-incomplete" message="${xmlEscape(
-        meta.incompleteMessage ??
+        wireText(meta.incompleteMessage) ??
           (report.aborted
             ? "run cancelled before it completed"
             : "the run failed with no failing step")
