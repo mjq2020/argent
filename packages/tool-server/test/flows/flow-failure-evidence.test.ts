@@ -208,6 +208,57 @@ describe("waitForCondition evidence tiers", () => {
     expect(failure.message).toMatch(/final poll could not read the UI tree/);
     expect(available(failure.screen).capturedAt).toBe("at-failure");
   });
+
+  it("tier 3 — a BLIND blip names the cause the evidence shows, not the blank read", async () => {
+    // The defect this pins: the determinate verdict was computed from the last
+    // read that merely SUCCEEDED, while the evidence beside it came from the
+    // last TRUSTED one. A blind read landing inside the dark-tail tolerance
+    // emptied the former and left the latter holding the element — so a text
+    // mismatch was classified `selector-not-found` ("fix your selector"), in a
+    // payload whose own `actual` reported the element and its text.
+    let firstReadAt: number | undefined;
+    currentFetch = () => {
+      firstReadAt ??= Date.now();
+      // Blank AND flagged degraded — the shape a read taken mid-navigation has.
+      if (Date.now() - firstReadAt >= 950) {
+        return { tree: screen([]), source: "native-devtools" as const, hint: "app is relaunching" };
+      }
+      return {
+        tree: screen([
+          n({
+            identifier: "banner",
+            label: "Loading",
+            frame: { x: 0.1, y: 0.1, width: 0.8, height: 0.1 },
+          }),
+        ]),
+        source: "native-devtools" as const,
+      };
+    };
+    await writeFlow("tier3-blind", {
+      executionPrerequisite: "",
+      steps: [
+        {
+          kind: "assert",
+          condition: "text",
+          selector: { identifier: "banner" },
+          expectedText: "Done",
+          textMatch: "equals",
+        },
+      ],
+    });
+
+    const failure = singleFailure(await run("tier3-blind"));
+
+    expect(failure.determinacy).toBe("determinate");
+    expect(failure.code).toBe("text-mismatch");
+    expect(failure.category).toBe("assertion");
+    // The whole point: code, message and observation describe ONE read.
+    expect(failure.message).toContain("Loading");
+    expect(failure.actual?.matchCount).toBe(1);
+    expect(failure.actual?.text).toBe("Loading");
+    // ...and the read that went blind is still counted, never hidden.
+    expect(failure.timing.attempts).toBeGreaterThan(failure.timing.trustedAttempts!);
+  });
 });
 
 // ── Which read the screen comes from ───────────────────────────────────────

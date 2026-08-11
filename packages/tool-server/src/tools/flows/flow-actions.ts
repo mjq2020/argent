@@ -1211,7 +1211,6 @@ async function waitForCondition(
 ): Promise<DirectiveOutcome> {
   const deadline = Date.now() + timeoutMs;
 
-  let lastMatches: ReturnType<typeof findAll> = [];
   let fetchError: string | undefined;
   let everMatched = false;
   // Evidence locals — hoisted out of the try purely so the post-loop verdict
@@ -1222,13 +1221,15 @@ async function waitForCondition(
   let lastTrustedTree: DescribeNode | undefined;
   let lastTrustedSource: DescribeSource | undefined;
   let lastTrustedScreen: { width: number; height: number } | undefined;
-  // Matches from the same TRUSTED read as `lastTrustedTree`. Distinct from
-  // `lastMatches`, which tracks the last read that merely SUCCEEDED — a blind
-  // (empty + degraded) read leaves `lastMatches` empty, and reporting that as
-  // the observation would tell an operator "0 elements matched" for a `hidden`
-  // failure whose actual diagnosis is "the element WAS there and we could not
-  // confirm it left". The prose still reads `lastMatches`; only the evidence
-  // uses this, so the tree and the counts always describe one same read.
+  // Matches from the same TRUSTED read as `lastTrustedTree`, and the ONLY match
+  // set that leaves this loop. A read that merely SUCCEEDED is not evidence: a
+  // blind (empty + degraded) read matches nothing, so narrating from it told an
+  // operator "0 elements matched" for a `hidden` failure whose diagnosis is "the
+  // element WAS there and we could not confirm it left", and classified a text
+  // mismatch as `selector-not-found` whenever the blind read landed inside the
+  // dark-tail tolerance. Every post-loop verdict — the code and the prose alike
+  // — is built from this, so the tree, the counts, the quoted text and the cause
+  // always describe one same read.
   let lastTrustedMatches: ReturnType<typeof findAll> = [];
   let trustedAttempts = 0;
   let attempts = 0;
@@ -1247,9 +1248,9 @@ async function waitForCondition(
     try {
       attempts++;
       const data = await fetchFlowTree(env.registry, env.device);
-      lastMatches = flowFindAll(data.tree, step.selector);
+      const matches = flowFindAll(data.tree, step.selector);
       fetchError = undefined;
-      everMatched ||= lastMatches.length > 0;
+      everMatched ||= matches.length > 0;
       const blind =
         data.tree.children.length === 0 && Boolean(data.hint || data.should_restart || everMatched);
       // One definition of the trust rule: the evidence tree is captured in the
@@ -1260,20 +1261,17 @@ async function waitForCondition(
         lastTrustedTree = data.tree;
         lastTrustedSource = data.source;
         lastTrustedScreen = data.screen;
-        lastTrustedMatches = lastMatches;
+        lastTrustedMatches = matches;
         trustedAttempts++;
       }
       lastReadTrusted = !blind;
-      if (
-        !blind &&
-        evaluateCondition(step.condition, step.expectedText, lastMatches, step.textMatch)
-      ) {
+      if (!blind && evaluateCondition(step.condition, step.expectedText, matches, step.textMatch)) {
         return { ok: true };
       }
     } catch (err) {
       fetchError = err instanceof Error ? err.message : String(err);
-      // A throw is as blind as an empty tree — `lastMatches` still holds the
-      // previous successful read, which must not pass for current evidence.
+      // A throw is as blind as an empty tree: it produced no matches at all, so
+      // it can neither satisfy the condition nor become the trusted evidence.
       lastReadTrusted = false;
     }
     if (Date.now() >= deadline) {
@@ -1406,12 +1404,21 @@ async function waitForCondition(
     !lastReadTrusted && fetchError
       ? ` (the final poll could not read the UI tree: ${fetchError})`
       : "";
+  // From the last TRUSTED read, never from `lastMatches`. On a trusted final
+  // read the two are the same object, so this only bites tier 3 — where a
+  // blind read inside the dark-tail tolerance leaves `lastMatches` empty while
+  // the element is still sitting in `lastTrustedMatches`. Verdicting off the
+  // blind read named the wrong cause: `selector-not-found` ("fix your
+  // selector") for a text mismatch, in an object whose own `actual` reported
+  // the element, its frame and its text one field away. `code` and `category`
+  // are what a CI dashboard groups by and what a repair loop branches on, so
+  // they cannot be built from a read the evidence beside them rejects.
   const verdict = assertVerdict(
     step.condition,
     step.selector,
     step.expectedText,
     step.textMatch,
-    lastMatches
+    lastTrustedMatches
   );
   return {
     ok: false,
