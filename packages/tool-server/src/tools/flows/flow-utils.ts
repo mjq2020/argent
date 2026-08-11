@@ -729,17 +729,28 @@ export type FlowFile = {
 /**
  * The literal child steps of a block directive, or undefined for a leaf step.
  *
- * The single predicate for "this step has authored children". The runner reads
- * it wherever a block does NOT execute — a hard stop, a device-free flow, a
- * cancellation, an unmet guard — to expand the block's steps as skip lines, so
- * a report keeps one line per authored step no matter where the run ended, and
- * once more in the upload preflight's walk, where a block it cannot see hides a
- * nested `run:`/`snapshot` from validation. Five sites asked `kind === "when"`
- * directly before this existed; a second block directive would have had to
- * remember all five, and a forgotten one drops a whole block from the report —
- * or from the preflight — silently. Now it is one case here — and it is the
- * same case the PARSER exempts from the single-key sibling check, because the
- * kinds come from {@link BLOCK_DIRECTIVE_KEYS} rather than being restated.
+ * The single predicate for "this step has authored children", read at six
+ * sites. Four expand a block that will NOT execute into skip lines, so a report
+ * keeps one line per authored step no matter where the run ended: `execSteps`'
+ * three gates — a hard stop, a device-free flow, a cancellation — plus
+ * `reportBlockSkipped` recursing into a nested block. (A guard-unmet `when`
+ * reaches those same skip lines by another route: `execWhenStep` has the block
+ * in hand and passes `step.steps` straight to `reportBlockSkipped`.) The fifth
+ * is the upload preflight's walk, where a block it cannot see hides a nested
+ * `run:`/`snapshot` from validation. The sixth, `flowRequiresDevice`
+ * (flow-device.ts), reads children not to skip them but to resolve the flow's
+ * device requirement from a block's body — the guard against a later block
+ * directive whose header reads nothing off the device, and a no-op while
+ * `when`, whose header already classifies device-requiring, is the only block
+ * kind.
+ *
+ * Five sites asked `kind === "when"` directly before this existed — the five in
+ * the runner; `flowRequiresDevice`'s walk arrived after the predicate and never
+ * had to. A second block directive would have had to remember all five,
+ * and a forgotten one drops a whole block from the report — or from the
+ * preflight — silently. Now it is one case here — and it is the same case the
+ * PARSER exempts from the single-key sibling check, because the kinds come from
+ * {@link BLOCK_DIRECTIVE_KEYS} rather than being restated.
  */
 export function blockSteps(step: FlowStep): FlowStep[] | undefined {
   return isBlockStep(step) ? step.steps : undefined;
