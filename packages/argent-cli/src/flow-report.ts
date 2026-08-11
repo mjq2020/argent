@@ -102,9 +102,27 @@ export function artifactPath(value: unknown): string | undefined {
   return wireText(handle.hostPath) ?? wireText(handle.filename);
 }
 
-/** `.argent/flows/<name>.yaml` — where every flow and fragment lives. */
-function flowFilePath(flow: unknown): string | undefined {
+/**
+ * Where a flow's file is, for the block header and the `argent.flowFile`
+ * property.
+ *
+ * `resolved` is the path the CLI actually ran, and it WINS whenever the failing
+ * step belongs to that flow — deriving `.argent/flows/<name>.yaml` from the
+ * name instead printed a location that does not exist for the two documented
+ * invocations that don't live there: an out-of-tree flow
+ * (`~/shared-flows/checkout.yaml`) and every nested flow of a recursive
+ * directory run (`.argent/flows/batch/two.yaml` → `.argent/flows/two.yaml`).
+ *
+ * A step from a NESTED flow keeps the derived guess: the caller's resolved path
+ * is the ROOT flow's file, which is not where that fragment lives, and the
+ * convention directory is the better of two guesses.
+ */
+function flowFilePath(flow: unknown, resolved?: string): string | undefined {
   const name = wireText(flow, 128);
+  if (resolved !== undefined) {
+    const path = wireText(resolved, 256);
+    if (path !== undefined) return path;
+  }
   if (!name || !SAFE_FLOW_NAME.test(name)) return undefined;
   return `.argent/flows/${name}.yaml`;
 }
@@ -344,11 +362,12 @@ function normalizeReads(raw: unknown): string | undefined {
 /**
  * Fold an untrusted `failure` into the slots the renderers print. `fallback`
  * supplies the flow name for the derived source path when the wire object
- * carries none.
+ * carries none, and `flowFile` the path the CLI actually ran — see
+ * {@link flowFilePath}.
  */
 export function normalizeFailure(
   raw: unknown,
-  fallback: { flow?: string; device?: string } = {}
+  fallback: { flow?: string; device?: string; flowFile?: string } = {}
 ): NormalizedFailure | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const f = raw as Record<string, unknown>;
@@ -445,7 +464,13 @@ export function normalizeFailure(
   }
 
   const source = (step.source ?? {}) as Record<string, unknown>;
-  const file = wireText(source.file, 256) ?? flowFilePath(step.flow ?? fallback.flow);
+  // The resolved path applies only to the ROOT flow's own steps: a nested
+  // fragment's step names a different file, which the caller does not know.
+  const stepFlow = wireText(step.flow, 128);
+  const ofRootFlow = stepFlow === undefined || stepFlow === wireText(fallback.flow, 128);
+  const file =
+    wireText(source.file, 256) ??
+    flowFilePath(stepFlow ?? fallback.flow, ofRootFlow ? fallback.flowFile : undefined);
   if (file !== undefined) {
     const line = wireCount(source.line);
     out.sourceFile = line !== undefined && line > 0 ? `${file}:${line}` : file;
@@ -758,7 +783,11 @@ function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; tot
         (failures + errors > 0 ? "run stopped at the first failure" : undefined);
       out.push(`      <skipped${attrs([["message", reason]])}/>`);
     } else {
-      const f = normalizeFailure(s.failure, { flow: s.flow ?? report.flow, device: report.device });
+      const f = normalizeFailure(s.failure, {
+        flow: s.flow ?? report.flow,
+        device: report.device,
+        flowFile: meta.flowFile,
+      });
       const tag = s.status === "error" ? "error" : "failure";
       const detail = junitDetailLines(s, f).join("\n");
       const head = `      <${tag}${attrs([

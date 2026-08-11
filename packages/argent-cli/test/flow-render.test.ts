@@ -646,6 +646,51 @@ describe("renderFailures", () => {
     expect(out).toContain("     screenshot: (unavailable — the device did not return an image)");
   });
 
+  it("names the flow file the CLI actually ran, not one derived from the name", () => {
+    // `.argent/flows/<name>.yaml` is a guess that is WRONG for both documented
+    // invocations that don't live there: an out-of-tree flow, and every nested
+    // flow of a recursive directory run.
+    const failure: FlowStepFailure = {
+      code: "selector-not-found",
+      category: "selector",
+      determinacy: "determinate",
+      message: 'no element matched selector id="cta"',
+      step: { kind: "assert", flow: "checkout" },
+      screen: { state: "available", source: "ax", capturedAt: "at-failure", elementCount: 3 },
+      candidates: [],
+      candidateCount: 0,
+      timing: { startedAt: 1, durationMs: 1000 },
+    };
+    const resolved = "/home/me/shared-flows/checkout.yaml";
+
+    expect(renderFailures(failingReport(failure), resolved).join("\n")).toContain(`@ ${resolved}`);
+    // With no resolved path the derived guess still stands in.
+    expect(renderFailures(failingReport(failure)).join("\n")).toContain(
+      "@ .argent/flows/checkout.yaml"
+    );
+  });
+
+  it("keeps the derived path for a step from a NESTED flow", () => {
+    // The caller's resolved path is the ROOT flow's file; a fragment's step
+    // names a different one the CLI has no way to know.
+    const out = renderFailures(
+      failingReport({
+        code: "selector-not-found",
+        category: "selector",
+        determinacy: "determinate",
+        message: 'no element matched selector id="cta"',
+        step: { kind: "assert", flow: "login" },
+        screen: { state: "available", source: "ax", capturedAt: "at-failure", elementCount: 3 },
+        candidates: [],
+        candidateCount: 0,
+        timing: { startedAt: 1, durationMs: 1000 },
+      }),
+      "/home/me/shared-flows/checkout.yaml"
+    ).join("\n");
+    expect(out).toContain("@ .argent/flows/login.yaml");
+    expect(out).not.toContain("shared-flows");
+  });
+
   it("says WHY there is no screenshot when the run typed a secret", () => {
     // Pixels are the one projection the report's scrubber cannot reach, so the
     // capture is declined outright. A silently missing line reads as a broken

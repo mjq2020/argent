@@ -637,7 +637,7 @@ function renderFailureBlock(
  * which is what lets one renderer serve a missing selector, a text mismatch, a
  * snapshot diff, a failed launch and an unreadable screen.
  */
-export function renderFailures(report: FlowReport): string[] {
+export function renderFailures(report: FlowReport, flowFile?: string): string[] {
   const steps = Array.isArray(report.steps) ? report.steps : [];
   const ordinals = new Map<number, number>();
   let n = 0;
@@ -649,7 +649,11 @@ export function renderFailures(report: FlowReport): string[] {
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i]!;
     if (!s.failure || !ordinals.has(i)) continue;
-    const f = normalizeFailure(s.failure, { flow: s.flow ?? report.flow, device: report.device });
+    const f = normalizeFailure(s.failure, {
+      flow: s.flow ?? report.flow,
+      device: report.device,
+      flowFile,
+    });
     if (!f) continue;
     blocks.push(renderFailureBlock(report, steps, ordinals, i, f));
   }
@@ -1189,7 +1193,7 @@ export function exitAfterFlush(
   ).then(() => process.exit(code));
 }
 
-export function renderReport(report: FlowReport): string {
+export function renderReport(report: FlowReport, flowFile?: string): string {
   const lines: string[] = [];
   lines.push(`Flow "${report.flow}"${report.device ? ` on ${report.device}` : ""}`);
   // Remind the operator what the flow assumes was already set up.
@@ -1216,7 +1220,7 @@ export function renderReport(report: FlowReport): string {
     }
   }
   // After the step list, before the summary — the verdict stays the last line.
-  lines.push(...renderFailures(report));
+  lines.push(...renderFailures(report, flowFile));
   lines.push(`\n${renderSummary(report)}`);
   return lines.join("\n");
 }
@@ -1572,7 +1576,7 @@ async function runFlowDirectory(
       // the candidates, the screen and the paths to the evidence
       // `exportAndResolveArtifacts` has ALREADY written, which the one-line
       // reason above says nothing about.
-      for (const line of renderFailures(report)) console.log(line);
+      for (const line of renderFailures(report, path.join(dir, rel))) console.log(line);
       console.log(`  ${renderSummary(report, { withDevice: true })}`);
     }
   }
@@ -2000,16 +2004,18 @@ export async function flow(argv: string[], options: FlowCommandOptions): Promise
     // and the summary.
     if (report.executionPrerequisite) console.log(`  assumes: ${report.executionPrerequisite}`);
     for (const line of renderArtifactLines(report)) console.log(line);
-    for (const line of renderFailures(report)) console.log(line);
+    for (const line of renderFailures(report, flowPath)) console.log(line);
     console.log(`\n${renderSummary(report, { withDevice: true })}`);
   } else {
-    console.log(renderReport(report));
+    console.log(renderReport(report, flowPath));
   }
 
   await writeReporterFiles(
     // `--platform` is the only run metadata the report itself doesn't carry
-    // (the runner reports the resolved device, not the platform it narrowed to).
-    [{ report, meta: { platform: args.platform } }],
+    // (the runner reports the resolved device, not the platform it narrowed to);
+    // `flowFile` is the path this invocation actually resolved, which the wire
+    // report's `flow` NAME cannot be turned back into.
+    [{ report, meta: { platform: args.platform, flowFile: flowPath } }],
     args.reporter
   );
 
