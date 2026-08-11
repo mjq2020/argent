@@ -761,7 +761,7 @@ export function blockSteps(step: FlowStep): FlowStep[] | undefined {
  * what makes the list load-bearing: {@link blockSteps}' `.steps` typechecks
  * only while EVERY listed kind's step type carries children.
  */
-function isBlockStep(step: FlowStep): step is Extract<FlowStep, { kind: BlockDirectiveKind }> {
+export function isBlockStep(step: FlowStep): step is BlockStep {
   return isBlockDirectiveKey(step.kind);
 }
 
@@ -2024,6 +2024,9 @@ export const BLOCK_DIRECTIVE_KEYS = ["when"] as const satisfies readonly FlowSte
 
 /** The step kinds {@link BLOCK_DIRECTIVE_KEYS} names. */
 type BlockDirectiveKind = (typeof BLOCK_DIRECTIVE_KEYS)[number];
+
+/** The step union those kinds select - what {@link isBlockStep} narrows to. */
+export type BlockStep = Extract<FlowStep, { kind: BlockDirectiveKind }>;
 
 /** The child-bearing step kinds {@link BLOCK_DIRECTIVE_KEYS} fails to list. */
 type UnregisteredBlockKind = Exclude<

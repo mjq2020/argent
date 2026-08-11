@@ -29,8 +29,10 @@ import {
   describeSelector,
   describeTextExpectation,
   getFlowPath,
+  isBlockStep,
   parseFlow,
   runTargetName,
+  type BlockStep,
   type FlowFile,
   type FlowSelector,
   type FlowStep,
@@ -1791,8 +1793,8 @@ async function execSteps(state: ExecState, steps: FlowStep[], scope: StepScope):
       await execRunStep(state, step, scope);
       continue;
     }
-    if (step.kind === "when") {
-      await execWhenStep(state, step, scope);
+    if (isBlockStep(step)) {
+      await execBlockStep(state, step, scope);
       continue;
     }
 
@@ -1837,6 +1839,26 @@ function reportBlockSkipped(
     });
     const inner = blockSteps(step);
     if (inner) reportBlockSkipped(state, inner, childScope(scope), reason);
+  }
+}
+
+/**
+ * Dispatch a block directive to its executor. The `never` default arm is the
+ * run-time site a kind registered in BLOCK_DIRECTIVE_KEYS cannot miss: an
+ * unhandled registered kind fails tsc here instead of falling through to
+ * execLeafStep as an "unsupported step kind" error that skips the block's
+ * children without a report. Binds `step.kind` rather than `step` - while the
+ * registry has one entry BlockStep is not a union, so only the discriminant
+ * narrows to `never`.
+ */
+async function execBlockStep(state: ExecState, step: BlockStep, scope: StepScope): Promise<void> {
+  switch (step.kind) {
+    case "when":
+      return execWhenStep(state, step, scope);
+    default: {
+      const unhandled: never = step.kind;
+      void unhandled;
+    }
   }
 }
 
