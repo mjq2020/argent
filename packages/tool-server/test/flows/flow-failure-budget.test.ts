@@ -418,6 +418,39 @@ describe("secret discipline", () => {
     expect(JSON.stringify(failure.selector?.alternatives)).toContain("«secret:TESTPW»");
   });
 
+  it("masks a secret that comes from a secrets FILE, not just the environment", async () => {
+    // The defect this pins: the scrubber used to read `ARGENT_SECRET_*` off
+    // `process.env` alone, while `{{secret:NAME}}` resolves through the whole
+    // four-source chain — so the placement `secretPlacementAdvice` recommends
+    // FIRST (`~/.argent/secrets.env`) was the one placement the report leaked.
+    // No `ARGENT_SECRET_*` variable is set here; the value exists only on disk.
+    const previousHome = process.env.HOME;
+    await fs.mkdir(path.join(tmpDir, ".argent"), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, ".argent", "secrets.env"), `TESTPW=${SECRET_VALUE}\n`);
+    process.env.HOME = tmpDir;
+    try {
+      currentFetch = () => ({
+        tree: screen([
+          n({
+            identifier: "echoed",
+            label: `signed in as ${SECRET_VALUE}`,
+            frame: { x: 0.1, y: 0.1, width: 0.8, height: 0.05 },
+          }),
+        ]),
+        source: "native-devtools",
+      });
+      await missingAssert("secret-from-file");
+
+      const failure = singleFailure(await run("secret-from-file"));
+
+      expect(JSON.stringify(failure)).not.toContain(SECRET_VALUE);
+      expect(available(failure.screen).elements[0]!.label).toBe("signed in as «secret:TESTPW»");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
   it("leaves the report alone when no secret is exposed", async () => {
     currentFetch = () => ({
       tree: screen([

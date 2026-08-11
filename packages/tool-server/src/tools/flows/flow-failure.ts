@@ -20,6 +20,11 @@
  * (`selector-not-found: no visible element matched …`).
  */
 
+import {
+  secretSources,
+  type SecretSource,
+  type SecretSourceOptions,
+} from "@argent/configuration-core";
 import type { DescribeFrame, DescribeNode, DescribeSource } from "../describe/contract";
 import { describeNodeFlags, hasContent } from "../describe/format-tree";
 import type { ArtifactHandle } from "../../artifacts";
@@ -494,8 +499,8 @@ export function projectNode(
 export const isActionableNode = hasContent;
 
 /**
- * A scrubber that masks every exposed `ARGENT_SECRET_*` VALUE wherever it
- * appears in report text.
+ * A scrubber that masks every exposed secret VALUE wherever it appears in
+ * report text.
  *
  * The runner itself never resolves a `{{secret:NAME}}` placeholder — that
  * happens inside the keyboard tool, the last hop before the keystrokes leave
@@ -505,32 +510,58 @@ export const isActionableNode = hasContent;
  * that could have been typed, and runs BEFORE truncation — truncating first can
  * leave a partial secret in the output.
  *
+ * "Complete" means {@link secretSources} — the SAME four-source chain
+ * `resolveSecretPlaceholders` resolves through, read the same way, with no
+ * options of its own so the two cannot diverge on scope. The env prefix alone
+ * is not that set: `.argent/secrets.env` (project and global) and the
+ * `ARGENT_SECRET_`-prefixed keys of `.env`/`.env.local` all type onto the
+ * device, and the dedicated files are the placement the unknown-secret error
+ * ADVISES first — so building from `process.env` masked the one setup nobody
+ * uses and missed the one the tool recommends.
+ *
+ * Every value every source exposes is masked, not only the first-match one a
+ * lookup would return: a name shadowed later in the chain is still a credential
+ * on the host, and masking a value that was never typed costs the report
+ * nothing while missing one that was is the whole defect above.
+ *
  * Values shorter than {@link MIN_SCRUBBABLE_SECRET} are skipped: a one- or
  * two-character secret would mask half the screen and destroy the report
  * without protecting anything meaningful.
  */
 const MIN_SCRUBBABLE_SECRET = 4;
-const SECRET_ENV_PREFIX = "ARGENT_SECRET_";
 
-export function createSecretScrubber(
-  env: NodeJS.ProcessEnv = process.env
-): (text: string) => string {
-  const secrets = Object.entries(env)
-    .filter(
-      (entry): entry is [string, string] =>
-        entry[0].startsWith(SECRET_ENV_PREFIX) &&
-        typeof entry[1] === "string" &&
-        entry[1].length >= MIN_SCRUBBABLE_SECRET
-    )
-    // Longest first, so a secret that contains another is masked whole rather
-    // than being partially rewritten by the shorter one.
-    .sort((a, b) => b[1].length - a[1].length);
+export function createSecretScrubber(options: SecretSourceOptions = {}): (text: string) => string {
+  // Fail-soft like the rest of the assembler: an unreadable source chain must
+  // degrade to "no mask", never take a failure report down. (`secretSources`
+  // already swallows per-file errors; this covers the discovery walk itself.)
+  let sources: SecretSource[];
+  try {
+    sources = secretSources(options);
+  } catch {
+    return (text) => text;
+  }
+  const secrets: Array<[name: string, value: string]> = [];
+  const seen = new Set<string>();
+  for (const source of sources) {
+    for (const [name, value] of source.values) {
+      if (value.length < MIN_SCRUBBABLE_SECRET) continue;
+      // Keyed by the PAIR: the same value under two names is masked once, while
+      // one name holding different values across sources masks both.
+      const key = `${name} ${value}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      secrets.push([name, value]);
+    }
+  }
   if (secrets.length === 0) return (text) => text;
+  // Longest first, so a secret that contains another is masked whole rather
+  // than being partially rewritten by the shorter one.
+  secrets.sort((a, b) => b[1].length - a[1].length);
   return (text) => {
     let out = text;
-    for (const [key, value] of secrets) {
+    for (const [name, value] of secrets) {
       if (!out.includes(value)) continue;
-      out = out.split(value).join(`«secret:${key.slice(SECRET_ENV_PREFIX.length)}»`);
+      out = out.split(value).join(`«secret:${name}»`);
     }
     return out;
   };
