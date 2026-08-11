@@ -186,11 +186,13 @@ describe("when: parse/serialize", () => {
       thrown = err;
     }
     // The whole message is pinned, not only the "nest deeper than" half: the
-    // cap covers every block directive rather than when: alone, and the alias
-    // hint is what points the author at the actual mistake.
+    // prefix names the registered block directives (a literal on purpose - it
+    // must be updated consciously when a new directive registers, not drift
+    // with the source), and the alias hint is what points the author at the
+    // actual mistake.
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).message).toContain(
-      "block directives nest deeper than 20 levels — check for a cyclic YAML alias (`steps: &s … steps: *s`)"
+      "`when:` blocks nest deeper than 20 levels — check for a cyclic YAML alias (`steps: &s … steps: *s`)"
     );
     // A raw RangeError would carry no signal — this is what makes it structured.
     const signal = getFailureSignal(thrown);
@@ -227,7 +229,7 @@ describe("when: parse/serialize", () => {
       thrown = err;
     }
     expect(thrown).toBeInstanceOf(Error); // a raised cap would leave this unset
-    expect((thrown as Error).message).toContain("block directives nest deeper than 20 levels");
+    expect((thrown as Error).message).toContain("`when:` blocks nest deeper than 20 levels");
     expect(getFailureSignal(thrown)?.error_code).toBe(FAILURE_CODES.FLOW_ENTRY_UNRECOGNIZED);
   });
 
@@ -258,7 +260,7 @@ describe("when: parse/serialize", () => {
         thrown = err;
       }
       expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toContain("block directives nest deeper than 20 levels");
+      expect((thrown as Error).message).toContain("`when:` blocks nest deeper than 20 levels");
       // Not just "the depth error is in there": the shallower check must not be
       // what answered, which is the whole difference the early call makes.
       expect((thrown as Error).message).not.toContain(shallow);
