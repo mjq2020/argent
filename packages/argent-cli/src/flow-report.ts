@@ -42,13 +42,15 @@ const SAFE_FLOW_NAME = /^[A-Za-z0-9_-]+$/;
  * Coerce an untrusted wire value to a single-line, bounded display string.
  * Control characters (newlines included) collapse to spaces: without that a
  * remote server could inject lines into the failure block, or into a JUnit
- * attribute. Returns undefined for anything that isn't a non-empty string, so
+ * attribute. The two BMP noncharacters go the same way — they render as
+ * garbage in a terminal and are illegal in XML, so a display string must not
+ * carry one. Returns undefined for anything that isn't a non-empty string, so
  * every call site can use presence as the "render this slot" test.
  */
 export function wireText(value: unknown, limit = MAX_WIRE_FIELD_CHARS): string | undefined {
   if (typeof value !== "string") return undefined;
   // eslint-disable-next-line no-control-regex -- collapsing control characters is the point
-  const flat = value.replace(/[\u0000-\u001F\u007F\u2028\u2029]/g, " ").trim();
+  const flat = value.replace(/[\u0000-\u001F\u007F\u2028\u2029\uFFFE\uFFFF]/g, " ").trim();
   if (flat === "") return undefined;
   return flat.length <= limit ? flat : `${flat.slice(0, limit - 1)}…`;
 }
@@ -544,17 +546,24 @@ export function parseReporterSpec(spec: string): ReporterSpec {
 // ── JUnit XML ────────────────────────────────────────────────────────────
 
 /**
- * XML entity escaping plus a control-character strip. The strip is the part
- * every hand-rolled escaper forgets: `text` reaches this file straight off a
- * device's accessibility tree, and a stray `\x00`/`\x1b` makes the whole
- * document unparseable — which in CI means the reporter silently produces no
- * annotations at all. Tab/LF/CR are legal XML 1.0 characters and survive.
+ * XML entity escaping, plus a strip of every character XML 1.0 forbids
+ * ANYWHERE in a document — escaped or not, since no spelling makes them legal.
+ * The strip is the part every hand-rolled escaper forgets: `text` reaches this
+ * file straight off a device's accessibility tree, and ONE such character makes
+ * the whole document unparseable, which in CI means the reporter silently
+ * produces no annotations at all out of a file that exists and looks plausible.
+ *
+ * The `Char` production excludes two classes, and both are stripped here: the
+ * C0 controls (tab/LF/CR are legal and survive) and the BMP noncharacters
+ * U+FFFE/U+FFFF, which the control range alone missed — a mis-decoded UTF-16
+ * BOM lands as U+FFFE exactly that way. Unpaired surrogates need no branch: the
+ * UTF-8 encoder that writes the file replaces each with U+FFFD, which is legal.
  */
 export function xmlEscape(value: string): string {
   return (
     value
       // eslint-disable-next-line no-control-regex -- stripping these is the point
-      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")

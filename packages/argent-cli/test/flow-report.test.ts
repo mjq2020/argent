@@ -123,6 +123,19 @@ describe("xmlEscape", () => {
     // Tab / LF / CR are legal XML 1.0 characters and survive verbatim.
     expect(xmlEscape("a\tb\nc\rd")).toBe("a\tb\nc\rd");
   });
+
+  it("strips the BMP noncharacters the control range misses", () => {
+    // U+FFFE / U+FFFF are outside the `Char` production, so no spelling makes
+    // them legal — one in an on-screen label made every parser reject the whole
+    // document while the reporter reported nothing wrong. A mis-decoded UTF-16
+    // BOM lands as U+FFFE exactly this way.
+    expect(xmlEscape("ready\uFFFF now")).toBe("ready now");
+    expect(xmlEscape("\uFFFEbom")).toBe("bom");
+    // U+FFFD (the replacement character) and the astral noncharacters ARE
+    // legal, and must not be collateral damage.
+    expect(xmlEscape("a\uFFFDb")).toBe("a\uFFFDb");
+    expect(xmlEscape("a\u{1FFFF}b")).toBe("a\u{1FFFF}b");
+  });
 });
 
 describe("buildJUnitXml", () => {
