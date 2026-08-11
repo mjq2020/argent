@@ -1388,6 +1388,58 @@ describe("argent flow run", () => {
     expect(errs.join("\n")).toContain('"checkout" did not produce a run report');
   });
 
+  it("renders the live-tail branch a streaming tool-server actually takes", async () => {
+    // `callTool` never invoked `onProgress` anywhere in this file, so `liveSteps`
+    // was always 0 and the buffered renderer owned every assertion — the branch
+    // a modern streaming server takes was unreached. Drive it: emit the steps
+    // live, then hand back the final report.
+    const finalReport = report({
+      ok: false,
+      passed: 1,
+      failed: 1,
+      steps: [
+        { index: 0, kind: "launch", status: "pass", durationMs: 3100 },
+        {
+          index: 1,
+          kind: "assert",
+          status: "fail",
+          target: "visible id=cta",
+          reason: 'no element matched selector id="cta"',
+          failure: {
+            code: "selector-not-found",
+            determinacy: "indeterminate",
+            message: 'no element matched selector id="cta"',
+            screen: { state: "unavailable", reason: "never-readable" },
+            candidates: [],
+            candidateCount: 0,
+          },
+        },
+      ],
+    });
+    toolsClientMock.callTool.mockImplementation(
+      async (_name: string, _payload: unknown, opts?: { onProgress?: (e: unknown) => void }) => {
+        for (const step of finalReport.steps as StepFixture[]) opts?.onProgress?.(step);
+        return { data: finalReport };
+      }
+    );
+
+    await expect(flow(["run", checkoutPath], opts)).rejects.toThrow("process.exit:1");
+
+    const out = logs.join("\n");
+    // The live header (no device) rather than `renderReport`'s (with one) —
+    // proof the branch under test is the one that ran.
+    expect(out).toContain('Flow "checkout"');
+    expect(out).not.toContain('Flow "checkout" on UDID-1');
+    expect(out).toContain("  ✓  1 launch");
+    expect(out).toContain("  ✗  2 assert visible id=cta");
+    // The three things this branch is responsible for emitting itself.
+    expect(out).toContain("Failures:");
+    expect(out).toContain("     selector-not-found: no element matched selector");
+    expect(out).toContain("FAIL");
+    // ...and the stderr note that only an indeterminate failure earns.
+    expect(errs.join("\n")).toContain("not a failed assertion");
+  });
+
   it("writes JUnit XML at the literal --reporter path and keeps the failing verdict", async () => {
     const dir = await fsp.mkdtemp(path.join(tmpdir(), "flow-reporter-"));
     try {

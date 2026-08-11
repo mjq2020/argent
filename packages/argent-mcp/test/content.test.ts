@@ -760,6 +760,15 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     frame: { x: 0, y: i / 100, width: 1, height: 0.01 },
   }));
 
+  /**
+   * A run carrying TWO failures — deliberately a shape an honest tool-server
+   * cannot produce. The runner hard-stops at the first non-passing leaf, so
+   * one failure per run is the invariant `flow-failure-taxonomy` asserts; this
+   * fixture is the buggy-or-hostile server the renderer's own bounds exist for
+   * (MAX_RENDER_FAILURES, and the one-inlined-image-per-RUN budget). Testing
+   * the image budget against a single-failure run could not distinguish a run
+   * budget from a per-step one, which is the regression it guards.
+   */
   function twoFailureRun(): FlowExecuteResult {
     return {
       flow: "checkout",

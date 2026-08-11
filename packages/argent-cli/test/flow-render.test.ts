@@ -691,6 +691,174 @@ describe("renderFailures", () => {
     expect(out).not.toContain("shared-flows");
   });
 
+  it("infers determinacy and environmental from the code on a pre-determinacy server", () => {
+    // The ONE place a code STRING drives renderer behaviour rather than being
+    // printed verbatim: an older tool-server sends no `determinacy` and no
+    // `category`, so the prefixes have to carry it. Everywhere else the code is
+    // opaque, which is why an unknown one degrades to prose rather than to a
+    // blank line (see the hostile-wire-data case).
+    const bare = (code: string): string =>
+      renderFailures(
+        failingReport({
+          code,
+          message: "something went wrong",
+          step: { kind: "assert", flow: "checkout" },
+          screen: { state: "unavailable", reason: "never-readable" },
+          candidates: [],
+          candidateCount: 0,
+          timing: { startedAt: 1, durationMs: 1000 },
+        } as unknown as FlowStepFailure)
+      ).join("\n");
+
+    // Indeterminate prefixes earn the "not a failed assertion" hint...
+    for (const code of [
+      "condition-dark-tail",
+      "when-guard-indeterminate",
+      "tree-source-not-ready",
+    ]) {
+      expect(bare(code), code).toContain("not a failed assertion");
+    }
+    // ...and a determinate one does not.
+    expect(bare("selector-not-found")).not.toContain("not a failed assertion");
+    // Environmental prefixes give their screen slot to `device:` instead.
+    expect(bare("launch-failed")).toContain("device: UDID-1");
+    expect(bare("launch-failed")).not.toContain("screen:");
+    expect(bare("selector-not-found")).toContain("screen:");
+  });
+
+  it("shows the zero-area element that IS the selector-not-visible diagnosis", () => {
+    // `invisibleMatches` reaches no other surface, so without this the one
+    // shape whose fix is "find out why it has no size" rendered with no
+    // element at all — and its candidate list is deliberately empty, because
+    // the operator did not mean a different element.
+    const out = renderFailures(
+      failingReport({
+        code: "selector-not-visible",
+        category: "selector",
+        determinacy: "determinate",
+        message: 'element matched id="cta" but its frame has zero area',
+        step: { kind: "assert", flow: "checkout" },
+        actual: {
+          matchCount: 1,
+          visibleMatchCount: 0,
+          invisibleMatches: [
+            {
+              role: "button",
+              label: "Check out",
+              identifier: "cta",
+              frame: { x: 0.5, y: 0.5, width: 0, height: 0 },
+            },
+          ],
+        },
+        screen: { state: "available", source: "ax", capturedAt: "at-failure", elementCount: 8 },
+        candidates: [],
+        candidateCount: 0,
+        timing: { startedAt: 1, durationMs: 1000 },
+      } as unknown as FlowStepFailure)
+    ).join("\n");
+
+    // Visibility is DERIVED from the frame, never taken from wire prose.
+    expect(out).toContain('match: "Check out"  button  id=cta  hidden  at 0.50, 0.50');
+  });
+
+  it("keeps a tree-source cause visible on an environmental failure", () => {
+    // The environmental shapes give their screen slot to `device:` — except
+    // when the screen carries a DETAIL, which for the tree-source codes is the
+    // only statement of why the step failed (the message is generic selector
+    // prose). Suppressing the slot wholesale deleted the cause.
+    const out = renderFailures(
+      failingReport({
+        code: "tree-source-unavailable",
+        category: "environment",
+        determinacy: "indeterminate",
+        message: 'no element matched selector id="cta"',
+        step: { kind: "assert", flow: "checkout" },
+        screen: {
+          state: "unavailable",
+          reason: "never-readable",
+          detail: "native devtools disconnected",
+        },
+        candidates: [],
+        candidateCount: 0,
+        data: { platform: "ios" },
+        timing: { startedAt: 1, durationMs: 1000 },
+      })
+    ).join("\n");
+
+    expect(out).toContain("screen: unavailable — never-readable: native devtools disconnected");
+    expect(out).toContain("device: UDID-1 (ios)");
+  });
+
+  it("marks a post-hoc screen read, and a last-trusted one, for what they are", () => {
+    const base = {
+      code: "selector-not-found",
+      category: "selector",
+      message: "nope",
+      step: { kind: "assert", flow: "checkout" },
+      candidates: [],
+      candidateCount: 0,
+      timing: { startedAt: 1, durationMs: 1000 },
+    };
+
+    const after = renderFailures(
+      failingReport({
+        ...base,
+        determinacy: "determinate",
+        screen: { state: "available", source: "ax", capturedAt: "after-failure", elementCount: 8 },
+      } as unknown as FlowStepFailure)
+    ).join("\n");
+    expect(after).toContain("screen: 8 elements (captured after the failure)");
+
+    // An indeterminate failure's tree is by definition the last read argent
+    // could trust, not the state at the deadline.
+    const trusted = renderFailures(
+      failingReport({
+        ...base,
+        code: "condition-dark-tail",
+        category: "indeterminate",
+        determinacy: "indeterminate",
+        screen: { state: "available", source: "ax", capturedAt: "at-failure", elementCount: 8 },
+      } as unknown as FlowStepFailure)
+    ).join("\n");
+    expect(trusted).toContain("screen: 8 elements (last trusted read)");
+  });
+
+  it("renders the scroll expectation and a candidate's paste-able selector", () => {
+    const out = renderFailures(
+      failingReport({
+        code: "scroll-target-not-found",
+        category: "scroll",
+        determinacy: "determinate",
+        message: "reached the end of the scroll",
+        step: { kind: "scroll-to", flow: "checkout" },
+        expected: { kind: "scroll", direction: "down", within: 'id="list"', maxIterations: 12 },
+        screen: { state: "available", source: "ax", capturedAt: "at-failure", elementCount: 8 },
+        candidates: [
+          {
+            node: {
+              role: "button",
+              label: "Order #1234",
+              identifier: "order-1234",
+              frame: { x: 0.1, y: 0.4, width: 0.8, height: 0.06 },
+            },
+            score: 0.87,
+            basis: "text-near",
+            selectorYaml: '{"id":"order-1234"}',
+            note: "scrolled out of its container — add a scroll-to step",
+          },
+        ],
+        candidateCount: 3,
+        timing: { startedAt: 1, durationMs: 1000 },
+      } as unknown as FlowStepFailure)
+    ).join("\n");
+
+    expect(out).toContain('expected: scroll down within id="list" (max 12 iterations)');
+    // The suggestion is the headline output of ranking — it belongs on the CI
+    // surface, not only on the MCP one.
+    expect(out).toContain('→ {"id":"order-1234"}');
+    expect(out).toContain("— scrolled out of its container");
+  });
+
   it("says WHY there is no screenshot when the run typed a secret", () => {
     // Pixels are the one projection the report's scrubber cannot reach, so the
     // capture is declined outright. A silently missing line reads as a broken
