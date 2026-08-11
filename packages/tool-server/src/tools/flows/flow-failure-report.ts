@@ -506,10 +506,13 @@ function buildSelector(
   // identifier `foo` AND text `foo`, in that order.
   let alternatives: FlowFailureSelector["alternatives"];
   try {
-    // Scrubbed like every other projection of the selector: the alternatives
-    // are the selector's own fields re-spelled, so a `{{secret:…}}`-derived
-    // value in the flow would ride out here even though `fields` and
-    // `described` beside it were masked.
+    // Scrubbed like every other projection of the selector. NOT because a flow
+    // can template a secret into a selector — `{{secret:…}}` resolves only in
+    // text-entry steps, and `parseFlow` rejects one in a condition. The reason
+    // is the other direction: a selector quotes on-screen text (`text: "signing
+    // in as …"`), so an app that echoed a credential back can put it in the
+    // author's own selector. `alternatives` is that text re-spelled, and would
+    // ride out here even with `fields` and `described` beside it masked.
     alternatives = scrubDeep(
       flowSelectorAlternatives(sel),
       scrub
@@ -701,8 +704,10 @@ async function buildFailure(
   }
 
   if (evidence?.expected !== undefined) {
-    // Flow-derived text, masked like `message`/`described`/`fields`: an
-    // expectation can quote a value the author templated from a secret.
+    // Flow-derived text, masked like `message`/`described`/`fields`, for the
+    // same reason as `alternatives` above: an expectation quotes what the step
+    // expected to SEE, which is exactly where a credential the app echoed back
+    // into a non-password element lands.
     failure.expected = scrubDeep(evidence.expected, scrub) as FlowFailureExpectation;
   } else if (isGestureKind(report.kind)) {
     // A gesture directive knows no expectation beyond itself; naming it here

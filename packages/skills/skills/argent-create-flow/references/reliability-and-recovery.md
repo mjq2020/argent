@@ -112,12 +112,23 @@ Classify before editing:
 | Acceptance failure | Actions pass but a requested check fails       | Preserve the check and investigate behavior                                                                                                             |
 | Idle warning       | A readiness step passes without settling       | Read [which of the six warnings](flow-yaml.md#idle-readiness) it is, then gate the next action on a stable element                                      |
 
-Then **start from the run's `Failures:` block.** A step that did not pass carries a structured diagnosis captured **at the moment of failure**: a classified `code`, the `message`, ranked `candidates` (the elements closest to what the selector asked for — each with its normalized tap centre and, when one applies, paste-able selector YAML), a `screen` summary, a `hint`, and paths to a `screenshot` and a full `tree:` element dump.
+Then **start from the run's `Failures:` block.** A step that did not pass carries a structured diagnosis: a classified `code`, the `message`, ranked `candidates` (the elements closest to what the selector asked for — each with its normalized tap centre and, when one applies, paste-able selector YAML), a `screen` summary, a `hint`, and — when they exist — paths to a `screenshot` and a full `tree:` element dump.
+
+The `screen:` line tells you WHICH read the evidence comes from. Read it before you trust the element list:
+
+| `screen:` line                   | Which read                                                                |
+| -------------------------------- | ------------------------------------------------------------------------- |
+| `47 elements, 390x844`           | the tree the failing step itself read — the screen that failed            |
+| `… (captured after the failure)` | the step held no tree, so the runner read one straight after it failed    |
+| `… (last trusted read)`          | an indeterminate failure — the screen went unreadable before the deadline |
+| `unavailable — <reason>`         | there is no element list at all; the reason says why                      |
+
+`screenshot` and `tree` are optional slots, not guarantees. The whole indeterminate family carries no `tree`, and a run that typed a `{{secret:…}}` value carries no `screenshot` — pixels are never masked, so the capture is declined.
 
 1. Record the first failure or divergence index and message.
 2. **Read the failure block.** The `candidates` are the highest-value part: a selector fix is usually "paste this candidate's YAML into the step". Verify a candidate before committing to it by tapping its `at x, y` centre.
 3. **`Read` the `tree:` file** when the candidates don't settle it. It is the full element list from the failing read — the flow's own full-hierarchy tree, not the trimmed one `describe` returns — so an element missing from a `describe` dump is still in there.
-4. **Do not call `screenshot` / `describe` to see "where the app is now".** The run hard-stopped at the failing step and teardown has since run, so what you would capture is a **different screen** from the one that failed — the block's screenshot and tree are the screen that failed. Call them only when the report carries **no** failure block (an older tool-server), or when you have interacted with the device since the run and genuinely need its current state.
+4. **Do not call `screenshot` / `describe` to see "where the app is now" while the block still answers your question.** The run hard-stopped at the failing step, and by the time you read the report it has also torn down — so a fresh capture shows a **later screen** than the one that failed. Call them only when the report carries **no** failure block (an older tool-server), when the block says `screen: unavailable`, or when you have interacted with the device since the run and genuinely need its current state.
 5. Compare actual state with the preceding echo and expected destination.
 6. Map the `code` to a strategy (below) — selector, screen, missing element, readiness, stale data, optional interstitial, or product behavior — then state the diagnosis in one sentence before correcting it.
 
