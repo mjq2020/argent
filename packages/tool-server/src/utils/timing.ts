@@ -20,7 +20,7 @@ export function sleepOrAbort(ms: number, signal?: AbortSignal): Promise<boolean>
   });
 }
 
-export type Settled<T> =
+type Settled<T> =
   | { type: "value"; value: T }
   | { type: "error"; error: string }
   | { type: "timeout" }

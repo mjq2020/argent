@@ -14,7 +14,7 @@ import { pickIosHost, buildDyldInsertLibraries, type IosEndpoint } from "../util
 // Re-exported for the env-merging unit test that imports it from this module.
 export { buildDyldInsertLibraries };
 
-export type NativeDevtoolsTransport = "unix" | "tcp";
+type NativeDevtoolsTransport = "unix" | "tcp";
 
 export const NATIVE_DEVTOOLS_NAMESPACE = "NativeDevtools";
 
@@ -113,7 +113,7 @@ export function buildInitFailedResult(
 }
 
 // Overloads for proper return-type inference.
-export type NativeDevtoolsPrecheckBlock =
+type NativeDevtoolsPrecheckBlock =
   | NativeDevtoolsInitFailedResult
   | { status: "restart_required"; message: string };
 
