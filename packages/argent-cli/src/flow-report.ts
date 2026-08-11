@@ -25,11 +25,9 @@ import type { FlowReport, StepReport } from "./flow.js";
 // `padEnd`/`repeat` with a huge count, or inject lines into the block.
 
 /** Longest rendered wire string. Also bounds every column width below. */
-export const MAX_WIRE_FIELD_CHARS = 300;
+const MAX_WIRE_FIELD_CHARS = 300;
 /** Matches the producer's FLOW_FAILURE_CANDIDATE_LIMIT; re-applied on receipt. */
-export const MAX_WIRE_CANDIDATES = 5;
-/** Matches the producer's FLOW_FAILURE_ELEMENT_LIMIT; re-applied on receipt. */
-export const MAX_WIRE_ELEMENTS = 40;
+const MAX_WIRE_CANDIDATES = 5;
 
 /**
  * Names spliced into derived paths (`.argent/flows/<name>.yaml`). Mirrors the
