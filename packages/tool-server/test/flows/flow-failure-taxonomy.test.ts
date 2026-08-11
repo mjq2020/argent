@@ -141,8 +141,23 @@ afterEach(async () => {
  * Hand-written, deliberately: `Record<FlowFailureCode, …>` already makes a code
  * without a category a COMPILE error, so the only remaining hole is a code
  * added to both the union and the map with no site producing it and no test
- * naming it. Cross-checking the map's keys against this list closes it — adding
- * a code fails here until it is listed AND (below) driven from a real run.
+ * naming it. Cross-checking the map's keys against this list closes the first
+ * half: a new code fails here until it is listed.
+ *
+ * The second half — every code DRIVEN from a real run — is the individual
+ * tests below, and it is not total. Two members are defensive branches that a
+ * parsed flow cannot reach, so no fixture can produce them honestly:
+ *
+ * - `step-kind-unsupported` is `execLeafStep`'s `default:` arm, and every
+ *   `FlowStep` kind has a case. It exists so a step kind added to the parser
+ *   and not to the runner fails loudly instead of silently.
+ * - `gesture-geometry-unsatisfiable` needs a pinch whose finger travel rounds
+ *   to EXACTLY zero on both axes. A zero-area target never resolves to a
+ *   frame (it reports `selector-not-visible` first), and any resolvable span
+ *   leaves positive travel however small.
+ *
+ * Say so here rather than leave the claim standing: a comment that promises
+ * coverage the file does not have is worse than the gap it hides.
  */
 const ALL_CODES: FlowFailureCode[] = [
   "selector-not-found",
