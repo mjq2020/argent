@@ -160,6 +160,40 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     expect(events.slice(clearEnd)).toContain("Down:26");
   });
 
+  it("serializes two SPELLINGS of one udid onto the same chain", async () => {
+    // The chain is keyed on a case-folded id because `device.id` is the caller's
+    // own string verbatim — `resolveDevice` classifies an iOS UDID by shape and
+    // never canonicalises it — while the modifier state being serialized lives
+    // in the GUEST, which has exactly one of it however the caller spelled the
+    // address. Keyed on the raw id, these two take different chains and the `w`
+    // lands inside the Left GUI hold as Cmd+W: measured 7/7 on an iPhone 17 Pro
+    // simulator, never reaching the field while the call reported it typed.
+    //
+    // Nothing else in this file drives one device under two spellings, so
+    // without this the fold is free to be deleted.
+    const { events, api } = recordingApi();
+    const registry = registryWith(api);
+    const lower: DeviceInfo = { ...IOS_SIM, id: IOS_SIM.id.toLowerCase() };
+    expect(lower.id).not.toBe(IOS_SIM.id);
+
+    const clearing = typeSimulatorServer(registry, IOS_SIM, {
+      udid: IOS_SIM.id,
+      clear: true,
+      delayMs: 5,
+    });
+    const typing = typeSimulatorServer(registry, lower, { udid: lower.id, text: "w", delayMs: 5 });
+    await Promise.all([clearing, typing]);
+
+    // Same window as the single-spelling test above: `Down:227` opens the chord
+    // and `Up:42` ends the backspace that finishes the clear.
+    const guiDown = events.indexOf("Down:227");
+    const clearEnd = events.indexOf("Up:42");
+    expect(guiDown).toBeGreaterThanOrEqual(0);
+    expect(clearEnd).toBeGreaterThan(guiDown);
+    expect(events.slice(guiDown, clearEnd)).not.toContain("Down:26");
+    expect(events.slice(clearEnd)).toContain("Down:26");
+  });
+
   it("keeps a THIRD call behind the one in flight, not alongside it", async () => {
     // The chain slot is dropped only when nothing is queued behind the call that
     // drained it. Deleting it unconditionally is invisible while every call is
