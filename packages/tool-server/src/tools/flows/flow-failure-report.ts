@@ -296,34 +296,32 @@ export async function attachFailureDiagnostics(
             // Trimmed because the budget the timeout skipped is still a budget,
             // and an over-size payload rides every progress event.
             trimToBudget({ ...partial.failure }).failure
-          : baseFailure(report, meta, evidence, {
-              state: "unavailable",
-              reason: "capture-timeout",
-            })
+          : baseFailure(
+              report,
+              meta,
+              evidence,
+              { state: "unavailable", reason: "capture-timeout" },
+              env.typedSecret === true
+            )
     );
   } catch {
     // Assembly itself broke. Emit the minimum honest payload rather than
     // nothing — the code and message alone still beat a bare reason string.
     try {
-      report.failure = baseFailure(report, meta, evidence, {
-        state: "unavailable",
-        reason: "read-failed",
-        ...(evidence?.treeError !== undefined ? { detail: evidence.treeError } : {}),
-      });
+      report.failure = baseFailure(
+        report,
+        meta,
+        evidence,
+        {
+          state: "unavailable",
+          reason: "read-failed",
+          ...(evidence?.treeError !== undefined ? { detail: evidence.treeError } : {}),
+        },
+        env.typedSecret === true
+      );
     } catch {
       /* diagnostics must never change a verdict */
     }
-  }
-  // Stamped LAST, on whichever payload the paths above produced. `typedSecret`
-  // is run state and never reaches the wire, so this marker is the only signal
-  // a renderer has that the run typed a credential — and the renderers use it
-  // to decline inlining a snapshot's OWN images, which no scrubber touches.
-  // Setting it inside `buildFailure` left it off the two payloads `baseFailure`
-  // produces alone (a capture-timeout with nothing assembled, and the catch
-  // above), so the guard failed open on exactly the slow, busy screens where
-  // the overrun is likeliest.
-  if (env.typedSecret === true && report.failure !== undefined) {
-    report.failure.data = { ...report.failure.data, screenshotOmitted: "secret-typed" };
   }
 }
 
@@ -332,11 +330,28 @@ function baseFailure(
   report: LeafOutcome,
   meta: { startedAt: number; ordinal: number },
   evidence: DirectiveEvidence | undefined,
-  screen: FlowFailureScreen
+  screen: FlowFailureScreen,
+  // Whether the run typed a `{{secret:…}}` value. Set HERE rather than by the
+  // caller for two reasons. `baseFailure` is the one constructor every path
+  // goes through — including the two that emit it alone (a capture timeout
+  // with nothing assembled, and the assembly-threw catch) — and stamping
+  // outside it left the marker off exactly those, so the renderers' guard
+  // failed open on the slow screens where an overrun is likeliest. It also
+  // lands before `applyByteBudget` measures and before the overflow spill
+  // serializes, so the payload budget and the spilled copy both account for it.
+  // (A late stamp does not actually breach the cap today — 35 bytes against
+  // 24 KiB, and the shedding loop lands far below it — so this is the ordering
+  // being correct by construction rather than a bug anyone has hit.)
+  typedSecret = false
 ): FlowStepFailure {
   const scrub = createSecretScrubber();
   const code: FlowFailureCode = evidence?.code ?? "unclassified";
   return {
+    // `typedSecret` is run state and never reaches the wire, so this marker is
+    // the only signal a renderer has that the run typed a credential — and the
+    // renderers use it to decline inlining a snapshot's OWN images, which no
+    // scrubber touches.
+    ...(typedSecret ? { data: { screenshotOmitted: "secret-typed" } } : {}),
     version: 1,
     code,
     category: FLOW_FAILURE_CATEGORY[code] ?? "tool",
@@ -702,7 +717,7 @@ async function buildFailure(
   partial: { failure?: FlowStepFailure }
 ): Promise<FlowStepFailure> {
   const { screen, tree, scrub } = await resolveScreen(env, evidence, token);
-  const failure = baseFailure(report, meta, evidence, screen);
+  const failure = baseFailure(report, meta, evidence, screen, env.typedSecret === true);
   // Published before the first enrichment and mutated IN PLACE from here on,
   // so every slot filled below is visible to the timeout fallback the instant
   // it lands. See the `partial` note in attachFailureDiagnostics.

@@ -569,6 +569,31 @@ describe("secret discipline", () => {
     expect(failure.screenshot).toBeUndefined();
   }, 20_000);
 
+  it("keeps an over-budget payload under the cap WITH the secret marker on it", async () => {
+    // Pins the ORDER, not a bug anyone has hit: the marker is ~35 bytes and the
+    // shedding loop leaves a trimmed payload far below the cap, so stamping it
+    // afterwards does not cross the limit today. It is set in `baseFailure`
+    // anyway, before anything measures, so the invariant holds by construction
+    // rather than by how much the current shedding order happens to drop.
+    process.env[SECRET_ENV] = SECRET_VALUE;
+    currentFetch = () => ({ tree: bulkyTree(), source: "native-devtools" });
+    await writeFlow("secret-bulky", {
+      executionPrerequisite: "",
+      steps: [
+        { kind: "echo", message: "signing in with {{secret:TESTPW}}" },
+        { kind: "assert", condition: "exists", selector: { text: "Nothing Here" } },
+      ],
+    });
+
+    const failure = singleFailure(await run("secret-bulky"));
+
+    expect(failure.data?.screenshotOmitted).toBe("secret-typed");
+    expect(failure.overflow?.omittedBytes).toBeGreaterThan(0);
+    expect(Buffer.byteLength(JSON.stringify(failure), "utf8")).toBeLessThanOrEqual(
+      FLOW_FAILURE_BYTE_LIMIT
+    );
+  });
+
   it("still captures a screenshot for a run that typed no secret", async () => {
     await writeFlow("no-secret-shot", {
       executionPrerequisite: "",
