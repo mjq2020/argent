@@ -178,7 +178,7 @@ Special keys: `enter`, `escape`, `backspace`, `tab`, `space`, `arrow-up`, `arrow
 { "udid": "<UDID>", "clear": true, "text": "new@example.com", "key": "enter" }
 ```
 
-- Order within one call is always **clear → text → key**, so the call above replaces the value and submits in a single tool call. `{ "clear": true }` alone just empties the field, returning `"keys": 0` — the clear's own key presses never count.
+- Order within one call is always **clear → text → key**, so the call above replaces the value and then presses Enter, in a single tool call. Whether Enter _submits_ is the app's business: an Android search field runs the search, while on Chromium the named key is dispatched as a bare keyDown/keyUp pair, which does not trigger a form's implicit submission — click the submit button there. `{ "clear": true }` alone just empties the field, returning `"keys": 0` — the clear's own key presses never count.
 - **Focus a text field first.** Chromium refuses a clear with nothing editable (or a readonly / non-text element) focused, because a select-all there would select the page. iOS and Android dispatch it blind at whatever holds focus and report success either way.
 - iOS, Android and Chromium only — rejected up front on Vega and TV targets.
 - `"cleared": true` is **not proof the field is empty.** Only Chromium reads the field back, and even it goes best-effort on a page it cannot read. `describe` the field when the result matters.
