@@ -35,10 +35,12 @@ import type { DescribeTreeData } from "../describe/contract";
 export async function fetchFlowTree(
   registry: Registry,
   device: DeviceInfo,
-  launchedNativeApp?: string
+  launchedAppId?: string
 ): Promise<DescribeTreeData> {
   if (device.platform === "ios") {
-    return queryFullHierarchyTree(registry, device, launchedNativeApp);
+    // Only iOS consumes the pin (see queryFullHierarchyTree for why it
+    // matters); the other tree sources are per-device and never auto-resolve.
+    return queryFullHierarchyTree(registry, device, launchedAppId);
   }
   if (device.platform === "android") {
     return queryAndroidFullHierarchy(registry, device);

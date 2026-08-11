@@ -302,7 +302,7 @@ const NATIVE_READY_POLL_MS = 250;
 
 /**
  * `tool:` steps that can change or relaunch the foreground app — running one
- * invalidates {@link ActionEnv.launchedNativeApp}. `button` is included for
+ * invalidates {@link ActionEnv.launchedAppId}. `button` is included for
  * its `home` case; distinguishing button kinds here would couple this list to
  * that tool's arg schema for little gain.
  */
@@ -471,11 +471,9 @@ async function runLaunch(state: ExecState, app: Launch): Promise<DirectiveOutcom
   // it, or a cancelled gate would read as a launch that verified readiness.
   if (signal?.aborted) return ABORTED_OUTCOME;
   if (gate) return { ok: false, reason: gate };
-  // Remember the launched app for the rest of the RUN (nested `run:` flows
-  // share this state, so a nested launch retargets the whole run — see
-  // ActionEnv.launchedNativeApp). iOS tree reads use it only when target
-  // auto-resolution times out mid-stall.
-  state.launchedNativeApp = bundleId;
+  // Pins later tree reads; nested `run:` fragments share this state and
+  // inherit it.
+  state.launchedAppId = bundleId;
   return { ok: true };
 }
 
@@ -2233,12 +2231,12 @@ async function execLeafStep(
       }
       try {
         // These sub-tools can change (or relaunch) the foreground app, so the
-        // `launch:`-derived hint no longer names what is on screen. Cleared
-        // BEFORE invoking: a tool that throws mid-way may still have switched
-        // apps, and a stale hint is worse than no hint (tree reads fall back
-        // to plain auto-resolution, today's behavior).
+        // pin no longer names what is on screen. Cleared BEFORE invoking: a
+        // tool that throws mid-way may still have switched apps, and a stale
+        // pin is worse than none (tree reads fall back to plain
+        // auto-resolution, the pre-pin behavior).
         if (FOREGROUND_CHANGING_TOOLS.has(step.name)) {
-          state.launchedNativeApp = undefined;
+          state.launchedAppId = undefined;
         }
         const result = await invokeSubTool(registry, ctx, step.name, args);
         if (isUnmetUiWaitResult(step.name, result)) {

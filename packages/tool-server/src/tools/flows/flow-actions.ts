@@ -64,16 +64,11 @@ export interface ActionEnv {
   device: DeviceInfo;
   signal?: AbortSignal;
   /**
-   * Bundle id of the last successful native `launch:` in this RUN — nested
-   * `run:` flows share it (ExecState is per-run, so a nested launch updates
-   * the whole run's hint, matching "a nested e2e launch restarts its app").
-   * Cleared by `tool:` steps that can change the foreground app (launch-app,
-   * restart-app, open-url, button, reinstall-app). iOS tree reads use it ONLY
-   * as an arbiter when target auto-resolution itself times out — see
-   * `queryFullHierarchyTree` — so foreground-likeness guards keep firing
-   * whenever the app answers at all.
+   * App id of the run's most recent successful `launch` step. Pins iOS tree
+   * reads to the app under test instead of auto-resolving (see
+   * `fetchFlowTree`); unset for runs with no launch step.
    */
-  launchedNativeApp?: string;
+  launchedAppId?: string;
 }
 
 /** Outcome of a selector directive: ok, or a machine-readable reason it failed. */
@@ -363,7 +358,7 @@ export async function settleTree(env: ActionEnv): Promise<DescribeNode | undefin
     if (env.signal?.aborted) return undefined;
     let tree: DescribeNode | undefined;
     try {
-      ({ tree } = await fetchFlowTree(env.registry, env.device, env.launchedNativeApp));
+      ({ tree } = await fetchFlowTree(env.registry, env.device, env.launchedAppId));
     } catch (err) {
       // transient describe failure mid-navigation — retry until the deadline
       lastError = err instanceof Error ? err : new Error(String(err));
@@ -492,7 +487,7 @@ async function waitForFocus(
   for (;;) {
     if (env.signal?.aborted) return;
     try {
-      const { tree, source } = await fetchFlowTree(env.registry, env.device, env.launchedNativeApp);
+      const { tree, source } = await fetchFlowTree(env.registry, env.device, env.launchedAppId);
       if (!FOCUS_REPORTING_SOURCES.has(source)) return;
       const target = flowSelectorToFrame(tree, into) ?? tappedFrame;
       if (collectFocused(tree, []).some((n) => framesOverlap(n.frame, target))) return;
@@ -879,7 +874,7 @@ async function runPinch(
  */
 async function fetchScreenAspect(env: ActionEnv): Promise<number | undefined> {
   try {
-    const { screen } = await fetchFlowTree(env.registry, env.device, env.launchedNativeApp);
+    const { screen } = await fetchFlowTree(env.registry, env.device, env.launchedAppId);
     return screen && screen.width > 0 && screen.height > 0
       ? screen.width / screen.height
       : undefined;
@@ -1056,7 +1051,7 @@ async function waitForCondition(
   for (;;) {
     if (env.signal?.aborted) return ABORTED_OUTCOME;
     try {
-      const data = await fetchFlowTree(env.registry, env.device, env.launchedNativeApp);
+      const data = await fetchFlowTree(env.registry, env.device, env.launchedAppId);
       lastMatches = flowFindAll(data.tree, step.selector);
       fetchError = undefined;
       everMatched ||= lastMatches.length > 0;
@@ -1418,7 +1413,7 @@ async function waitForIdle(
     // anything.
     const [read, frame] = await Promise.all([
       settleWithin(
-        fetchFlowTree(env.registry, env.device, env.launchedNativeApp),
+        fetchFlowTree(env.registry, env.device, env.launchedAppId),
         roundBudget,
         env.signal
       ).then((r) => {
