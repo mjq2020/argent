@@ -516,6 +516,13 @@ const CDP_MODIFIER_META = 4;
  * Empty the focused field. Resolves when the field was observed empty
  * afterwards, or when the page could not be read; throws otherwise.
  *
+ * The caller owns `handle` and MUST release it — `releaseParkedTarget`, from a
+ * `finally` — however this returns. It is deliberately still parked on the way
+ * out, so focus can be asked about again once the caller has finished typing,
+ * and the slot is the sole retainer of that element (confirmed with a WeakRef +
+ * forced GC). A per-call slot name means a leaked one is never overwritten by
+ * the next clear, so a caller that skips the release leaks one element per call.
+ *
  * The editing itself rides `commands` on the `rawKeyDown` rather than being
  * driven by the modifier — see the `commands` doc on `KeyEventArgs` — but the
  * modifier is set as well, so that what the page receives is a select-all chord
@@ -576,10 +583,10 @@ export async function clearChromiumField(
 
   const modifiers = before.mac ? CDP_MODIFIER_META : CDP_MODIFIER_CTRL;
   const selectAllKey = { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers };
-  // The release runs in a `finally` so a parked node is never left pinning a
-  // detached subtree when the dispatch throws — the handle is the sole retainer
-  // (confirmed with a WeakRef + forced GC), and a per-call slot name means a
-  // leaked one is never overwritten by the next clear.
+  // The read-back is in a `finally` so the element is still measured when the
+  // dispatch throws. It does NOT release the slot — see `keep` below — and
+  // nothing in here does: releasing is the caller's, because the parked element
+  // has to outlive the typing that follows.
   let after: ClearedTarget | undefined;
   try {
     await api.dispatchKeyEvent({
