@@ -23,6 +23,18 @@ const HID_I = 12;
 const HID_ENTER = 40;
 const HID_ESCAPE = 41;
 const HID_LEFT_SHIFT = 225;
+const HID_LEFT_GUI = 227;
+
+// Every ACCEPTED simulator-server run opens by releasing the two modifiers this
+// backend is capable of holding, healing one left latched in the guest by a run
+// that died mid-chord (see `releaseHeldModifiers`). HID `Up` on a key that is
+// not down is a no-op, so this is a constant two-write prelude, not part of the
+// action under test — but it is a device write, which is why a REJECTED run
+// below emits nothing at all rather than this pair.
+const HEAL: Array<[direction: string, keyCode: number]> = [
+  ["Up", HID_LEFT_SHIFT],
+  ["Up", HID_LEFT_GUI],
+];
 
 function registryWith(api: unknown) {
   return { resolveService: vi.fn(async () => api) } as never;
@@ -59,7 +71,6 @@ function cdpRecorder() {
 
 // CDP descriptors (chromium-keys.ts), written as literals rather than read back
 // out of the maps under test. Letters: code Key<UPPER>, vk = uppercase charcode.
-const CDP_H = { key: "h", code: "KeyH", windowsVirtualKeyCode: 72 };
 const CDP_H_UPPER = { key: "H", code: "KeyH", windowsVirtualKeyCode: 72 };
 const CDP_I = { key: "i", code: "KeyI", windowsVirtualKeyCode: 73 };
 const CDP_ENTER = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 };
@@ -104,6 +115,7 @@ describe("keyboard backends — emit exactly the action they were given", () => 
       // shape — none of which `typed` can distinguish, since it just echoes the
       // request back.
       expect(events).toEqual([
+        ...HEAL,
         ["Down", HID_H],
         ["Up", HID_H],
         ["Down", HID_I],
@@ -112,13 +124,17 @@ describe("keyboard backends — emit exactly the action they were given", () => 
       expect(result).toEqual({ typed: "hi", keys: 2 });
     });
 
-    it("leaves the characters before an un-typeable one on the device", async () => {
-      // This backend validates per character inside the dispatch loop, so a
-      // rejection is NOT all-or-nothing: "h" is already pressed when "é"
-      // throws. The tool description tells agents exactly that, and nothing
-      // pinned it in either direction — hoisting a whole-string pre-check up
-      // here (the other reasonable design, and what Android/Vega/TV do) was
-      // green across the whole suite while making the description false.
+    it("sends nothing at all when one character is un-typeable", async () => {
+      // All-or-nothing, and deliberately so: this backend resolves EVERY
+      // character before its first device write. Validating per character
+      // inside the dispatch loop instead — the shape this had before `clear`
+      // existed — would let `{ clear, text }` empty the field and then reject
+      // on character 4, leaving a fragment where the caller's original value
+      // used to be. A 400 must never leave the caller worse off than before
+      // the call, so the pre-check is what makes `clear` safe to combine.
+      //
+      // The empty stream is the assertion: not even the modifier heal goes out,
+      // because that is the first device write and it sits AFTER validation.
       const { events, api } = hidRecorder();
 
       await expect(
@@ -129,10 +145,7 @@ describe("keyboard backends — emit exactly the action they were given", () => 
         })
       ).rejects.toThrow(/No keycode for character "é"/);
 
-      expect(events).toEqual([
-        ["Down", HID_H],
-        ["Up", HID_H],
-      ]);
+      expect(events).toEqual([]);
     });
 
     it("shifts only the character that needs it", async () => {
@@ -148,6 +161,7 @@ describe("keyboard backends — emit exactly the action they were given", () => 
       // released before "i" — so "no modifier held" above is a real observation
       // about lowercase, not a backend that cannot shift at all.
       expect(events).toEqual([
+        ...HEAL,
         ["Down", HID_LEFT_SHIFT],
         ["Down", HID_H],
         ["Up", HID_H],
@@ -177,10 +191,7 @@ describe("keyboard backends — emit exactly the action they were given", () => 
 
       // The literals are the point: comparing against NAMED_KEYS[key] would be
       // satisfied by any value that map happens to hold.
-      expect(events).toEqual([
-        ["Down", code],
-        ["Up", code],
-      ]);
+      expect(events).toEqual([...HEAL, ["Down", code], ["Up", code]]);
       // The whole result, not just `keys`: with no text given, `typed` echoes
       // the key name, so `typed: params.text ?? ""` is caught here too.
       expect(result).toEqual({ typed: key, keys: 1 });
@@ -224,10 +235,11 @@ describe("keyboard backends — emit exactly the action they were given", () => 
       ]);
     });
 
-    it("leaves the characters before an un-typeable one on the device", async () => {
-      // The mirror of the simulator-server case above: chromium also validates
-      // per character inside the loop, so the whole triple for "h" is already
-      // dispatched when "é" throws.
+    it("dispatches nothing at all when one character is un-typeable", async () => {
+      // The mirror of the simulator-server case above: chromium also resolves
+      // every character before its first dispatch, for the same reason — a
+      // `{ clear, text }` that emptied the field and then rejected on character
+      // 4 would leave a fragment where the original value was.
       const { events, api } = cdpRecorder();
 
       await expect(
@@ -238,11 +250,7 @@ describe("keyboard backends — emit exactly the action they were given", () => 
         )
       ).rejects.toThrow(/No CDP key descriptor for character "é"/);
 
-      expect(events).toEqual([
-        { type: "keyDown", ...CDP_H },
-        { type: "char", text: "h" },
-        { type: "keyUp", ...CDP_H },
-      ]);
+      expect(events).toEqual([]);
     });
 
     // Two keys, for the same reason as the simulator-server pair above: pinning
