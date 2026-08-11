@@ -657,7 +657,7 @@ export function renderFailures(report: FlowReport): string[] {
 }
 
 /** True when a run's failure is "argent could not see the screen", not "the check failed". */
-export function hasIndeterminateFailure(report: FlowReport): boolean {
+function hasIndeterminateFailure(report: FlowReport): boolean {
   return (Array.isArray(report.steps) ? report.steps : []).some(
     (s) =>
       s.failure !== undefined &&

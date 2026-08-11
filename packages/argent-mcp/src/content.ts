@@ -218,7 +218,7 @@ export async function screenshotDiffToMcpContent(
  * their intended types keeps the renderer readable; the validators are what
  * make it safe.
  */
-export type FlowFailureNode = {
+type FlowFailureNode = {
   role?: string;
   /** Normalized (0..1) frame; its centre is what an agent can tap to verify. */
   frame?: { x?: number; y?: number; width?: number; height?: number };
@@ -229,7 +229,7 @@ export type FlowFailureNode = {
   flags?: string;
 };
 
-export type FlowFailureCandidate = {
+type FlowFailureCandidate = {
   node?: FlowFailureNode;
   /** 0..1 */
   score?: number;
@@ -247,7 +247,7 @@ export type FlowFailureCandidate = {
  * NEVER inlined here (see `failureBlocks`), only its count and the path to the
  * full dump.
  */
-export type FlowFailureScreen = {
+type FlowFailureScreen = {
   state?: string;
   source?: string;
   capturedAt?: string;

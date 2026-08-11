@@ -101,7 +101,7 @@ export function artifactPath(value: unknown): string | undefined {
 }
 
 /** `.argent/flows/<name>.yaml` — where every flow and fragment lives. */
-export function flowFilePath(flow: unknown): string | undefined {
+function flowFilePath(flow: unknown): string | undefined {
   const name = wireText(flow, 128);
   if (!name || !SAFE_FLOW_NAME.test(name)) return undefined;
   return `.argent/flows/${name}.yaml`;
@@ -505,7 +505,7 @@ export function nodeRow(node: NormalizedNode): string {
 
 // ── Reporter specs ───────────────────────────────────────────────────────
 
-export type ReporterSpec = { format: "default" } | { format: "junit"; path: string };
+type ReporterSpec = { format: "default" } | { format: "junit"; path: string };
 
 /**
  * `default` | `junit:<path>`. Rejected specs throw FlagParseException so
@@ -577,7 +577,7 @@ function resolvedPlatform(report: { steps?: unknown }): string | undefined {
   return undefined;
 }
 
-export interface JUnitMeta {
+interface JUnitMeta {
   device?: string;
   platform?: string;
   flowFile?: string;

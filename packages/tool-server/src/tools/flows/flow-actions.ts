@@ -102,7 +102,7 @@ export interface DirectiveOutcome {
  * control flow, return values and throw behaviour byte-identical, which is what
  * lets the evidence plumbing land without touching the abort/tier semantics.
  */
-export interface TreeReadSink {
+interface TreeReadSink {
   /** The most recent successfully read tree. */
   tree?: DescribeNode;
   source?: DescribeSource;
@@ -1859,6 +1859,14 @@ async function waitForIdle(
       `could not read the UI tree while waiting for the screen to settle — check the app is ` +
       `still in the foreground (a backgrounded app reads the same as an uninstrumented one). ` +
       `Underlying error: ${underlying}`,
+    // Classified as an environment failure, which is what makes the report
+    // suppress its screen slot rather than chase a post-hoc read of the very
+    // source that just failed.
+    evidence: {
+      code: "tree-source-unavailable",
+      treeError: underlying,
+      hint: "argent could not observe the screen for this step — re-run; do not edit the flow",
+    },
   });
 
   // The other flavour: the source answered, and said it could not see the app.
@@ -1873,6 +1881,10 @@ async function waitForIdle(
       `screen was never observed — this is the reader reporting it could not see the app, not ` +
       `the app rendering nothing` +
       (blindHint === undefined ? "" : `. ${blindHint}`),
+    evidence: {
+      code: "tree-source-unavailable",
+      ...(blindHint === undefined ? {} : { hint: blindHint }),
+    },
   });
 
   if (readsSucceeded === 0) {
@@ -1885,6 +1897,7 @@ async function waitForIdle(
         `the tree source never answered within the step's ${timeoutMs}ms — raise this step's ` +
         `\`timeout:\` if it is merely slow (a tree read on a busy screen can take seconds), or ` +
         `repair it if it has stopped answering altogether`,
+      evidence: { code: "tree-source-unavailable" },
     };
   }
   // Reads worked, then stopped: a backgrounded app, a dropped instrumentation
@@ -1926,6 +1939,10 @@ async function waitForIdle(
         `${HUNG_TREE_READ_MS}ms never came back, so the screen could not be observed for the ` +
         `rest of the wait — check the app is still in the foreground and responding (a wedged ` +
         `app reads the same as a backgrounded one)`,
+      // A post-hoc read here would hit the same wedged source and hang for as
+      // long as it pleases, so the classification is what keeps the diagnostics
+      // off it entirely.
+      evidence: { code: "tree-source-unavailable" },
     };
   }
   // A tolerated blip is not a silently dropped error: whichever warning below
