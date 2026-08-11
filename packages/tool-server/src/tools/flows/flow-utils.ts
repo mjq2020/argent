@@ -1998,10 +1998,13 @@ const STEP_DIRECTIVE_KEYS: readonly string[] = [
  * The directive keys that carry a sibling `steps:` list — the single registry
  * of what a block directive is: {@link blockSteps} reads THIS list rather than
  * restating the kinds, so parse time and run time cannot answer differently.
- * Two constraints keep an entry honest: `satisfies` rejects a key that is not a
- * real step kind, and blockSteps' `Extract` rejects a kind whose step type
- * carries no `steps` (a directive listed here without children is a compile
- * error, not a silent runtime `undefined`).
+ * Three constraints keep an entry honest. Two judge the keys already listed:
+ * `satisfies` rejects a key that is not a real step kind, and blockSteps'
+ * `Extract` rejects a kind whose step type carries no `steps` (a directive
+ * listed here without children is a compile error, not a silent runtime
+ * `undefined`). Neither can force a key IN, which is what
+ * {@link _everyChildBearingKindIsRegistered} does — without it a child-bearing
+ * kind added later is simply absent here, and absent is not an error.
  *
  * At parse time these keys are exempt from the single-key sibling check,
  * because their own parser validates their siblings with pointed messages.
@@ -2010,6 +2013,24 @@ export const BLOCK_DIRECTIVE_KEYS = ["when"] as const satisfies readonly FlowSte
 
 /** The step kinds {@link BLOCK_DIRECTIVE_KEYS} names. */
 type BlockDirectiveKind = (typeof BLOCK_DIRECTIVE_KEYS)[number];
+
+/** The child-bearing step kinds {@link BLOCK_DIRECTIVE_KEYS} fails to list. */
+type UnregisteredBlockKind = Exclude<
+  Extract<FlowStep, { steps: FlowStep[] }>["kind"],
+  BlockDirectiveKind
+>;
+
+/**
+ * Forces a child-bearing kind INTO the registry — the direction the two
+ * constraints on {@link BLOCK_DIRECTIVE_KEYS} cannot cover, since both only
+ * judge kinds already listed. An unlisted one parses like any other step and
+ * then reads as `undefined` from {@link blockSteps}, so every reader listed
+ * there silently misses its children. Spelled as a conditional rather than a
+ * bare `never` so the compile error names the missing kind.
+ */
+const _everyChildBearingKindIsRegistered: [UnregisteredBlockKind] extends [never]
+  ? true
+  : UnregisteredBlockKind = true;
 
 /**
  * Is this directive key a block directive? The parser and runner's only read of
