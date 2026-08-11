@@ -1710,7 +1710,7 @@ function scopeFlowDir(scope: StepScope): string {
   return path.dirname(scope.runStack[scope.runStack.length - 1]!.canonical);
 }
 
-/** The scope a block directive's children execute in — one level deeper. */
+/** The scope a nesting step's children execute in — one level deeper. */
 function childScope(
   scope: StepScope,
   overrides: Partial<Omit<StepScope, "depth">> = {}
@@ -1719,8 +1719,8 @@ function childScope(
 }
 
 /**
- * The depth stamp for a report — omitted at top level, so a flow with no block
- * directives produces a report byte-identical to the pre-depth shape.
+ * The depth stamp for a report — omitted at top level, so a flow with no
+ * nesting steps produces a report byte-identical to the pre-depth shape.
  */
 function depthOf(scope: StepScope): Pick<StepReport, "depth"> {
   return scope.depth ? { depth: scope.depth } : {};

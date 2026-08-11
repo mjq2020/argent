@@ -2176,7 +2176,7 @@ describe("flow composition (run:)", () => {
 
     // Each run marker sits at its enclosing depth; the fragment it expands runs
     // one deeper. Top-level steps omit the field entirely, so a flow with no
-    // block directives reports byte-identically to the pre-depth shape.
+    // nesting steps reports byte-identically to the pre-depth shape.
     expect(result.steps.map((s) => `${s.kind}:${s.depth ?? 0}`)).toEqual([
       "run:0",
       "tool:1",
