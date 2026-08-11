@@ -84,12 +84,18 @@ async function writeFlow(name: string, flow: Parameters<typeof serializeFlow>[0]
 
 async function run(
   name: string,
-  opts: { device?: string; registry?: Registry } = {}
+  opts: { device?: string; registry?: Registry; deviceless?: boolean } = {}
 ): Promise<FlowRunResult> {
   const tool = createRunFlowTool(opts.registry ?? mockRegistry());
   const result = await tool.execute(
     {},
-    { name, project_root: tmpDir, device: opts.device ?? DEVICE }
+    {
+      name,
+      project_root: tmpDir,
+      // `deviceless` omits the key entirely — a flow that touches no device
+      // resolves to none, which is a distinct state from "a device was named".
+      ...(opts.deviceless ? {} : { device: opts.device ?? DEVICE }),
+    }
   );
   if (!("steps" in result)) throw new Error(`expected a run result, got notice: ${result.notice}`);
   return result;
@@ -556,6 +562,13 @@ describe("gesture / environment codes", () => {
       if (id === "restart-app") throw new Error("app not installed");
       return undefined;
     });
+    // Counted locally rather than off the module mock, which is shared by
+    // every test in this file and never reset.
+    let reads = 0;
+    currentFetch = () => {
+      reads++;
+      return HOME;
+    };
     await writeFlow("launch-broken", {
       executionPrerequisite: "",
       steps: [{ kind: "launch", app: "com.acme.app" }],
@@ -566,6 +579,17 @@ describe("gesture / environment codes", () => {
     expect(failure.code).toBe("launch-failed");
     expect(failure.category).toBe("launch");
     expect(failure.message).toContain("app not installed");
+    // The point of classifying it: the app never started, so there is no
+    // screen to read — and on chromium the read would attach to the very
+    // instance the launch just declined to attach to.
+    expect(failure.screen).toMatchObject({
+      state: "unavailable",
+      reason: "never-readable",
+      hint: "the app never started, so there was no screen to read",
+    });
+    // ...so the post-hoc read is never ATTEMPTED, and no tree is registered.
+    expect(reads).toBe(0);
+    expect(failure.tree).toBeUndefined();
   });
 
   it("tree-source-not-ready: the launch gate never saw a readable tree source", async () => {
@@ -625,6 +649,110 @@ describe("gesture / environment codes", () => {
   });
 });
 
+describe("codes the assembler derives rather than a directive reporting them", () => {
+  it("selector-scope-unresolved: a `within` scope that matched nothing", async () => {
+    // The rewrite that turns a confusing report into an actionable one: the
+    // message is about the TARGET, but the target was never looked for — the
+    // scope naming where to look is what is broken.
+    currentFetch = () => ({
+      tree: screen([
+        n({ identifier: "checkout-cta", frame: { x: 0.1, y: 0.8, width: 0.8, height: 0.08 } }),
+      ]),
+      source: "native-devtools",
+    });
+    await writeFlow("scope-missing", {
+      executionPrerequisite: "",
+      steps: [
+        {
+          kind: "assert",
+          condition: "visible",
+          selector: { identifier: "checkout-cta", within: { identifier: "profile-card" } },
+        },
+      ],
+    });
+
+    const failure = singleFailure(await run("scope-missing"));
+
+    expect(failure.code).toBe("selector-scope-unresolved");
+    expect(failure.category).toBe("selector");
+    expect(failure.selector?.unresolvedScope).toBe("within");
+    expect(failure.hint).toContain("was never");
+    expect(failure.hint).toContain("fix the scope selector first");
+  });
+
+  it("leaves an INDETERMINATE verdict alone even when a scope matched nothing", async () => {
+    // The guard: an indeterminate verdict means argent could not see the
+    // screen, so "your scope matched nothing" is a claim about a tree nobody
+    // trusts. Rewriting code, category and determinacy together left the three
+    // self-consistent while contradicting the message — and turned "re-run"
+    // into "your flow is wrong" on exactly the mid-run devtools drop the tier
+    // exists for.
+    // The shape that actually exercises the guard: a TRUSTED first read whose
+    // tree is missing the scope (so `diagnoseScope` has something to say),
+    // followed by a window that goes dark (so the verdict is indeterminate).
+    // With no tree at all the scope is never diagnosed and the guard is never
+    // reached — a version of this test that threw on every read proved nothing.
+    let reads = 0;
+    currentFetch = () => {
+      if (reads++ === 0) {
+        return {
+          tree: screen([
+            n({ identifier: "checkout-cta", frame: { x: 0.1, y: 0.8, width: 0.8, height: 0.08 } }),
+          ]),
+          source: "native-devtools" as const,
+        };
+      }
+      throw new Error("native devtools disconnected");
+    };
+    await writeFlow("scope-indeterminate", {
+      executionPrerequisite: "",
+      steps: [
+        {
+          kind: "assert",
+          condition: "visible",
+          selector: { identifier: "checkout-cta", within: { identifier: "profile-card" } },
+        },
+      ],
+    });
+
+    const failure = singleFailure(await run("scope-indeterminate"));
+
+    expect(failure.determinacy).toBe("indeterminate");
+    expect(failure.code).toBe("condition-dark-tail");
+    expect(failure.code).not.toBe("selector-scope-unresolved");
+    // The scope IS still reported as unresolved — that observation is honest
+    // and useful. What must not happen is code, category and determinacy being
+    // rewritten around it.
+    expect(failure.selector?.unresolvedScope).toBe("within");
+    expect(failure.category).toBe("indeterminate");
+  });
+
+  it("unclassified: a failure whose directive recorded no code", async () => {
+    // The catch-all is a real wire value, not a type-system placeholder: a
+    // `when:` guard whose block fails carries the block's own outcome, and any
+    // site that forgets an evidence code lands here rather than on a blank.
+    await writeFlow("bare", {
+      executionPrerequisite: "",
+      steps: [{ kind: "tool", name: "button", args: { button: "back" } }],
+    });
+    const registry = mockRegistry((id) => {
+      // A tool that REPORTS a UI-wait miss with no signal of its own.
+      if (id === "button") return { ok: false };
+      return undefined;
+    });
+
+    const result = await run("bare", { registry });
+    const failure = result.steps.find((s) => s.failure !== undefined)?.failure;
+
+    // Whatever the runner decides, the code is always a member of the union
+    // and always carries a category — never undefined, never a blank line.
+    if (failure) {
+      expect(ALL_CODES).toContain(failure.code);
+      expect(failure.category).toBe(FLOW_FAILURE_CATEGORY[failure.code]);
+    }
+  });
+});
+
 describe("composition codes", () => {
   it("run-cyclic: a fragment that references itself", async () => {
     await writeFlow("cycle-a", {
@@ -640,6 +768,44 @@ describe("composition codes", () => {
 
     expect(failure.code).toBe("run-cyclic");
     expect(failure.category).toBe("composition");
+  });
+
+  it("no-device: a flow that touches no device reports having no screen", async () => {
+    // A flow whose steps declare no device argument resolves to no device at
+    // all, and its failure is fully explained by its code and reason. The
+    // report must say "there was never a screen" rather than degrade through
+    // the read-failed path, which reads as a broken tree source.
+    const registry = {
+      invokeTool: vi.fn(async (id: string) => {
+        if (id === "list-devices") return { devices: [] };
+        throw new Error("the deviceless tool refused");
+      }),
+      // No `udid`/`serial` property, so `stepRequiresDevice` says no.
+      getTool: vi.fn(() => ({ inputSchema: { properties: {} } })),
+    } as unknown as Registry;
+    let reads = 0;
+    currentFetch = () => {
+      reads++;
+      return HOME;
+    };
+    await writeFlow("headless", {
+      executionPrerequisite: "",
+      steps: [{ kind: "tool", name: "stop-metro", args: {} }],
+    });
+
+    const failure = singleFailure(await run("headless", { registry, deviceless: true }));
+
+    expect(failure.code).toBe("tool-step-failed");
+    expect(failure.screen).toEqual({
+      state: "unavailable",
+      reason: "no-device",
+      hint: "this flow ran without a device, so there was no screen to read",
+    });
+    // No device means nothing to read and nothing to capture — and no platform
+    // to report either, which is omitted rather than faked.
+    expect(reads).toBe(0);
+    expect(failure.data?.platform).toBeUndefined();
+    expect(failure.screenshot).toBeUndefined();
   });
 
   it("run-depth-exceeded: a chain deeper than the run-stack cap", async () => {
