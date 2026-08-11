@@ -77,6 +77,50 @@ function makeDoc(active: FakeEl | null): FakeDoc {
   };
 }
 
+type Root = Record<string, unknown>;
+
+/**
+ * The roots the containment walk climbs through, built the way a browser
+ * declares them: `activeElement` and `defaultView` are accessors on
+ * `Document.prototype`, `host` is one on `ShadowRoot.prototype`. None of the
+ * three is ever an OWN property of the root.
+ *
+ * `decoys` are the own properties a page can put there anyway, because a
+ * document's named getter is `[LegacyOverrideBuiltIns]`: `<img name="host">`,
+ * `<form name="host">` and `<img name="defaultView">` each shadow the property
+ * they are named after. Modelling them is what makes these tests
+ * discriminating — a read that skips the accessor picks the decoy up and the
+ * verdict visibly changes, so it cannot ship green.
+ */
+function rootWith(accessors: Root, decoys: Root = {}): Root {
+  const proto: Root = {};
+  for (const name of Object.keys(accessors)) {
+    Object.defineProperty(proto, name, {
+      get(this: Root) {
+        return this[`__${name}`];
+      },
+      configurable: true,
+    });
+  }
+  const backing: Root = {};
+  for (const [name, value] of Object.entries(accessors)) backing[`__${name}`] = value;
+  const root = Object.assign(Object.create(proto) as Root, backing);
+  // Defined, not assigned: a named getter is an OWN property that overrides the
+  // prototype's accessor, and a plain assignment would instead run that
+  // accessor's (absent) setter and throw.
+  for (const [name, value] of Object.entries(decoys)) {
+    Object.defineProperty(root, name, { value, enumerable: true, configurable: true });
+  }
+  return root;
+}
+
+/** A (sub)document: `frameElement` is the frame holding it, if any. */
+const subDoc = (activeElement: unknown, frameElement: unknown = null, decoys: Root = {}) =>
+  rootWith({ activeElement, defaultView: { frameElement } }, decoys);
+
+/** An open shadow root, identified by the `host` accessor a browser declares. */
+const shadowRoot = (activeElement: unknown, host: unknown) => rootWith({ activeElement, host });
+
 /** Run a probe against a fake page, returning the parsed verdict and the window. */
 function runProbe(
   expression: string,
@@ -459,11 +503,15 @@ describe("chromium clear — release probe", () => {
         textContent: "",
       };
       const frame = { tagName: "IFRAME" } as Record<string, unknown>;
-      const parentDoc = { activeElement: parentActive === "self" ? frame : parentActive };
-      // The editor document, whose own activeElement is its body either way.
-      const editorDoc = { activeElement: el, defaultView: { frameElement: frame } };
+      const parentDoc = subDoc(parentActive === "self" ? frame : parentActive);
+      // The editor document, whose own activeElement is its body either way. Its
+      // `defaultView` decoy points at a frame nothing else references, so a raw
+      // read climbs to a stranger and the walk reports a focus loss.
+      const editorDoc = subDoc(el, frame, {
+        defaultView: { frameElement: { tagName: "IFRAME", id: "defaultViewDecoy" } },
+      });
       el.getRootNode = () => editorDoc as unknown as { activeElement: FakeEl | null };
-      frame.getRootNode = () => parentDoc;
+      frame.getRootNode = () => parentDoc as unknown as { activeElement: FakeEl | null };
       return release({ [HANDLE]: el }).result;
     };
 
@@ -490,14 +538,14 @@ describe("chromium clear — release probe", () => {
       const host = { tagName: "MY-WIDGET" } as Record<string, unknown>;
       const frame = { tagName: "IFRAME" } as Record<string, unknown>;
       // Top document retargets to the host, exactly as a browser does.
-      const topDoc = { activeElement: host };
-      // The shadow root, identified by `host`, holds the frame.
-      const shadow = { activeElement: frame, host };
-      const frameDoc = { activeElement: el, defaultView: { frameElement: frame } };
+      const topDoc = subDoc(host);
+      // The shadow root, identified by the `host` accessor, holds the frame.
+      const shadow = shadowRoot(frame, host);
+      const frameDoc = subDoc(el, frame);
 
       el.getRootNode = () => frameDoc as unknown as { activeElement: FakeEl | null };
-      frame.getRootNode = () => shadow;
-      host.getRootNode = () => topDoc;
+      frame.getRootNode = () => shadow as unknown as { activeElement: FakeEl | null };
+      host.getRootNode = () => topDoc as unknown as { activeElement: FakeEl | null };
       // A real iframe has BOTH, and they disagree here — which is the whole
       // point: `ownerDocument` is not retargeted, so stepping up through it
       // lands on the top document, whose activeElement is the host, not the
@@ -507,6 +555,31 @@ describe("chromium clear — release probe", () => {
       host.ownerDocument = topDoc;
 
       expect(release({ [HANDLE]: el }).result).toMatchObject({ tracked: true, focused: true });
+    });
+
+    it("does not mistake an element merely NAMED host for a shadow host", () => {
+      // `host` is not a Document property, so `document.host` resolves PURELY
+      // through the document's `[LegacyOverrideBuiltIns]` named getter: any
+      // `form` / `img` / `iframe` / `embed` / `object` named "host" — a
+      // plausible neighbour of the field on a server-config screen — makes the
+      // raw read truthy for the TOP-LEVEL document. The walk then steps onto the
+      // decoy and finds the real input still focused one hop up, so a field that
+      // never lost focus is reported as blurred. Measured 5/5 on Chromium 148
+      // with `<img name="host">` and again with `<form name="host">`: a working
+      // `{ clear, text }` became the field's value destroyed, the replacement
+      // never typed, and the caller told the page had moved focus.
+      for (const decoy of [
+        { tagName: "IMG", name: "host" },
+        { tagName: "FORM", name: "host" },
+      ]) {
+        const el: FakeEl = { tagName: "INPUT", value: "", isConnected: true };
+        // The decoy is its own root's activeElement nowhere, so stepping onto it
+        // is what produces the wrong verdict.
+        const topDoc = subDoc(el, null, { host: decoy });
+        el.getRootNode = () => topDoc as unknown as { activeElement: FakeEl | null };
+
+        expect(release({ [HANDLE]: el }).result).toMatchObject({ tracked: true, focused: true });
+      }
     });
 
     it("leaves the local verdict alone when an ancestor is cross-origin", () => {

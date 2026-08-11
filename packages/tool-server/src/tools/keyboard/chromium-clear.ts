@@ -297,11 +297,14 @@ export const focusedEditableProbe = (handle: string) => `(() => {
  * window is unfocused, which a CDP-driven browser routinely is, and that would
  * fail every clear.
  *
- * `activeElement` is read through the prototype accessor of whichever root came
- * back, for the same reason `focusedEditableProbe` does it: on a document it is
- * a `[LegacyOverrideBuiltIns]` named getter, so `<iframe name="activeElement">`
- * makes the raw read return that frame's `Window` and every successful clear
- * report that the field lost focus.
+ * EVERY property the walk reads off a root — `activeElement`, `host`,
+ * `defaultView` — goes through the prototype accessor, for the same reason
+ * `focusedEditableProbe` does it: a document's named getter is
+ * `[LegacyOverrideBuiltIns]`, so an element merely NAMED after one of them
+ * shadows it. `<iframe name="activeElement">` makes that raw read return the
+ * frame's `Window` and every successful clear report a lost focus; `<img
+ * name="host">` makes the top-level document look like a shadow root and does
+ * the same. Reading one of the three raw is enough to break the other two.
  *
  * `nodes` counts residue a text measurement cannot see. On a non-form target the
  * value read is `textContent`, so content carrying no text node — an `<img>`, a
@@ -325,19 +328,38 @@ export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
     if (!el) return JSON.stringify({ tracked: false });
     let focused = false;
     try {
-      // \`activeElement\` of a root or document, read through the prototype
-      // accessor. Walk the prototype CHAIN, not just the immediate one: on an
-      // HTML document the own prototype is HTMLDocument.prototype while
-      // \`activeElement\` is declared on Document.prototype above it, so a
+      // The accessor a root declares for \`name\`, found by walking the prototype
+      // CHAIN rather than the immediate prototype: on an HTML document the own
+      // prototype is HTMLDocument.prototype while \`activeElement\` and
+      // \`defaultView\` are declared on Document.prototype above it, so a
       // one-level lookup finds nothing and falls back to the shadowed read.
-      const activeIn = (node) => {
-        let activeOf;
+      const accessorOf = (node, name) => {
         for (let proto = node && Object.getPrototypeOf(node); proto; ) {
-          const d = Object.getOwnPropertyDescriptor(proto, "activeElement");
-          if (d && d.get) { activeOf = d.get; break; }
+          const d = Object.getOwnPropertyDescriptor(proto, name);
+          if (d && d.get) return d.get;
           proto = Object.getPrototypeOf(proto);
         }
+        return undefined;
+      };
+      const activeIn = (node) => {
+        const activeOf = accessorOf(node, "activeElement");
         return node ? (activeOf ? activeOf.call(node) : node.activeElement) : null;
+      };
+      // No raw fallback: a shadow root ALWAYS declares \`host\` on
+      // ShadowRoot.prototype, so "no accessor" means "not a shadow root", while
+      // \`host\` is not a Document property at all — \`document.host\` is PURELY the
+      // named getter, and any element named "host" would otherwise make the
+      // top-level document look like a shadow root.
+      const hostOf = (root) => {
+        const get = accessorOf(root, "host");
+        return get ? get.call(root) : null;
+      };
+      // \`defaultView\` IS on Document.prototype, so the accessor is always found
+      // for a real document and the fallback only serves a root with nothing to
+      // shadow (where it reads undefined anyway).
+      const viewOf = (root) => {
+        const get = accessorOf(root, "defaultView");
+        return get ? get.call(root) : root.defaultView;
       };
       // Climb out of every tree the element sits in, requiring at each level
       // that the node is its OWN root's \`activeElement\`, then stepping up to
@@ -357,7 +379,8 @@ export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
         const root = node.getRootNode ? node.getRootNode() : null;
         if (activeIn(root) !== node) { focused = false; break; }
         // A shadow root: the next question is whether its host holds focus.
-        if (root.host) { node = root.host; continue; }
+        const host = hostOf(root);
+        if (host) { node = host; continue; }
         // A document: step out to the frame containing it, if any. A
         // cross-origin container reports \`frameElement\` as null (and a document
         // with no browsing context has no \`defaultView\`), which is "can't tell"
@@ -365,7 +388,7 @@ export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
         // rather than inventing a loss. The \`try\` is belt and braces for an
         // engine that throws instead.
         let frame = null;
-        try { frame = root.defaultView && root.defaultView.frameElement; } catch (e) { break; }
+        try { const view = viewOf(root); frame = view && view.frameElement; } catch (e) { break; }
         if (!frame) break;
         node = frame;
       }
