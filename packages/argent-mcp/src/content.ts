@@ -277,8 +277,27 @@ export type FlowStepFailure = {
     text?: string;
     textMatch?: string;
     timeoutMs?: number;
+    direction?: string;
+    within?: string;
+    maxIterations?: number;
+    snapshotKey?: string;
+    maxMismatch?: number;
+    gesture?: string;
   };
-  actual?: { text?: string; ownText?: string; matchCount?: number; visibleMatchCount?: number };
+  actual?: {
+    text?: string;
+    ownText?: string;
+    matchCount?: number;
+    visibleMatchCount?: number;
+    /** The element a `text` condition read. */
+    element?: FlowFailureNode;
+    /**
+     * Matched every field but had a zero-area frame — THE diagnosis for
+     * `selector-not-visible`, and deliberately kept out of `candidates`, which
+     * answers a different question.
+     */
+    invisibleMatches?: FlowFailureNode[];
+  };
   screen?: FlowFailureScreen;
   candidates?: FlowFailureCandidate[];
   /** True total, before the producer's own cap. */
@@ -446,6 +465,60 @@ function frameCentre(frame: unknown): string | undefined {
   return `${(x + width / 2).toFixed(2)}, ${(y + height / 2).toFixed(2)}`;
 }
 
+/**
+ * The check the step was making, for every arm the producer emits — not just
+ * `condition` + `text`. Gating the slot on `expected.text` alone meant the
+ * `scroll`, `snapshot`, `gesture` and text-less `condition` shapes rendered
+ * nothing, so `condition: "visible"`, `timeoutMs` and `maxMismatch` never
+ * reached the agent at all. Mirrors the CLI's `normalizeExpected`.
+ */
+function expectedLine(expected: unknown): string | undefined {
+  if (!isRecord(expected)) return undefined;
+  if (expected.kind === "condition") {
+    const text = wireText(expected.text);
+    if (text !== undefined) {
+      const mode = wireText(expected.textMatch, 20);
+      return `${JSON.stringify(text)}${mode ? ` (${mode})` : ""}`;
+    }
+    return wireText(expected.condition, 64);
+  }
+  if (expected.kind === "scroll") {
+    const direction = wireText(expected.direction, 32) ?? "scroll";
+    const within = wireText(expected.within);
+    const max = wireNumber(expected.maxIterations);
+    return (
+      `scroll ${direction}${within ? ` within ${within}` : ""}` +
+      `${max === undefined ? "" : ` (max ${Math.round(max)} iterations)`}`
+    );
+  }
+  if (expected.kind === "snapshot") {
+    const key = wireText(expected.snapshotKey, 128);
+    const max = wireNumber(expected.maxMismatch);
+    return `snapshot${key ? ` ${key}` : ""}${max === undefined ? "" : ` (max ${max}% mismatch)`}`;
+  }
+  if (expected.kind === "gesture") return wireText(expected.gesture, 32);
+  return undefined;
+}
+
+/**
+ * One element, spelled like a candidate row minus the score. Used for the
+ * `match:` slot — the element that WAS found, on the shapes where "which
+ * element did you mean instead" has no answer.
+ */
+function nodeLine(node: unknown): string | undefined {
+  if (!isRecord(node)) return undefined;
+  const parts: string[] = [];
+  const name = wireText(node.label, 60) ?? wireText(node.value, 60) ?? wireText(node.text, 60);
+  if (name) parts.push(`"${name}"`);
+  const role = wireText(node.role, 40);
+  if (role) parts.push(role);
+  const identifier = wireText(node.identifier, 60);
+  if (identifier) parts.push(`id=${identifier}`);
+  const centre = frameCentre(node.frame);
+  if (centre) parts.push(`at ${centre}`);
+  return parts.length === 0 ? undefined : parts.join("  ");
+}
+
 /** One ~60-char candidate line: score, what it is, where to tap, paste-able YAML. */
 function candidateLine(candidate: unknown): string | undefined {
   if (!isRecord(candidate)) return undefined;
@@ -526,15 +599,27 @@ async function failureBlocks(
       );
     }
 
-    const expected = isRecord(failure.expected) ? failure.expected : undefined;
-    const expectedText = wireText(expected?.text);
-    if (expectedText) {
-      const mode = wireText(expected?.textMatch, 20);
-      lines.push(`     expected: "${expectedText}"${mode ? ` (${mode})` : ""}`);
+    // A bare gesture expectation ("tap") says nothing the step line above has
+    // not already said, so it earns no slot — the CLI draws the same rule.
+    const expected = expectedLine(failure.expected);
+    if (expected !== undefined && expected !== wireText(step.kind, 64)) {
+      lines.push(`     expected: ${expected}`);
     }
     const actual = isRecord(failure.actual) ? failure.actual : undefined;
     const actualText = wireText(actual?.text) ?? wireText(actual?.ownText);
     if (actualText) lines.push(`     actual: "${actualText}"`);
+    else {
+      // `invisibleMatches` IS the diagnosis for `selector-not-visible`: the
+      // element the selector named is on the tree, it just has a zero-area
+      // frame. Without it the one shape whose fix is "find out why it has no
+      // size" reached the agent with no element at all — and its candidate
+      // list is deliberately empty, because no other element was meant.
+      const invisible = Array.isArray(actual?.invisibleMatches)
+        ? actual.invisibleMatches[0]
+        : undefined;
+      const match = nodeLine(actual?.element ?? invisible);
+      if (match) lines.push(`     match: ${match}`);
+    }
 
     const candidates = Array.isArray(failure.candidates)
       ? failure.candidates.slice(0, MAX_RENDER_CANDIDATES)

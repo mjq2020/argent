@@ -967,6 +967,105 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     expect(rendered).toContain("  (1 more failure — evidence at the paths listed above)");
   });
 
+  it("renders the expected slot for every arm, not just a text condition", async () => {
+    // Gating the slot on `expected.text` left the scroll, snapshot, gesture and
+    // text-less condition shapes rendering nothing at all, so `condition:
+    // "visible"`, `timeoutMs` and `maxMismatch` never reached the agent.
+    const arms = [
+      [{ kind: "condition", condition: "visible", timeoutMs: 5000 }, "expected: visible"],
+      [
+        { kind: "condition", condition: "text", text: "Done", textMatch: "equals" },
+        'expected: "Done" (equals)',
+      ],
+      [
+        { kind: "scroll", direction: "down", within: 'id="list"', maxIterations: 12 },
+        'expected: scroll down within id="list" (max 12 iterations)',
+      ],
+      [
+        { kind: "snapshot", snapshotKey: "home__ios-390x844", maxMismatch: 0.5 },
+        "expected: snapshot home__ios-390x844 (max 0.5% mismatch)",
+      ],
+    ] as const;
+
+    for (const [expected, line] of arms) {
+      const rendered = texts(
+        await flowRunToMcpContent({
+          flow: "f",
+          ok: false,
+          steps: [
+            {
+              index: 0,
+              kind: "assert",
+              status: "fail",
+              failure: wireFailure({ code: "selector-not-found", message: "nope", expected }),
+            },
+          ],
+        })
+      ).join("\n");
+      expect(rendered).toContain(line);
+    }
+  });
+
+  it("omits a bare gesture expectation that only restates the step kind", async () => {
+    const rendered = texts(
+      await flowRunToMcpContent({
+        flow: "f",
+        ok: false,
+        steps: [
+          {
+            index: 0,
+            kind: "tap",
+            status: "fail",
+            failure: wireFailure({
+              code: "selector-not-found",
+              message: "nope",
+              expected: { kind: "gesture", gesture: "tap" },
+            }),
+          },
+        ],
+      })
+    ).join("\n");
+    expect(rendered).not.toContain("expected:");
+  });
+
+  it("shows the zero-area element that IS the selector-not-visible diagnosis", async () => {
+    // `invisibleMatches` was absent from the MCP wire type entirely, so the one
+    // failure shape whose fix is "find out why it has no size" reached the
+    // agent with no element at all — and its candidate list is deliberately
+    // empty, because no other element was meant.
+    const rendered = texts(
+      await flowRunToMcpContent({
+        flow: "f",
+        ok: false,
+        steps: [
+          {
+            index: 0,
+            kind: "tap",
+            status: "fail",
+            failure: wireFailure({
+              code: "selector-not-visible",
+              message: 'element matched id="cta" but its frame has zero area',
+              candidates: [],
+              actual: {
+                matchCount: 1,
+                visibleMatchCount: 0,
+                invisibleMatches: [
+                  {
+                    role: "button",
+                    label: "Check out",
+                    identifier: "cta",
+                    frame: { x: 0.5, y: 0.5, width: 0, height: 0 },
+                  },
+                ],
+              },
+            }),
+          },
+        ],
+      })
+    ).join("\n");
+    expect(rendered).toContain('match: "Check out"  button  id=cta  at 0.50, 0.50');
+  });
+
   it("renders a snapshot failure's image once, under its own role", async () => {
     // `failure.screenshot` on a snapshot failure IS the step's `current`: the
     // producer reuses the handle rather than capturing a second time. Rendering
