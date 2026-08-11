@@ -191,8 +191,11 @@ describe("payload byte budget", () => {
     expect(failure.code).toBe("selector-not-found");
     expect(failure.message.length).toBeGreaterThan(0);
     expect(failure.selector?.described).toContain("Nothing Here");
-    expect(Buffer.byteLength(JSON.stringify(failure), "utf8")).toBeLessThan(
-      FLOW_FAILURE_BYTE_LIMIT * 2
+    // The BUDGET, not twice it. `* 2` accepted a 47 KB payload from a 24 KB
+    // cap — and this is the only assertion on the trimmed size, so it was the
+    // only thing standing between the shedding loop and no bound at all.
+    expect(Buffer.byteLength(JSON.stringify(failure), "utf8")).toBeLessThanOrEqual(
+      FLOW_FAILURE_BYTE_LIMIT
     );
   });
 
@@ -293,10 +296,13 @@ describe("truncateUtf8Field", () => {
     const node = shown.elements.find((e) => e.identifier === "wall-of-text");
 
     expect(node?.text).toBeDefined();
-    // ~10 KB in, a field-sized string out. (The exact bound is the subject of
-    // the pinned `it.fails` above — the ellipsis costs 2 bytes more than the
-    // implementation reserves.)
-    expect(Buffer.byteLength(node!.text!, "utf8")).toBeLessThan(FLOW_FAILURE_FIELD_BYTE_LIMIT + 8);
+    // ~10 KB in, a field-sized string out — AT the cap, not eight bytes past
+    // it. The slack cited an `it.fails` that no longer exists: the ellipsis
+    // accounting it excused was fixed, and byte accuracy is pinned directly by
+    // "is byte-accurate to the documented limit" above.
+    expect(Buffer.byteLength(node!.text!, "utf8")).toBeLessThanOrEqual(
+      FLOW_FAILURE_FIELD_BYTE_LIMIT
+    );
     expect(node!.text).not.toContain("�");
     expect(Buffer.from(node!.text!, "utf8").toString("utf8")).toBe(node!.text);
     expect(node!.text!.startsWith("🙂漢字ñ")).toBe(true);
