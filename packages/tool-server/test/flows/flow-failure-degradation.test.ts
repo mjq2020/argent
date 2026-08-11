@@ -385,7 +385,10 @@ describe("the capture budget", () => {
     await new Promise((resolve) => setTimeout(resolve, 1500));
 
     expect(screenshots).toBe(0);
-    expect(singleFailure(result).screen.reason).toBe("capture-timeout");
+    expect(singleFailure(result).screen).toMatchObject({
+      state: "unavailable",
+      reason: "capture-timeout",
+    });
     expectVerdict(result, {
       statuses: ["tool:error", "wait:skip"],
       ok: false,
