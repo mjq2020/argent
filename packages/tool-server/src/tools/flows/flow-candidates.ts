@@ -439,7 +439,15 @@ export function rankCandidates(
   // you mean instead" has no answer that is the element you already named.
   // They are reported as `actual.invisibleMatches` instead, and suggesting the
   // selector that just failed would burn a slot on a no-op repair.
-  const matched = new Set(flowMatchAll(tree, selector));
+  //
+  // Guarded for the same reason `diagnoseScope` guards its identical call, and
+  // the module header promises the same thing of the whole file: an
+  // uncompilable `textMatches` throws out of the match engine, and a throw here
+  // degrades a perfectly readable screen to `screen: read-failed`. `parseFlow`
+  // validates every pattern, so this is a contract the file states rather than
+  // a crash anyone has seen — which is exactly why it must not depend on the
+  // parser staying the only way in.
+  const matched = new Set(safeMatchAll(tree, selector) ?? []);
   const ranked: Ranked[] = [];
 
   for (const node of flattenForReport(tree)) {
@@ -533,6 +541,24 @@ export function rankCandidates(
 }
 
 /**
+ * {@link flowMatchAll}, or `undefined` when it THREW — the one call in this
+ * module that can (a selector carrying an uncompilable `textMatches`), and it
+ * appears twice.
+ *
+ * Undefined rather than an empty array because the two callers need to tell
+ * "matched nothing" from "could not be probed" differently: ranking treats
+ * both as "nothing to exclude", while {@link diagnoseScope} must NOT report an
+ * unprobeable scope as one that resolved to nothing.
+ */
+function safeMatchAll(tree: DescribeNode, selector: FlowSelector): DescribeNode[] | undefined {
+  try {
+    return flowMatchAll(tree, selector);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The first relational scope on `selector` that resolved to NOTHING, if any.
  *
  * This is the signal that turns a confusing report into an actionable one: when
@@ -554,17 +580,11 @@ export function diagnoseScope(
   for (const relation of SELECTOR_RELATIONS) {
     const scope = selector[relation];
     if (scope === undefined) continue;
-    try {
-      if (flowMatchAll(tree, scope).length === 0) return relation;
-    } catch {
-      // The one call in this module that can throw (a scope carrying an
-      // uncompilable `textMatches` — impossible for a parsed flow, since the
-      // parser validates every pattern). A scope that cannot be probed is
-      // simply not diagnosed: the caller is mid-way through assembling a
-      // failure report, and a throw here would replace a real diagnosis with a
-      // crash.
-      continue;
-    }
+    // A scope that cannot be PROBED is not a scope that resolved to nothing:
+    // reporting it as unresolved would send the operator to fix a scope that
+    // may well be correct. Undiagnosed is the honest outcome there.
+    const scoped = safeMatchAll(tree, scope);
+    if (scoped !== undefined && scoped.length === 0) return relation;
   }
   return undefined;
 }
