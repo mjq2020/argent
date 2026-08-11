@@ -482,6 +482,36 @@ describe("scroll codes", () => {
     expect(failure.expected).toMatchObject({ kind: "scroll", direction: "down" });
   });
 
+  it("selector-not-visible: the scroll target IS on the tree, with no frame", async () => {
+    // Scrolling cannot reveal a zero-area element, so `scroll-target-not-found`
+    // ("keep looking further down the list") is the wrong instruction — it is
+    // the same state `selectorMissEvidence` classifies as a visibility problem
+    // on a `tap`, and it deserves the same code and the same hint.
+    currentFetch = () => ({
+      tree: screen([
+        n({ label: "Row 1", frame: { x: 0.1, y: 0.1, width: 0.8, height: 0.1 } }),
+        n({ label: "Order #1234", frame: { x: 0.1, y: 0.5, width: 0, height: 0 } }),
+      ]),
+      source: "native-devtools",
+    });
+    await writeFlow("scroll-invisible", {
+      executionPrerequisite: "",
+      steps: [{ kind: "scroll-to", target: { text: "Order #1234" }, direction: "down" }],
+    });
+
+    const failure = singleFailure(await run("scroll-invisible"));
+
+    expect(failure.code).toBe("selector-not-visible");
+    expect(failure.category).toBe("selector");
+    expect(failure.hint).toContain("zero area");
+    // The element the operator asked for, named rather than hunted for.
+    expect(failure.actual?.matchCount).toBe(1);
+    expect(failure.actual?.visibleMatchCount).toBe(0);
+    expect(failure.actual?.invisibleMatches?.[0]?.label).toBe("Order #1234");
+    // The scroll expectation still rides along — that IS what the step asked.
+    expect(failure.expected).toMatchObject({ kind: "scroll", direction: "down" });
+  });
+
   it("scroll-container-not-visible: the `within` container never resolved", async () => {
     currentFetch = () => ({
       tree: screen([n({ label: "Row 1", frame: { x: 0.1, y: 0.1, width: 0.8, height: 0.1 } })]),

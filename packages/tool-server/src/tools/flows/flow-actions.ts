@@ -720,6 +720,27 @@ async function scrollToVisible(
     ...(sink.tree !== undefined ? { matches: flowFindAll(sink.tree, target) } : {}),
   });
 
+  /**
+   * A scroll that never brought the target into view. The code comes from the
+   * OBSERVATION, exactly as {@link selectorMissEvidence} derives it: a target
+   * that matched nodes whose frames are all zero-area is a VISIBILITY problem,
+   * and no amount of scrolling fixes one — so reporting `scroll-target-not-found`
+   * there sent the operator hunting for an element that was on the tree all
+   * along.
+   */
+  const scrollMissEvidence = (): DirectiveEvidence => {
+    const evidence = scrollEvidence("scroll-target-not-found");
+    const matches = evidence.matches ?? [];
+    if (matches.length === 0 || matches.some(isVisible)) return evidence;
+    return {
+      ...evidence,
+      code: "selector-not-visible",
+      hint:
+        "the element is in the tree but its frame has zero area, so scrolling cannot reveal it — " +
+        "it may be behind an overlay, collapsed, or not laid out yet",
+    };
+  };
+
   let prevFp: string | undefined;
   for (let i = 0; i < MAX_SCROLL_ITERATIONS; i++) {
     if (env.signal?.aborted) return { aborted: true };
@@ -770,7 +791,7 @@ async function scrollToVisible(
       if (frame) return { frame };
       return {
         reason: `reached the end of the scroll without finding ${describeSelector(target)}`,
-        evidence: scrollEvidence("scroll-target-not-found"),
+        evidence: scrollMissEvidence(),
       };
     }
     prevFp = fp;
@@ -779,7 +800,7 @@ async function scrollToVisible(
   }
   return {
     reason: `${describeSelector(target)} not found after ${MAX_SCROLL_ITERATIONS} scroll attempts`,
-    evidence: scrollEvidence("scroll-target-not-found"),
+    evidence: scrollMissEvidence(),
   };
 }
 
