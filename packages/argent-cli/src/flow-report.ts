@@ -635,8 +635,23 @@ function junitDetailLines(s: StepReport, f: NormalizedFailure | undefined): stri
   return lines;
 }
 
+/** One flow's contribution to the document's `<testsuites>` counters. */
+interface SuiteTotals {
+  tests: number;
+  failures: number;
+  errors: number;
+  skipped: number;
+  timeMs: number;
+}
+
+/** One flow of a run, with the metadata only the caller knows about it. */
+export interface JUnitRun {
+  report: FlowReport;
+  meta?: JUnitMeta;
+}
+
 /**
- * A flow is a `<testsuite>`; each step is a `<testcase>`.
+ * One flow's `<testsuite>`; each step is a `<testcase>`.
  *
  * Per-failure attribution in the checks UI is the entire value of JUnit in CI,
  * and a flow is 10-50 individually-named steps — collapsing them into one
@@ -649,7 +664,7 @@ function junitDetailLines(s: StepReport, f: NormalizedFailure | undefined): stri
  * testcases would make `tests=` disagree with the testcase count. Their text
  * joins the suite-level `<system-out>` instead.
  */
-export function buildJUnitXml(report: FlowReport, meta: JUnitMeta = {}): string {
+function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; totals: SuiteTotals } {
   const flow = wireText(report.flow, 128) ?? "flow";
   const steps = Array.isArray(report.steps) ? report.steps : [];
   // Counts derive from the steps, never from the wire counters: the testcase
@@ -663,23 +678,22 @@ export function buildJUnitXml(report: FlowReport, meta: JUnitMeta = {}): string 
   const incomplete = report.ok === false && failures === 0 && errors === 0;
 
   const stepSum = counted.reduce((sum, s) => sum + (wireFinite(s.durationMs) ?? 0), 0);
-  const time = junitTime(meta.durationMs ?? report.durationMs ?? stepSum);
+  const timeMs = Math.max(0, wireFinite(meta.durationMs ?? report.durationMs ?? stepSum) ?? 0);
   const startedAt = wireTimestamp(report.startedAt);
   const timestamp =
     meta.timestamp ?? (startedAt !== undefined ? new Date(startedAt).toISOString() : undefined);
 
-  const counters = attrs([
-    ["tests", String(counted.length)],
-    ["failures", String(failures)],
-    ["errors", String(errors + (incomplete ? 1 : 0))],
-    ["skipped", String(skipped)],
-    ["time", time],
-  ]);
+  const totals: SuiteTotals = {
+    tests: counted.length,
+    failures,
+    errors: errors + (incomplete ? 1 : 0),
+    skipped,
+    timeMs,
+  };
 
-  const out: string[] = ['<?xml version="1.0" encoding="UTF-8"?>'];
-  out.push(`<testsuites name="argent flow"${counters}>`);
+  const out: string[] = [];
   out.push(
-    `  <testsuite name="${xmlEscape(flow)}"${counters}${attrs([
+    `  <testsuite name="${xmlEscape(flow)}"${junitCounters(totals)}${attrs([
       ["timestamp", timestamp],
       ["hostname", meta.hostname ?? wireText(report.device, 128)],
     ])}>`
@@ -760,8 +774,51 @@ export function buildJUnitXml(report: FlowReport, meta: JUnitMeta = {}): string 
   }
 
   out.push("  </testsuite>");
+  return { lines: out, totals };
+}
+
+function junitCounters(t: SuiteTotals): string {
+  return attrs([
+    ["tests", String(t.tests)],
+    ["failures", String(t.failures)],
+    ["errors", String(t.errors)],
+    ["skipped", String(t.skipped)],
+    ["time", junitTime(t.timeMs)],
+  ]);
+}
+
+/**
+ * The whole document: one `<testsuite>` per flow, under a `<testsuites>` whose
+ * counters are their sum.
+ *
+ * A directory run is the canonical CI invocation (`argent flow run
+ * .argent/flows -r`), and per-suite attribution is the entire point of the
+ * reporter — so a run of N flows is N suites in ONE file, not one file that
+ * only the single-flow path ever wrote.
+ */
+export function buildJUnitDocument(runs: JUnitRun[]): string {
+  const suites = runs.map(({ report, meta }) => junitSuite(report, meta ?? {}));
+  const totals = suites.reduce<SuiteTotals>(
+    (sum, s) => ({
+      tests: sum.tests + s.totals.tests,
+      failures: sum.failures + s.totals.failures,
+      errors: sum.errors + s.totals.errors,
+      skipped: sum.skipped + s.totals.skipped,
+      timeMs: sum.timeMs + s.totals.timeMs,
+    }),
+    { tests: 0, failures: 0, errors: 0, skipped: 0, timeMs: 0 }
+  );
+
+  const out: string[] = ['<?xml version="1.0" encoding="UTF-8"?>'];
+  out.push(`<testsuites name="argent flow"${junitCounters(totals)}>`);
+  for (const suite of suites) out.push(...suite.lines);
   out.push("</testsuites>");
   return `${out.join("\n")}\n`;
+}
+
+/** One flow's report as a whole document — the single-flow `flow run` path. */
+export function buildJUnitXml(report: FlowReport, meta: JUnitMeta = {}): string {
+  return buildJUnitDocument([{ report, meta }]);
 }
 
 /**

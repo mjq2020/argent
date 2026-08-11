@@ -17,7 +17,7 @@ import { isCi } from "@argent/telemetry";
 import { FlagParseException } from "./flag-parser.js";
 import {
   artifactPath,
-  buildJUnitXml,
+  buildJUnitDocument,
   candidateRows,
   formatDuration,
   INDETERMINATE_HINT,
@@ -26,6 +26,7 @@ import {
   parseReporterSpec,
   stepLabel,
   wireText,
+  type JUnitRun,
   type NormalizedFailure,
 } from "./flow-report.js";
 
@@ -280,7 +281,9 @@ Options (run):
                          instead (with a warning), so no flow's evidence is
                          overwritten
   --reporter <spec>      Extra report output, repeatable: \`default\` (the terminal
-                         output, always on) or \`junit:<path>\` to write JUnit XML
+                         output, always on) or \`junit:<path>\` to write JUnit XML —
+                         one <testsuite> per flow, so a directory run writes every
+                         flow it ran into the single file named here
   -r, --recursive        With a directory path, also run flows in subdirectories
   --json                 Print the raw JSON report
   --help, -h             Show this help
@@ -1564,6 +1567,12 @@ async function runFlowDirectory(
     results.push({ path: rel, status: report.ok ? "pass" : "fail", report });
     if (!args.json) {
       for (const line of renderFailedSteps(report)) console.log(line);
+      // The failure block, on the invocation CI actually runs. Batch output is
+      // deliberately terse, but the block is not step noise — it is the code,
+      // the candidates, the screen and the paths to the evidence
+      // `exportAndResolveArtifacts` has ALREADY written, which the one-line
+      // reason above says nothing about.
+      for (const line of renderFailures(report)) console.log(line);
       console.log(`  ${renderSummary(report, { withDevice: true })}`);
     }
   }
@@ -1579,6 +1588,34 @@ async function runFlowDirectory(
   } else {
     console.log(`\n${renderBatchSummary(counts)}`);
   }
+
+  // Every flow that produced a report becomes a `<testsuite>` in the one file
+  // the operator named. A flow the batch never ran (skipped after a stop) or
+  // that produced no report has nothing to attribute, so it contributes none.
+  const reported = results.filter(
+    (r): r is BatchFlowResult & { report: FlowReport } => r.report !== undefined
+  );
+  await writeReporterFiles(
+    reported.map((r) => ({
+      report: r.report,
+      meta: {
+        platform: args.platform,
+        // The flow's real path, keyed the way the batch addressed it — a
+        // recursive run has several flows and `argent.flowFile` is what tells
+        // a CI reader which one a suite belongs to.
+        flowFile: path.join(dir, r.path),
+      },
+    })),
+    args.reporter
+  );
+
+  const indeterminate = reported.some((r) => hasIndeterminateFailure(r.report));
+  if (indeterminate) console.error(`note: ${INDETERMINATE_HINT}`);
+  if (counts.failed > 0 && !args.output && isCi()) {
+    console.error(
+      "note: re-run with --output <dir> to keep the failure screenshot, element dump and snapshot diffs as CI artifacts"
+    );
+  }
   return exitAfterFlush(counts.failed === 0 ? 0 : 1);
 }
 
@@ -1591,12 +1628,13 @@ async function runFlowDirectory(
  * reinterprets it.
  */
 async function writeReporterFiles(
-  report: FlowReport,
-  specs: string[],
-  // `--platform` is the only run metadata the report itself doesn't carry
-  // (the runner reports the resolved device, not the platform it narrowed to).
-  meta: { platform?: string }
+  // Every flow the invocation ran: one on the single-flow path, N on a
+  // directory run, each its own `<testsuite>` in the one file the operator
+  // asked for.
+  runs: JUnitRun[],
+  specs: string[]
 ): Promise<void> {
+  if (runs.length === 0) return;
   for (const spec of specs) {
     // Already validated in parseRunArgs; a throw here would mean the two
     // disagree, and the run has completed either way.
@@ -1610,7 +1648,7 @@ async function writeReporterFiles(
     const dest = path.resolve(parsed.path);
     try {
       await fsp.mkdir(path.dirname(dest), { recursive: true });
-      await fsp.writeFile(dest, buildJUnitXml(report, meta), "utf8");
+      await fsp.writeFile(dest, buildJUnitDocument(runs), "utf8");
     } catch (err) {
       console.error(
         `warning: could not write report ${dest}: ${err instanceof Error ? err.message : String(err)}`
@@ -1968,7 +2006,12 @@ export async function flow(argv: string[], options: FlowCommandOptions): Promise
     console.log(renderReport(report));
   }
 
-  await writeReporterFiles(report, args.reporter, { platform: args.platform });
+  await writeReporterFiles(
+    // `--platform` is the only run metadata the report itself doesn't carry
+    // (the runner reports the resolved device, not the platform it narrowed to).
+    [{ report, meta: { platform: args.platform } }],
+    args.reporter
+  );
 
   // After the summary, on stderr: an indeterminate failure is the one case
   // where the verdict alone misleads. The status is still `fail` (a distinct

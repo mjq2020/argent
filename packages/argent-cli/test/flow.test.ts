@@ -1579,6 +1579,64 @@ describe("argent flow run <dir>", () => {
     expect(out).toContain("PASS — 2 flows: 2 passed, 0 failed, 0 skipped");
   });
 
+  it("writes ONE JUnit file holding a testsuite per flow, and the failure blocks", async () => {
+    // The gap this pins: `--reporter` parsed and validated on a directory run,
+    // then wrote nothing and said nothing — while `argent flow run
+    // .argent/flows -r --reporter junit:…` is the canonical CI invocation and
+    // per-suite attribution is the whole point of the reporter.
+    const dir = await fsp.mkdtemp(path.join(tmpdir(), "flow-batch-reporter-"));
+    try {
+      const dest = path.join(dir, "junit.xml");
+      toolsClientMock.callTool
+        .mockResolvedValueOnce({ data: report({ flow: "a-login" }) })
+        .mockResolvedValueOnce({
+          data: report({
+            flow: "b-checkout",
+            ok: false,
+            passed: 0,
+            failed: 1,
+            steps: [
+              {
+                index: 0,
+                kind: "assert",
+                status: "fail",
+                target: "visible id=cta",
+                reason: 'no element matched selector id="cta"',
+                failure: {
+                  code: "selector-not-found",
+                  message: 'no element matched selector id="cta"',
+                  selector: { described: 'id="cta"' },
+                  screen: { state: "available", elementCount: 12, elements: [] },
+                  candidates: [],
+                  candidateCount: 0,
+                },
+              },
+            ],
+          }),
+        });
+
+      await expect(flow(["run", flowsDir, "--reporter", `junit:${dest}`], opts)).rejects.toThrow(
+        "process.exit:1"
+      );
+
+      const xml = await fsp.readFile(dest, "utf8");
+      // One document, one suite per flow, counters summed across them.
+      expect(xml).toContain('<testsuites name="argent flow" tests="2" failures="1" errors="0"');
+      expect(xml).toContain('<testsuite name="a-login" tests="1" failures="0"');
+      expect(xml).toContain('<testsuite name="b-checkout" tests="1" failures="1"');
+      expect(xml).toContain('<failure type="selector-not-found"');
+      // Each suite names the flow file it actually ran, so a reader can tell
+      // which of the two a failure belongs to.
+      expect(xml).toContain(
+        `<property name="argent.flowFile" value="${path.join(flowsDir, "b-checkout.yaml")}"/>`
+      );
+      // ...and the terminal gets the block, not just the one-line reason.
+      expect(logs.join("\n")).toContain("     selector-not-found: no element matched selector");
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("forwards run flags to every flow in the batch", async () => {
     await expect(
       flow(["run", flowsDir, "--device", "SIM-1", "--platform", "ios", "--update-baselines"], opts)
