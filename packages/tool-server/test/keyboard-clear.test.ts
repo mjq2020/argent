@@ -1188,11 +1188,19 @@ describe("keyboard clear — tool schema", () => {
 });
 
 describe("keyboard clear — Chromium (CDP)", () => {
-  // The clear runs two different probes: one resolving the focused editable
-  // (and parking it on `window`), then one re-reading THAT parked element. The
-  // stub answers them separately, keyed off the handle release the second one
-  // does, so a test can make the field's before/after states disagree.
+  // The clear resolves the focused editable and parks it on `window`, then
+  // re-reads THAT parked element; the run ends by releasing the slot, so even a
+  // bare `{ clear: true }` issues three probes (the test directly below pins the
+  // count and the ordering).
+  //
+  // This stub answers the FIRST probe with `before` and every later one with
+  // `after`, so a test can make the field's before/after states disagree.
   // Defaults describe a clear that worked.
+  //
+  // Probes 2 and 3 therefore share one answer, which is why a case about focus
+  // moving DURING the typing needs `splitApi` below instead: given `focused:
+  // false` here, the read-back is served it too and the run throws the
+  // pre-typing guard with nothing dispatched.
   function recordingApi(
     before: Record<string, unknown> = {
       verdict: "editable",
@@ -1209,10 +1217,9 @@ describe("keyboard clear — Chromium (CDP)", () => {
       probes,
       api: {
         dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
-        // Routed by CALL ORDER, not by matching text in the expression: the two
-        // probes are always issued resolve-then-release, and keying off a
-        // substring of the production source would let a reworded probe keep
-        // every test green while answering the wrong one.
+        // Routed by CALL ORDER, not by matching text in the expression: keying
+        // off a substring of the production source would let a reworded probe
+        // keep every test green while answering the wrong one.
         evaluate: async (expression: string) => {
           probes.push(expression);
           return JSON.stringify(probes.length === 1 ? before : after);
