@@ -2584,8 +2584,9 @@ function fromYamlStep(raw: YamlStep, blockDepth = 0): FlowStep {
   // directive step is a single-key mapping — its options live INSIDE the
   // value, so a sibling key is a mis-nested or misspelled option. A block
   // directive also carries siblings (`steps`, and whatever it rejects beside
-  // it), but its own parser validates them with pointed messages, so the
-  // generic check stays out of its way.
+  // it), but its own parser validates them with pointed messages - a promise
+  // flow-utils.test.ts pins per registry entry - so the generic check stays
+  // out of its way.
   const kind = kinds[0]!;
   if (!isBlockDirectiveKey(kind)) {
     const siblings = kind === "tool" ? ["tool", "args", "delayMs"] : [kind];

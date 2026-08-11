@@ -950,6 +950,25 @@ const BLOCK_DIRECTIVE_FLOWS: Partial<
   },
 };
 
+// Registering a kind in BLOCK_DIRECTIVE_KEYS exempts it from fromYamlStep's
+// generic unknown-sibling rejection, on the promise that its own parser
+// rejects unknown siblings with a pointed message. This table is what holds a
+// NEW entry to that promise: its key type derives from the registry, so
+// registering a directive without a fixture here is a compile error, and the
+// test proves the fixture's bogus sibling is rejected, not silently accepted.
+const BLOCK_DIRECTIVE_SIBLING_REJECTIONS: Record<
+  (typeof BLOCK_DIRECTIVE_KEYS)[number],
+  { yaml: string; message: string }
+> = {
+  when: {
+    yaml:
+      ["steps:", "  - when: { exists: x }", "    steps:", "      - echo: hi", "    bogus: 1"].join(
+        "\n"
+      ) + "\n",
+    message: "a when step takes exactly { when: <condition>, steps: [...] }",
+  },
+};
+
 // The parser's block list and blockSteps' runtime answer are the same claim
 // asked twice; a directive only one of them knows drops its whole block from
 // every skip expansion and from the upload preflight, silently.
@@ -960,6 +979,19 @@ describe("block directives", () => {
     const step = parseFlow(fixture!.yaml).steps[0]!;
     expect(step.kind).toBe(key);
     expect(blockSteps(step)).toEqual(fixture!.children);
+  });
+
+  it.each(BLOCK_DIRECTIVE_KEYS)("%s rejects an unknown sibling key with its own message", (key) => {
+    const { yaml, message } = BLOCK_DIRECTIVE_SIBLING_REJECTIONS[key];
+    let thrown: unknown;
+    try {
+      parseFlow(yaml);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown, "the unknown sibling was silently accepted").toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain(message);
+    expect(getFailureSignal(thrown)?.error_code).toBe(FAILURE_CODES.FLOW_ENTRY_UNRECOGNIZED);
   });
 
   it("returns undefined for a leaf step", () => {
