@@ -205,7 +205,7 @@ export function stripDeviceKeys(args: Record<string, unknown>): Record<string, u
  *
  * - `when` needs a device whatever its body contains, because the guard itself
  *   reads one — the device's platform, or its view tree. That classifies the
- *   header alone; a block's body is answered by {@link flowRequiresDevice}'s
+ *   header alone; a block's body is left to {@link flowRequiresDevice}'s
  *   walk, not here.
  * - `idle` needs one despite carrying no selector: it reads the device twice
  *   over, the UI tree and a screenshot of it.
@@ -244,10 +244,11 @@ export function stepRequiresDevice(registry: Registry, step: FlowStep): boolean 
 }
 
 /**
- * Whether any step in a flow acts on a device, block children included — each
- * block header's own classification OR, via {@link blockSteps}, the steps it
- * actually CONTAINS. Both halves matter: a `when: { platform: ios }` guard
- * reads the device even over a device-free body.
+ * Whether any step in a flow acts on a device - each block header's own
+ * classification OR, via {@link blockSteps}, the steps it actually CONTAINS.
+ * Today the header half answers every case: `when`, the only block kind,
+ * classifies device-requiring in {@link stepRequiresDevice}, so the child walk
+ * is a no-op until a block kind classifies `false`.
  *
  * Header classification alone is not enough: a block directive whose header
  * reads nothing off the device would naturally be classified `false` in
