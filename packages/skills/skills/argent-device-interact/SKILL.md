@@ -56,26 +56,26 @@ Common schemes: `messages://`, `settings://`, `maps://?q=<query>`, `tel://<numbe
 
 ## 4. Choosing the Right Tool
 
-| Action            | Tool                | Notes                                                            |
-| ----------------- | ------------------- | ---------------------------------------------------------------- |
-| Multiple actions  | `run-sequence`      | Batch steps in one call (no intermediate screenshots)            |
-| Open an app       | `launch-app`        | **Always — never tap home-screen icons**                         |
-| Restart an app    | `restart-app`       | Terminate and relaunch by bundle ID                              |
-| Open URL/scheme   | `open-url`          | Web pages, deep links, URL schemes                               |
-| Single tap        | `gesture-tap`       | Buttons, links, checkboxes                                       |
-| Scroll/swipe      | `gesture-swipe`     | Straight-line scroll or swipe                                    |
-| Scroll (Chromium) | `gesture-scroll`    | Wheel-based; deltas are window fractions, positive deltaY = down |
-| Drag (Chromium)   | `gesture-drag`      | Sliders, drag-and-drop, text selection                           |
-| Long press        | `gesture-custom`    | Context menus, drag start                                        |
-| Drag & drop       | `gesture-custom`    | Complex drag interactions                                        |
-| Pinch/zoom        | `gesture-pinch`     | Two-finger pinch with auto-interpolation                         |
-| Rotation          | `gesture-rotate`    | Two-finger rotation with auto-interpolation                      |
-| Custom gesture    | `gesture-custom`    | Arbitrary touch sequences, optional interpolation                |
-| Hardware key      | `button`            | Home, back, power, volume, appSwitch, actionButton               |
+| Action            | Tool                | Notes                                                                                                              |
+| ----------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Multiple actions  | `run-sequence`      | Batch steps in one call (no intermediate screenshots)                                                              |
+| Open an app       | `launch-app`        | **Always — never tap home-screen icons**                                                                           |
+| Restart an app    | `restart-app`       | Terminate and relaunch by bundle ID                                                                                |
+| Open URL/scheme   | `open-url`          | Web pages, deep links, URL schemes                                                                                 |
+| Single tap        | `gesture-tap`       | Buttons, links, checkboxes                                                                                         |
+| Scroll/swipe      | `gesture-swipe`     | Straight-line scroll or swipe                                                                                      |
+| Scroll (Chromium) | `gesture-scroll`    | Wheel-based; deltas are window fractions, positive deltaY = down                                                   |
+| Drag (Chromium)   | `gesture-drag`      | Sliders, drag-and-drop, text selection                                                                             |
+| Long press        | `gesture-custom`    | Context menus, drag start                                                                                          |
+| Drag & drop       | `gesture-custom`    | Complex drag interactions                                                                                          |
+| Pinch/zoom        | `gesture-pinch`     | Two-finger pinch with auto-interpolation                                                                           |
+| Rotation          | `gesture-rotate`    | Two-finger rotation with auto-interpolation                                                                        |
+| Custom gesture    | `gesture-custom`    | Arbitrary touch sequences, optional interpolation                                                                  |
+| Hardware key      | `button`            | Home, back, power, volume, appSwitch, actionButton                                                                 |
 | Type text         | `keyboard`          | Every platform. Supports Enter, Escape, arrows (not on TV); `clear: true` empties the field first (typing appends) |
-| Rotate device     | `rotate`            | Orientation changes                                              |
-| Wait for UI       | `await-ui-element`  | Block until an element is visible/hidden/exists/contains text    |
-| Wait for idle     | `await-screen-idle` | Block until a non-empty screen tree stops changing               |
+| Rotate device     | `rotate`            | Orientation changes                                                                                                |
+| Wait for UI       | `await-ui-element`  | Block until an element is visible/hidden/exists/contains text                                                      |
+| Wait for idle     | `await-screen-idle` | Block until a non-empty screen tree stops changing                                                                 |
 
 ## 5. Finding Tap Targets
 
