@@ -451,6 +451,49 @@ describe("secret discipline", () => {
     }
   });
 
+  it("declines the failure SCREENSHOT once the run has typed a secret", async () => {
+    // Independent of the scrubber: pixels are never masked, so an app that
+    // renders a credential back into a non-password field puts it in
+    // `step-NN-screen.png` under `--output` and inlines it into the agent's
+    // context — even when every string in the report came out correctly
+    // masked. The MCP layer already declines this exact capture after a
+    // `{{secret:…}}` tool call.
+    process.env[SECRET_ENV] = SECRET_VALUE;
+    currentFetch = () => ({
+      tree: screen([n({ identifier: "pw", frame: { x: 0.1, y: 0.1, width: 0.8, height: 0.05 } })]),
+      source: "native-devtools",
+    });
+    await writeFlow("secret-shot", {
+      executionPrerequisite: "",
+      steps: [
+        { kind: "type", into: { identifier: "pw" }, text: "{{secret:TESTPW}}", submit: false },
+        { kind: "assert", condition: "exists", selector: { identifier: "checkout-cta" } },
+      ],
+    });
+
+    const failure = singleFailure(await run("secret-shot", { artifacts: new ArtifactStore() }));
+
+    expect(failure.screenshot).toBeUndefined();
+    // Said in words rather than silently omitted — an agent that just sees a
+    // missing image calls `screenshot` itself, which is the leak this prevents.
+    expect(failure.data?.screenshotOmitted).toBe("secret-typed");
+    // Everything the mask CAN protect is still captured.
+    expect(failure.screen.state).toBe("available");
+    expect(failure.tree?.mimeType).toBe("text/plain");
+  });
+
+  it("still captures a screenshot for a run that typed no secret", async () => {
+    await writeFlow("no-secret-shot", {
+      executionPrerequisite: "",
+      steps: [{ kind: "assert", condition: "exists", selector: { identifier: "checkout-cta" } }],
+    });
+
+    const failure = singleFailure(await run("no-secret-shot", { artifacts: new ArtifactStore() }));
+
+    expect(failure.data?.screenshotOmitted).toBeUndefined();
+    expect(failure.tree?.mimeType).toBe("text/plain");
+  });
+
   it("leaves the report alone when no secret is exposed", async () => {
     currentFetch = () => ({
       tree: screen([

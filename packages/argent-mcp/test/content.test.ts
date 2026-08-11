@@ -967,6 +967,36 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     expect(rendered).toContain("  (1 more failure — evidence at the paths listed above)");
   });
 
+  it("tells the agent NOT to screenshot a screen the run typed a secret onto", async () => {
+    // The producer declines the capture because pixels are never scrubbed. An
+    // agent that just saw a missing image would call `screenshot` itself and
+    // pull the credential into its own context — so the omission has to carry
+    // its instruction with it.
+    const input: FlowExecuteResult = {
+      flow: "login",
+      ok: false,
+      steps: [
+        {
+          index: 0,
+          kind: "assert",
+          status: "fail",
+          target: "visible id=order-confirmation",
+          failure: wireFailure({
+            code: "selector-not-found",
+            message: 'no element matched selector id="order-confirmation"',
+            screen: { state: "available", source: "chromium", elementCount: 3 },
+            data: { platform: "chromium", screenshotOmitted: "secret-typed" },
+          }),
+        },
+      ],
+    };
+
+    const rendered = texts(await flowRunToMcpContent(input)).join("\n");
+
+    expect(rendered).toContain("screenshot: omitted — this run typed a {{secret:…}} value");
+    expect(rendered).toContain("Do NOT call `screenshot` here");
+  });
+
   it("clamps hostile wire data instead of throwing or blowing up the block", async () => {
     const huge = "x".repeat(1_000_000);
     const input: FlowExecuteResult = {

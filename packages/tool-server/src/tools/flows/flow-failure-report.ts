@@ -68,6 +68,12 @@ export type LeafOutcome = StepReport & { evidence?: DirectiveEvidence };
  */
 interface DiagnosticsEnv extends Omit<ActionEnv, "device"> {
   device: ActionEnv["device"] | null;
+  /**
+   * Whether a step that already ran carried a `{{secret:…}}` placeholder. Set
+   by the runner, read only by {@link captureScreenshot} — pixels are the one
+   * projection no scrubber can reach.
+   */
+  typedSecret?: boolean;
 }
 
 /**
@@ -575,11 +581,20 @@ async function registerTreeDump(
  * Full-resolution capture at the moment of failure — the exact call
  * `flow-visual.ts` already makes for a snapshot baseline.
  *
- * Skipped in three cases, each for its own reason: an aborted run (a post-abort
+ * Skipped in five cases, each for its own reason: an aborted run (a post-abort
  * invoke would reject, and a cancelled run says nothing about the app), a
- * missing artifact store (the unit-test path), and a step that already carries
+ * missing artifact store (the unit-test path), a step that already carries
  * `artifacts.current` — a snapshot failure, where a second capture would show a
- * DIFFERENT screen than the one that was diffed.
+ * DIFFERENT screen than the one that was diffed — an expired capture budget,
+ * and a run that has typed a secret.
+ *
+ * That last one is INDEPENDENT of the text scrubber: an image is the one
+ * projection no mask can reach, so a credential the app rendered back into a
+ * non-password field lands in `step-NN-screen.png` under `--output` and is
+ * inlined into the agent's context by the MCP renderer even when every string
+ * in the report was correctly masked. The MCP layer already declines exactly
+ * this capture after a `{{secret:…}}` tool call; the failure path is the same
+ * screen one tool call later.
  */
 async function captureScreenshot(
   env: DiagnosticsEnv,
@@ -592,7 +607,9 @@ async function captureScreenshot(
   // Capturing again would show a DIFFERENT screen than the one diffed, so the
   // existing handle is reused rather than the slot being left empty. Checked
   // before the device and budget guards below: reusing a handle costs nothing
-  // and needs neither.
+  // and needs neither. It is NOT checked before the secret guard: that image
+  // is a capture of the same screen and leaks exactly as a fresh one would.
+  if (env.typedSecret === true) return undefined;
   if (report.artifacts?.current !== undefined) return report.artifacts.current;
   // Only the fresh capture below needs a device — a device-free run has none.
   if (!env.device) return undefined;
@@ -633,6 +650,12 @@ async function buildFailure(
   // no renderer can derive from the step alone. Omitted rather than faked for a
   // device-free run, which has no platform to report.
   if (env.device) failure.data = { ...failure.data, platform: env.device.platform };
+  // Say WHY the image is missing. Silence here is worse than useless on the MCP
+  // surface: an agent that sees no screenshot simply calls `screenshot` itself,
+  // which is the leak the omission exists to prevent.
+  if (env.typedSecret === true) {
+    failure.data = { ...failure.data, screenshotOmitted: "secret-typed" };
+  }
 
   if (evidence?.expected !== undefined) {
     // Flow-derived text, masked like `message`/`described`/`fields`: an

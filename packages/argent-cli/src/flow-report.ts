@@ -435,6 +435,12 @@ export function normalizeFailure(
 
   const screenshot = artifactPath(f.screenshot);
   if (screenshot !== undefined) out.screenshot = screenshot;
+  // No image because the run typed a credential: a full-resolution capture is
+  // the one projection no scrubber reaches. Said in words, since a silently
+  // absent screenshot reads as a broken capture.
+  else if ((f.data as Record<string, unknown> | undefined)?.screenshotOmitted === "secret-typed") {
+    out.screenshot = SECRET_SCREENSHOT_NOTE;
+  }
 
   const source = (step.source ?? {}) as Record<string, unknown>;
   const file = wireText(source.file, 256) ?? flowFilePath(step.flow ?? fallback.flow);
@@ -766,3 +772,11 @@ export function buildJUnitXml(report: FlowReport, meta: JUnitMeta = {}): string 
  */
 export const INDETERMINATE_HINT =
   "not a failed assertion — argent could not read the screen; re-run or fix the device/tree source rather than editing the flow";
+
+/**
+ * Stands in for the `screenshot:` path when the run typed a `{{secret:…}}`
+ * value. Pixels are never scrubbed, so the capture is declined outright — and
+ * saying so is what stops a reader (or an agent) from taking the shot itself.
+ */
+const SECRET_SCREENSHOT_NOTE =
+  "(omitted — this run typed a secret, and a capture of this screen could reveal it)";

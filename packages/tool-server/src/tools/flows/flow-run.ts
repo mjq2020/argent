@@ -39,6 +39,7 @@ import {
   SELECTOR_RELATIONS,
 } from "./flow-utils";
 import type { TextMatchMode, WaitCondition } from "../../utils/ui-tree-match";
+import { SECRET_PLACEHOLDER_MARKER } from "../../utils/secrets";
 import { sleepOrAbort } from "../../utils/timing";
 import { invokeSubTool } from "../../utils/sub-invoke";
 import { isUnmetUiWaitResult } from "../await-ui-element";
@@ -833,6 +834,12 @@ interface ExecState extends Omit<ActionEnv, "device"> {
   updateBaselines: boolean;
   reports: StepReport[];
   stopped: boolean;
+  /**
+   * Whether a step that already ran carried a `{{secret:…}}` placeholder, and
+   * so may have typed a credential onto the screen. Suppresses the failure
+   * screenshot — see {@link attachFailureDiagnostics}. Latched, never cleared.
+   */
+  typedSecret: boolean;
   /** Whether the status bar was pinned for this run (and so must be restored). */
   pinned: boolean;
   /**
@@ -1147,6 +1154,7 @@ returns a notice with the prerequisite instead of running.`,
         updateBaselines: Boolean(params.updateBaselines),
         reports: [],
         stopped: false,
+        typedSecret: false,
         pinned: statusBarPinned,
         owned: resolved.booted ? [resolved.booted] : [],
         chromiumLaunched: false,
@@ -2206,6 +2214,15 @@ async function execLeafStep(
     target: stepTarget(step),
     ...depthOf(scope),
   } as const;
+  // Latched BEFORE the step runs, so a step that types a credential and then
+  // fails is already covered. Once set it stays set for the rest of the run:
+  // the runner cannot know when the app stops rendering the value back, and
+  // the failure screenshot is a full-resolution capture nothing scrubs. Same
+  // rule and same reason as the MCP layer's auto-screenshot skip, spelled the
+  // same way — a serialized containment probe over the step's own payload.
+  if (!state.typedSecret && JSON.stringify(step)?.includes(SECRET_PLACEHOLDER_MARKER)) {
+    state.typedSecret = true;
+  }
   const { registry, ctx, device, signal } = state;
 
   switch (step.kind) {

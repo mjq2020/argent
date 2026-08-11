@@ -288,6 +288,8 @@ export type FlowStepFailure = {
   /** Full element dump, text/plain — rendered as a path, never inlined. */
   tree?: unknown;
   cause?: { code?: string; message?: string };
+  /** Free-form run context: `platform`, and why a screenshot is absent. */
+  data?: Record<string, unknown>;
 };
 
 export type FlowStepResult = {
@@ -612,6 +614,15 @@ async function failureBlocks(
       screenshotPath = artifactPath(failure.screenshot);
     }
     if (screenshotPath) lines.push(`     screenshot: ${screenshotPath}`);
+    // No image because the run typed a credential — pixels are the one
+    // projection the report's scrubber cannot reach. Said explicitly, and with
+    // the instruction attached: an agent that just sees a missing screenshot
+    // calls `screenshot` itself, which is the leak the omission prevents.
+    else if (isRecord(failure.data) && failure.data.screenshotOmitted === "secret-typed") {
+      lines.push(
+        "     screenshot: omitted — this run typed a {{secret:…}} value and a capture of this screen could reveal it. Do NOT call `screenshot` here; read the `tree` file below, whose text is masked."
+      );
+    }
 
     const treePath = artifactPath(failure.tree);
     if (treePath) {

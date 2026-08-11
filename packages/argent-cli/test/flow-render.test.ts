@@ -646,6 +646,34 @@ describe("renderFailures", () => {
     expect(out).toContain("     screenshot: (unavailable — the device did not return an image)");
   });
 
+  it("says WHY there is no screenshot when the run typed a secret", () => {
+    // Pixels are the one projection the report's scrubber cannot reach, so the
+    // capture is declined outright. A silently missing line reads as a broken
+    // capture and invites the reader to take the shot themselves.
+    const out = renderFailures(
+      failingReport({
+        code: "selector-not-found",
+        category: "selector",
+        determinacy: "determinate",
+        message: 'no element matched selector id="order-confirmation"',
+        step: { kind: "assert", flow: "checkout" },
+        screen: {
+          state: "available",
+          source: "chromium",
+          capturedAt: "at-failure",
+          elementCount: 3,
+        },
+        candidates: [],
+        candidateCount: 0,
+        data: { platform: "chromium", screenshotOmitted: "secret-typed" },
+        timing: { startedAt: 1, durationMs: 1000 },
+      })
+    ).join("\n");
+    expect(out).toContain(
+      "     screenshot: (omitted — this run typed a secret, and a capture of this screen could reveal it)"
+    );
+  });
+
   it("marks an indeterminate failure as unreadable, not as a failed assertion", () => {
     const out = renderFailures(
       failingReport({
