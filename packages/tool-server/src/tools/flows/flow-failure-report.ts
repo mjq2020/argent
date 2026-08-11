@@ -86,20 +86,56 @@ const TREE_ERROR_DETAIL_LIMIT = 512;
 /**
  * One directory for every failure artifact this process writes, with unique
  * filenames inside it — NOT an `mkdtemp` per run. A registered artifact's host
- * path must outlive the call (a co-located client reads it in place), so these
- * files cannot be swept the way `flow-visual.ts` sweeps its diff scratch; a
- * per-run directory therefore accreted forever on a host-wide, never-exiting
- * tool-server. A shared directory keeps the entry count constant, which is the
- * same shape the other long-lived temp writers here use.
+ * path must outlive the CALL (a co-located client reads it in place), so these
+ * files cannot be swept the way `flow-visual.ts` sweeps its diff scratch, which
+ * deletes everything but the one file it just registered.
+ *
+ * They can be swept by AGE, and are: a shared directory alone only keeps the
+ * PARENT's entry count constant, so on a host-wide, never-exiting tool-server
+ * the contents still accreted forever (111 entries after a few hours of test
+ * runs). {@link EVIDENCE_TTL_MS} is orders of magnitude longer than the gap
+ * between registering a handle and a client materializing it, which happens
+ * while the tool result is still being rendered.
+ *
+ * 0700 because the contents are screen dumps and whole failure payloads: masked
+ * for the secrets THIS run resolved, but still the app's UI text, on a path
+ * every user of the host can otherwise read.
  */
+const EVIDENCE_TTL_MS = 60 * 60 * 1000;
+
 let evidenceDir: Promise<string> | undefined;
 function failureEvidenceDir(): Promise<string> {
   evidenceDir ??= (async () => {
     const dir = path.join(os.tmpdir(), "argent-flow-failure");
-    await fs.mkdir(dir, { recursive: true });
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    // An existing directory keeps its creation mode, so tighten it explicitly.
+    await fs.chmod(dir, 0o700).catch(() => {});
     return dir;
   })();
   return evidenceDir;
+}
+
+/**
+ * Delete evidence files older than {@link EVIDENCE_TTL_MS}. Never awaited by
+ * the capture — it costs one `readdir` per FAILING RUN and must not spend a
+ * millisecond of the diagnostics budget — and fail-soft throughout: a file
+ * another process is mid-write, or one whose owner is a different user, is
+ * simply left alone.
+ */
+function sweepEvidenceDir(dir: string): void {
+  void (async () => {
+    const cutoff = Date.now() - EVIDENCE_TTL_MS;
+    const entries = await fs.readdir(dir).catch(() => [] as string[]);
+    for (const entry of entries) {
+      const file = path.join(dir, entry);
+      try {
+        const stat = await fs.stat(file);
+        if (stat.mtimeMs < cutoff) await fs.rm(file, { recursive: true, force: true });
+      } catch {
+        /* someone else's file, or gone already */
+      }
+    }
+  })().catch(() => {});
 }
 
 /**
@@ -573,6 +609,7 @@ async function registerTreeDump(
       return bits.join("  ");
     });
     const dir = await failureEvidenceDir();
+    sweepEvidenceDir(dir);
     // The stem repeats across runs, so the filename carries a unique segment;
     // the client materializes by the DECLARED filename, which stays stable.
     const file = path.join(dir, `${stem}-tree-${randomUUID()}.txt`);

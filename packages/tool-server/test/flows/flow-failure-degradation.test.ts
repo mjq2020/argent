@@ -479,3 +479,36 @@ describe("screenshot capture", () => {
     });
   });
 });
+
+describe("the evidence directory", () => {
+  it("sweeps stale files so it cannot grow without bound", async () => {
+    // A registered artifact's host path must outlive the CALL, so these files
+    // cannot be deleted the way flow-visual sweeps its diff scratch. A shared
+    // directory alone only keeps the PARENT's entry count constant, so the
+    // contents still accreted forever on a never-exiting tool-server.
+    const dir = path.join(os.tmpdir(), "argent-flow-failure");
+    await fs.mkdir(dir, { recursive: true });
+    const stale = path.join(dir, "step-99-tree-00000000-0000-4000-8000-stale-fixture.txt");
+    await fs.writeFile(stale, "an evidence file from hours ago\n", "utf8");
+    const longAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    await fs.utimes(stale, longAgo, longAgo);
+
+    await writeFailingFlow("evidence-sweep");
+    const result = await run("evidence-sweep", { ctx: { artifacts: new ArtifactStore() } });
+    const failure = singleFailure(result);
+
+    // The run's OWN evidence is registered and must survive — it is what the
+    // report points at.
+    expect(failure.tree?.mimeType).toBe("text/plain");
+    // The sweep is fire-and-forget so it never spends the diagnostics budget.
+    await vi.waitFor(async () => {
+      expect(
+        await fs
+          .access(stale)
+          .then(() => true)
+          .catch(() => false)
+      ).toBe(false);
+    });
+    expectVerdict(result, FAILING_VERDICT);
+  });
+});
