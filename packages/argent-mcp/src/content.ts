@@ -598,9 +598,19 @@ async function failureBlocks(
 
     // Evidence. Only the FIRST failure's screenshot is materialized — for every
     // other one the handle prints its path, with no download and no image.
+    //
+    // A snapshot failure is skipped entirely: its `screenshot` is the SAME
+    // stored artifact as the step's `current` (the producer reuses the handle
+    // rather than capturing a second time, which would show a different
+    // screen), and `stepArtifactBlocks` has already printed it and inlined it.
+    // Rendering it again listed one image under two different path strings and
+    // spent the run's single inlined image on a picture already on screen.
+    const ownedByStep = isRecord(step.artifacts) && step.artifacts.current !== undefined;
     let inlineImage: ContentBlock | undefined;
     let screenshotPath: string | undefined;
-    if (ctx && !budget.used && isArtifactHandle(failure.screenshot)) {
+    if (ownedByStep) {
+      screenshotPath = undefined;
+    } else if (ctx && !budget.used && isArtifactHandle(failure.screenshot)) {
       const { result: local, images } = await materializeArtifacts(failure.screenshot, ctx);
       // A null means the handle couldn't be fetched; say so rather than
       // rendering a dangling reference (the `stepArtifactBlocks` convention).
@@ -774,9 +784,15 @@ async function stepArtifactBlocks(
   const failed = status === "fail" || status === "error";
   const entries: [string, string][] = [];
   let diffImage: ContentBlock | undefined;
+  // The annotated `diff` is the most informative image — but the three snapshot
+  // shapes that produce none (baseline-missing, dimension-mismatch,
+  // crop-empty) still carry `current`, which is the only picture of what
+  // failed. Inlining it HERE, beside its own path, is what lets the failure
+  // block stop re-rendering the same image under a second, materialized path.
+  const inlineRole = isArtifactHandle(artifacts.diff) ? "diff" : "current";
 
   for (const [k, v] of Object.entries(artifacts)) {
-    if (ctx && failed && !budget.used && k === "diff" && isArtifactHandle(v)) {
+    if (ctx && failed && !budget.used && k === inlineRole && isArtifactHandle(v)) {
       // The one artifact rendered inline: materialize it so the image works
       // against a remote tool-server too.
       const { result, images } = await materializeArtifacts(v, ctx);

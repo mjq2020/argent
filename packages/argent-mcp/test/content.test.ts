@@ -967,6 +967,41 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     expect(rendered).toContain("  (1 more failure — evidence at the paths listed above)");
   });
 
+  it("renders a snapshot failure's image once, under its own role", async () => {
+    // `failure.screenshot` on a snapshot failure IS the step's `current`: the
+    // producer reuses the handle rather than capturing a second time. Rendering
+    // it again listed one image under two different path strings and spent the
+    // run's single inlined image on a picture already on screen.
+    const current = artifactHandle("cur1", "home-current.png", "image/png");
+    const input: FlowExecuteResult = {
+      flow: "visual",
+      ok: false,
+      steps: [
+        {
+          index: 0,
+          kind: "snapshot",
+          status: "fail",
+          target: '"home"',
+          reason: "no baseline for home",
+          // The three shapes that carry `current` and no `diff`.
+          artifacts: { current },
+          failure: wireFailure({
+            code: "snapshot-baseline-missing",
+            message: "no baseline for home",
+            screenshot: { ...current },
+          }),
+        },
+      ],
+    };
+
+    const rendered = texts(await flowRunToMcpContent(input)).join("\n");
+
+    // Named once, by the role that owns it.
+    expect(rendered).toContain("current: home-current.png");
+    expect(rendered).not.toContain("screenshot: home-current.png");
+    expect(rendered.match(/home-current\.png/g)).toHaveLength(1);
+  });
+
   it("tells the agent NOT to screenshot a screen the run typed a secret onto", async () => {
     // The producer declines the capture because pixels are never scrubbed. An
     // agent that just saw a missing image would call `screenshot` itself and

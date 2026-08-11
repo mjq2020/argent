@@ -660,9 +660,16 @@ function junitDetailLines(s: StepReport, f: NormalizedFailure | undefined): stri
   if (f.device) lines.push(`device: ${f.device}`);
   for (const [role, value] of Object.entries(s.artifacts ?? {})) {
     const p = artifactPath(value);
-    if (p) lines.push(`${role}: ${p}`);
+    // The KEY is wire data too — clamping only the value beside it would leave
+    // a server free to put escape sequences in the label.
+    const label = wireText(role, 64);
+    if (p && label) lines.push(`${label}: ${p}`);
   }
-  if (f.screenshot) lines.push(`screenshot: ${f.screenshot}`);
+  // A snapshot failure's `current` IS the screenshot at the moment of failure,
+  // so the three roles above already name it. The terminal block draws the same
+  // suppression; without it here the body listed four paths for three images.
+  const isSnapshotShot = artifactPath(s.artifacts?.current) !== undefined;
+  if (f.screenshot && !isSnapshotShot) lines.push(`screenshot: ${f.screenshot}`);
   if (f.tree) lines.push(`tree: ${f.tree}`);
   return lines;
 }

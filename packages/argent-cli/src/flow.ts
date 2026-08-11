@@ -1089,6 +1089,12 @@ export async function exportRunArtifacts(
   let ordinal = 0;
   for (const s of report.steps) {
     if (s.kind !== "echo") ordinal++;
+    // Read BEFORE the snapshot branch below rewrites `s.artifacts`: on a
+    // snapshot failure the producer deliberately reuses the `current` handle as
+    // `failure.screenshot` (a second capture would show a different screen than
+    // the one diffed), so the two name ONE image and must not be exported as
+    // two md5-identical files.
+    const reusesSnapshotImage = sameArtifact(s.artifacts?.current, s.failure?.screenshot);
     if (s.kind === "snapshot" && s.status === "fail" && s.artifacts) {
       // Key first: a legacy tool-server sends plain path strings, and
       // keyFromBaselinePath needs that original baseline path, not a rewrite.
@@ -1112,17 +1118,43 @@ export async function exportRunArtifacts(
     // filename stem this export is keyed by, and shadowing it here would read
     // as the same value.
     const stepStem = `step-${String(ordinal).padStart(2, "0")}`;
-    // Scoped to just these two handles, for the same reason as above.
+    // Scoped to just these two handles, for the same reason as above — and the
+    // screenshot is dropped from the request entirely when the snapshot branch
+    // has already exported the same image, so a remote run does not download
+    // the same bytes twice either.
     const { result } = await materializeArtifacts(
-      { screenshot: failure.screenshot, tree: failure.tree },
+      {
+        ...(reusesSnapshotImage ? {} : { screenshot: failure.screenshot }),
+        tree: failure.tree,
+      },
       ctx
     );
     const evidence = result as { screenshot?: unknown; tree?: unknown };
-    const screenshot = await copyInto(evidence.screenshot, `${stepStem}-screen.png`);
-    failure.screenshot = screenshot ?? evidence.screenshot;
+    if (reusesSnapshotImage) {
+      // Point at the copy the snapshot branch just made, under its own key.
+      failure.screenshot = s.artifacts?.current;
+    } else {
+      const screenshot = await copyInto(evidence.screenshot, `${stepStem}-screen.png`);
+      failure.screenshot = screenshot ?? evidence.screenshot;
+    }
     const tree = await copyInto(evidence.tree, `${stepStem}-tree.txt`);
     failure.tree = tree ?? evidence.tree;
   }
+}
+
+/**
+ * Whether two wire artifact values name the SAME stored artifact. Compared by
+ * id rather than by reference: the report arrives as parsed JSON, so the
+ * producer's one handle has become two structurally-equal objects by the time
+ * it gets here. A legacy tool-server sends plain path strings, which compare
+ * directly.
+ */
+function sameArtifact(a: unknown, b: unknown): boolean {
+  if (a === undefined || b === undefined) return false;
+  if (typeof a === "string" || typeof b === "string") return a === b;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  const id = (a as Record<string, unknown>).id;
+  return typeof id === "string" && id === (b as Record<string, unknown>).id;
 }
 
 /**

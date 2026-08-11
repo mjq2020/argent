@@ -87,6 +87,55 @@ afterEach(async () => {
 });
 
 describe("exportRunArtifacts", () => {
+  it("exports a snapshot failure's image ONCE, not again as the failure screenshot", async () => {
+    // The producer reuses the snapshot's `current` handle as
+    // `failure.screenshot` — a second capture would show a different screen
+    // than the one diffed — so the two name ONE image. Copying both wrote two
+    // md5-identical files and made the JUnit body list four paths for three
+    // images.
+    const baseline = await writeHandle("b.png", "baseline-bytes");
+    const current = await writeHandle("c.png", "current-bytes");
+    const tree = await writeHandle("t.txt", "role  at 0,0 1x1");
+    const step: StepReport = {
+      index: 0,
+      kind: "snapshot",
+      status: "fail",
+      snapshotKey: "home__ios-390x844",
+      artifacts: { baseline, current },
+      // The wire form: one handle serialized twice, so identity comparison
+      // cannot be what recognizes it.
+      failure: { screenshot: { ...current }, tree } as StepReport["failure"],
+    };
+
+    await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
+
+    const dir = path.join(outDir, "checkout");
+    expect((await fs.readdir(dir)).sort()).toEqual([
+      ".argent-flow-source",
+      "home__ios-390x844-baseline.png",
+      "home__ios-390x844-current.png",
+      "step-01-tree.txt",
+    ]);
+    // The failure points at the copy the snapshot roles already made, so both
+    // surfaces name the same file rather than two names for one image.
+    expect(step.failure!.screenshot).toBe(step.artifacts!.current);
+    expect(step.failure!.tree).toBe(path.join(dir, "step-01-tree.txt"));
+  });
+
+  it("still exports the failure screenshot when it is NOT the snapshot image", async () => {
+    const shot = await writeHandle("s.png", "shot-bytes");
+    const step: StepReport = {
+      index: 0,
+      kind: "assert",
+      status: "fail",
+      failure: { screenshot: shot } as StepReport["failure"],
+    };
+
+    await exportRunArtifacts(mkReport([step]), outDir, flowFile, ctx);
+
+    expect(step.failure!.screenshot).toBe(path.join(outDir, "checkout", "step-01-screen.png"));
+  });
+
   it("copies every role of a failed snapshot to <output>/<flow>/<key>-<role>.png and rewrites the report", async () => {
     const baseline = await writeFile("b.png", "baseline-bytes");
     const current = await writeFile("c.png", "current-bytes");
