@@ -525,6 +525,11 @@ describe("scroll codes", () => {
     expect(failure.code).toBe("selector-not-visible");
     expect(failure.category).toBe("selector");
     expect(failure.hint).toContain("zero area");
+    // The REASON is rewritten with the code. `failure.message` is pinned
+    // byte-identical to `reason`, so end-of-scroll prose beside a visibility
+    // code would ship the contradiction to every renderer.
+    expect(failure.message).toContain("zero area");
+    expect(failure.message).not.toContain("reached the end of the scroll");
     // The element the operator asked for, named rather than hunted for.
     expect(failure.actual?.matchCount).toBe(1);
     expect(failure.actual?.visibleMatchCount).toBe(0);
@@ -532,6 +537,39 @@ describe("scroll codes", () => {
     // The scroll expectation still rides along — that IS what the step asked.
     expect(failure.expected).toMatchObject({ kind: "scroll", direction: "down" });
   });
+
+  it("keeps scroll-target-not-found when the scroll ran out of ITERATIONS", async () => {
+    // The container was still producing new content on the last round, so
+    // nothing can say whether more scrolling would have revealed the target —
+    // reclassifying to a visibility problem there would assert "scrolling
+    // cannot reveal it" about a list that was demonstrably still scrolling.
+    // Keyed to the SCROLL count, not the read count: the tree must hold still
+    // within a round (or `settleTree` never settles and the test runs for
+    // minutes) while differing BETWEEN rounds, so the fingerprint never
+    // repeats and the loop exits on the iteration cap.
+    let scrolls = 0;
+    const registry = mockRegistry((id) => {
+      if (id !== "list-devices" && id !== "screenshot") scrolls++;
+      return undefined;
+    });
+    currentFetch = () => ({
+      tree: screen([
+        n({ label: `Row ${scrolls}`, frame: { x: 0.1, y: 0.1, width: 0.8, height: 0.1 } }),
+        n({ label: "Order #1234", frame: { x: 0.1, y: 0.5, width: 0, height: 0 } }),
+      ]),
+      source: "native-devtools",
+    });
+    await writeFlow("scroll-capped", {
+      executionPrerequisite: "",
+      steps: [{ kind: "scroll-to", target: { text: "Order #1234" }, direction: "down" }],
+    });
+
+    const failure = singleFailure(await run("scroll-capped", { registry }));
+
+    expect(failure.code).toBe("scroll-target-not-found");
+    expect(failure.category).toBe("scroll");
+    expect(failure.message).toContain("scroll attempts");
+  }, 30000);
 
   it("scroll-container-not-visible: the `within` container never resolved", async () => {
     currentFetch = () => ({

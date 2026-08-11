@@ -273,3 +273,55 @@ describe("diagnoseScope", () => {
     expect(diagnoseScope(tree, { ...target, after: { text: "Nope" } })).toBe("after");
   });
 });
+
+describe("rows whose suggestion does not resolve back", () => {
+  /**
+   * Five same-rectangle rows, each derived to a DIFFERENT identifier, each
+   * shadowed by a smaller node carrying that identifier — so `selectorToFrame`
+   * lands on the shadow and every suggestion fails verification. A sixth,
+   * lower-ranked row resolves cleanly.
+   */
+  function shadowedTree(): DescribeNode {
+    const frame = { x: 0.1, y: 0.2, width: 0.5, height: 0.05 };
+    const kids: DescribeNode[] = [];
+    for (const [i, id] of ["a1", "a2", "a3", "a4", "a5"].entries()) {
+      // Ranks (its label near-misses the needle) and derives `{id}`...
+      kids.push(n({ identifier: id, label: "Checkout", frame }));
+      // ...but a SMALLER node carries the same identifier and no matching
+      // text, so it never ranks while `selectorToFrame` — which picks by area
+      // — lands on it, and the suggestion fails verification.
+      kids.push(
+        n({ identifier: id, frame: { x: 0.8, y: 0.05 + i / 100, width: 0.02, height: 0.005 } })
+      );
+    }
+    kids.push(
+      n({
+        identifier: "goodBtn",
+        label: "Checkout",
+        frame: { x: 0.1, y: 0.7, width: 0.4, height: 0.05 },
+      })
+    );
+    return screen(kids);
+  }
+
+  it("collapses them to one row per rectangle instead of spending every slot", () => {
+    // Splitting the suggestion into a cheap half (for the dedupe) and an
+    // expensive half (verification) made the dedupe key stop depending on
+    // whether a suggestion actually resolves — so five unusable rows for ONE
+    // rectangle each took a slot and pushed the row that does resolve out of
+    // the list entirely.
+    const { candidates } = rankCandidates(shadowedTree(), { text: "Checkoutt" }, { limit: 5 });
+
+    const rectangles = candidates.filter((c) => c.selectorYaml === undefined);
+    expect(rectangles).toHaveLength(1);
+    // ...and the row that DOES resolve still earns its place.
+    expect(candidates.some((c) => c.selectorYaml === '{"id":"goodBtn"}')).toBe(true);
+  });
+
+  it("keeps the row itself — it still names the element and its rectangle", () => {
+    const { candidates } = rankCandidates(shadowedTree(), { text: "Checkoutt" }, { limit: 5 });
+    const bare = candidates.find((c) => c.selectorYaml === undefined);
+    expect(bare?.node.label).toBe("Checkout");
+    expect(bare?.node.frame.width).toBeGreaterThan(0);
+  });
+});

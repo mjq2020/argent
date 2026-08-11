@@ -1689,6 +1689,37 @@ describe("argent flow run <dir>", () => {
     }
   });
 
+  it("gives a REJECTED flow its own errored suite instead of reporting green", async () => {
+    // A flow the tool-server rejects before it runs (bad YAML, unknown step
+    // key) produces no report. Filtering those out left the file claiming
+    // `failures="0" errors="0"` for a run that printed FAIL and exited 1 —
+    // the one thing a CI artifact must never do.
+    const dir = await fsp.mkdtemp(path.join(tmpdir(), "flow-batch-rejected-"));
+    try {
+      const dest = path.join(dir, "junit.xml");
+      toolsClientMock.callTool
+        .mockResolvedValueOnce({ data: report({ flow: "a-login" }) })
+        .mockRejectedValueOnce(
+          new ToolInvocationError('b-checkout.yaml: unknown step kind "tapp"', {
+            errorKind: "validation",
+          })
+        );
+
+      await expect(flow(["run", flowsDir, "--reporter", `junit:${dest}`], opts)).rejects.toThrow(
+        "process.exit:1"
+      );
+
+      const xml = await fsp.readFile(dest, "utf8");
+      // The document's counters agree with the exit code.
+      expect(xml).toContain('<testsuites name="argent flow" tests="1" failures="0" errors="1"');
+      expect(xml).toContain('<testsuite name="b-checkout"');
+      // ...and the suite says WHY, rather than "the run failed with no failing step".
+      expect(xml).toContain("unknown step kind");
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("forwards run flags to every flow in the batch", async () => {
     await expect(
       flow(["run", flowsDir, "--device", "SIM-1", "--platform", "ios", "--update-baselines"], opts)

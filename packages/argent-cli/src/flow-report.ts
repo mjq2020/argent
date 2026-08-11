@@ -462,13 +462,14 @@ export function normalizeFailure(
   }
 
   const source = (step.source ?? {}) as Record<string, unknown>;
-  // The resolved path applies only to the ROOT flow's own steps: a nested
-  // fragment's step names a different file, which the caller does not know.
-  const stepFlow = wireText(step.flow, 128);
-  const ofRootFlow = stepFlow === undefined || stepFlow === wireText(fallback.flow, 128);
+  // Whether the resolved path applies is the CALLER's call, not one this
+  // function can make: `fallback.flow` is `step.flow` for the very step being
+  // normalized, so comparing them here was a tautology and every nested
+  // fragment's failure got the ROOT flow's file. The callers know both names
+  // and pass `flowFile` only for a root-flow step.
   const file =
     wireText(source.file, 256) ??
-    flowFilePath(stepFlow ?? fallback.flow, ofRootFlow ? fallback.flowFile : undefined);
+    flowFilePath(wireText(step.flow, 128) ?? fallback.flow, fallback.flowFile);
   if (file !== undefined) {
     const line = wireCount(source.line);
     out.sourceFile = line !== undefined && line > 0 ? `${file}:${line}` : file;
@@ -624,6 +625,12 @@ interface JUnitMeta {
   timestamp?: string;
   /** Whole-run wall clock. Falls back to `report.durationMs`, then to the step sum. */
   durationMs?: number;
+  /**
+   * Why a suite with no steps failed — a flow the tool-server REJECTED before
+   * it ran (bad YAML, an unknown step key) produces no report at all, and
+   * "the run failed with no failing step" says nothing an operator can act on.
+   */
+  incompleteMessage?: string;
 }
 
 function attrs(pairs: [string, string | undefined][]): string {
@@ -760,7 +767,10 @@ function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; tot
   if (incomplete) {
     out.push(
       `    <error type="run-incomplete" message="${xmlEscape(
-        report.aborted ? "run cancelled before it completed" : "the run failed with no failing step"
+        meta.incompleteMessage ??
+          (report.aborted
+            ? "run cancelled before it completed"
+            : "the run failed with no failing step")
       )}"/>`
     );
   }
@@ -788,10 +798,13 @@ function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; tot
         (failures + errors > 0 ? "run stopped at the first failure" : undefined);
       out.push(`      <skipped${attrs([["message", reason]])}/>`);
     } else {
+      // Same rule as the terminal block: `meta.flowFile` is the ROOT flow's
+      // file, so it applies only to a step of that flow.
+      const stepFlow = s.flow ?? report.flow;
       const f = normalizeFailure(s.failure, {
-        flow: s.flow ?? report.flow,
+        flow: stepFlow,
         device: report.device,
-        flowFile: meta.flowFile,
+        ...(stepFlow === report.flow ? { flowFile: meta.flowFile } : {}),
       });
       const tag = s.status === "error" ? "error" : "failure";
       const detail = junitDetailLines(s, f).join("\n");

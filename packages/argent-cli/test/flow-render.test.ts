@@ -672,19 +672,26 @@ describe("renderFailures", () => {
 
   it("keeps the derived path for a step from a NESTED flow", () => {
     // The caller's resolved path is the ROOT flow's file; a fragment's step
-    // names a different one the CLI has no way to know.
+    // names a different one the CLI has no way to know. The producer sets the
+    // fragment's name on BOTH the step report and `failure.step`, so the
+    // fixture must too — an earlier version set only the latter, which no real
+    // tool-server emits, and that made this assertion pass for the wrong
+    // reason while the guard it was pinning was a tautology.
     const out = renderFailures(
-      failingReport({
-        code: "selector-not-found",
-        category: "selector",
-        determinacy: "determinate",
-        message: 'no element matched selector id="cta"',
-        step: { kind: "assert", flow: "login" },
-        screen: { state: "available", source: "ax", capturedAt: "at-failure", elementCount: 3 },
-        candidates: [],
-        candidateCount: 0,
-        timing: { startedAt: 1, durationMs: 1000 },
-      }),
+      failingReport(
+        {
+          code: "selector-not-found",
+          category: "selector",
+          determinacy: "determinate",
+          message: 'no element matched selector id="cta"',
+          step: { kind: "assert", flow: "login" },
+          screen: { state: "available", source: "ax", capturedAt: "at-failure", elementCount: 3 },
+          candidates: [],
+          candidateCount: 0,
+          timing: { startedAt: 1, durationMs: 1000 },
+        },
+        { flow: "login" }
+      ),
       "/home/me/shared-flows/checkout.yaml"
     ).join("\n");
     expect(out).toContain("@ .argent/flows/login.yaml");

@@ -419,9 +419,25 @@ interface Ranked {
  * scope separately.
  *
  * @returns `candidates` capped at `opts.limit` (default
- * {@link FLOW_FAILURE_CANDIDATE_LIMIT}), and `total` — every distinct match
- * above the threshold, BEFORE the cap, so a report can say "5 of 23".
+ * {@link FLOW_FAILURE_CANDIDATE_LIMIT}), and `total` — every distinct
+ * (proposal, rectangle) above the threshold, BEFORE the cap, so a report can
+ * say "5 of 23".
+ *
+ * `total` counts PROPOSED suggestions, not verified ones: knowing which
+ * resolve back costs an O(nodes) walk each, and paying that for every ranked
+ * row is the cost this module is built to avoid. Two rows proposing different
+ * selectors for one rectangle therefore count twice even when neither
+ * suggestion survives verification — the emitted rows collapse (see the loop
+ * below), the count does not.
  */
+/**
+ * How far past `limit` the emit loop may verify. Four rows considered per row
+ * offered is enough to see past a cluster of same-rectangle rows whose
+ * suggestions do not resolve, while keeping the work a constant multiple of
+ * the output rather than a function of the tree.
+ */
+const VERIFY_ALLOWANCE = 4;
+
 export function rankCandidates(
   tree: DescribeNode,
   selector: FlowSelector,
@@ -520,23 +536,40 @@ export function rankCandidates(
     distinct.push({ ...entry, ...(suggestion !== undefined ? { suggestion } : {}) });
   }
 
-  const limit = opts.limit ?? FLOW_FAILURE_CANDIDATE_LIMIT;
-  const candidates = distinct.slice(0, Math.max(0, limit)).map((entry) => {
-    // The O(nodes) verification, paid once per OFFERED row rather than once
-    // per ranked one. A suggestion that does not resolve back is dropped, not
-    // the row: naming the element, its frame and its flags is still useful.
-    const offer =
-      entry.suggestion !== undefined && resolvesToNode(tree, entry.node, entry.suggestion.derived)
-        ? entry.suggestion.yaml
-        : undefined;
-    return {
+  const limit = Math.max(0, opts.limit ?? FLOW_FAILURE_CANDIDATE_LIMIT);
+  const candidates: FlowFailureCandidate[] = [];
+  // Rectangles already spoken for by an emitted row that carries NO usable
+  // suggestion. Such a row says only "this element, this rectangle", so a
+  // second one for the same rectangle repeats it — the noise `dedupeKey`
+  // exists to remove, which it cannot see until the suggestion has been
+  // verified.
+  const bareFrames = new Set<string>();
+  let verifications = 0;
+  for (const entry of distinct) {
+    if (candidates.length >= limit) break;
+    // The O(nodes) verification, paid per row CONSIDERED for the output rather
+    // than per row ranked. The allowance runs well past `limit` so a run of
+    // unresolvable same-frame rows cannot crowd out the resolvable row behind
+    // them, and stays a constant multiple of it so the cost is independent of
+    // the tree size — the whole point of splitting the suggestion in two.
+    let offer: string | undefined;
+    if (entry.suggestion !== undefined && verifications < limit * VERIFY_ALLOWANCE) {
+      verifications++;
+      if (resolvesToNode(tree, entry.node, entry.suggestion.derived)) offer = entry.suggestion.yaml;
+    }
+    if (offer === undefined) {
+      const key = dedupeKey(undefined, entry.node.frame);
+      if (bareFrames.has(key)) continue;
+      bareFrames.add(key);
+    }
+    candidates.push({
       node: projectNode(entry.node, opts.scrub),
       score: entry.score,
       basis: entry.basis,
       ...(offer !== undefined ? { selectorYaml: offer } : {}),
       ...(entry.note !== undefined ? { note: entry.note } : {}),
-    };
-  });
+    });
+  }
   return { candidates, total: distinct.length };
 }
 

@@ -547,7 +547,7 @@ export function createSecretScrubber(options: SecretSourceOptions = {}): (text: 
       if (value.length < MIN_SCRUBBABLE_SECRET) continue;
       // Keyed by the PAIR: the same value under two names is masked once, while
       // one name holding different values across sources masks both.
-      const key = `${name} ${value}`;
+      const key = `${name}\u0000${value}`;
       if (seen.has(key)) continue;
       seen.add(key);
       secrets.push([name, value]);

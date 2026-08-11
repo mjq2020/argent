@@ -286,9 +286,16 @@ export async function attachFailureDiagnostics(
       FLOW_DIAGNOSTICS_BUDGET_MS,
       () =>
         partial.failure !== undefined
-          ? // Trimmed synchronously: the budget the timeout skipped is still a
-            // budget, and an over-size payload rides every progress event.
-            trimToBudget(partial.failure).failure
+          ? // COPIED, then trimmed. Copied because the losing capture still
+            // holds a reference to this object: without it a screenshot that
+            // resolved after the deadline landed on the payload the runner had
+            // already emitted, so whether the field shipped was a timing race —
+            // and the image is of a screen that has since torn down. A SHALLOW
+            // copy suffices and cannot throw: every post-race write is a
+            // top-level assignment (`failure.screenshot`, `failure.tree`).
+            // Trimmed because the budget the timeout skipped is still a budget,
+            // and an over-size payload rides every progress event.
+            trimToBudget({ ...partial.failure }).failure
           : baseFailure(report, meta, evidence, {
               state: "unavailable",
               reason: "capture-timeout",

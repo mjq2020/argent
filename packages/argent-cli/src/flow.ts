@@ -649,10 +649,15 @@ export function renderFailures(report: FlowReport, flowFile?: string): string[] 
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i]!;
     if (!s.failure || !ordinals.has(i)) continue;
+    // The resolved path names the ROOT flow's file, so it applies only to a
+    // step of that flow. A nested fragment's step keeps the derived guess —
+    // naming checkout.yaml for a step marked [login] is worse than a
+    // convention path.
+    const stepFlow = s.flow ?? report.flow;
     const f = normalizeFailure(s.failure, {
-      flow: s.flow ?? report.flow,
+      flow: stepFlow,
       device: report.device,
-      flowFile,
+      ...(stepFlow === report.flow ? { flowFile } : {}),
     });
     if (!f) continue;
     blocks.push(renderFailureBlock(report, steps, ordinals, i, f));
@@ -1514,6 +1519,25 @@ async function exportAndResolveArtifacts(
   resolveArtifactDisplayPaths(report);
 }
 
+/**
+ * A stand-in report for a flow the tool-server REJECTED before running it, so
+ * it still gets a `<testsuite>`. No steps plus `ok: false` is exactly the shape
+ * `junitSuite`'s `incomplete` branch exists for, which turns it into one
+ * `<error>` carrying the rejection reason.
+ */
+function rejectedFlowReport(relPath: string): FlowReport {
+  return {
+    flow: path.basename(relPath, ".yaml"),
+    device: "",
+    ok: false,
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    errored: 0,
+    steps: [],
+  };
+}
+
 /** One flow's outcome in a directory run — also the --json aggregate entry. */
 interface BatchFlowResult {
   path: string;
@@ -1625,25 +1649,26 @@ async function runFlowDirectory(
     console.log(`\n${renderBatchSummary(counts)}`);
   }
 
-  // Every flow that produced a report becomes a `<testsuite>` in the one file
-  // the operator named. A flow the batch never ran (skipped after a stop) or
-  // that produced no report has nothing to attribute, so it contributes none.
-  const reported = results.filter(
-    (r): r is BatchFlowResult & { report: FlowReport } => r.report !== undefined
-  );
-  await writeReporterFiles(
-    reported.map((r) => ({
-      report: r.report,
+  // Every flow the batch FAILED becomes a `<testsuite>`, with or without a
+  // report. A flow the tool-server rejected before it ran (bad YAML, an
+  // unknown step key) produces none — and filtering those out left the file
+  // saying `failures="0"` for a run that exited 1, which is the one thing a
+  // CI artifact must never do. An empty suite trips `junitSuite`'s own
+  // `incomplete` branch, so it reports as an error carrying the real reason.
+  const reported = results
+    .filter((r) => r.report !== undefined || r.status === "fail")
+    .map((r) => ({
+      report: r.report ?? rejectedFlowReport(r.path),
       meta: {
         platform: args.platform,
         // The flow's real path, keyed the way the batch addressed it — a
         // recursive run has several flows and `argent.flowFile` is what tells
         // a CI reader which one a suite belongs to.
         flowFile: path.join(dir, r.path),
+        ...(r.report === undefined && r.error !== undefined ? { incompleteMessage: r.error } : {}),
       },
-    })),
-    args.reporter
-  );
+    }));
+  await writeReporterFiles(reported, args.reporter);
 
   const indeterminate = reported.some((r) => hasIndeterminateFailure(r.report));
   if (indeterminate) console.error(`note: ${INDETERMINATE_HINT}`);

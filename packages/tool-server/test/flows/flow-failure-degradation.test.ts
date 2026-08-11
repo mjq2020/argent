@@ -503,15 +503,20 @@ describe("the evidence directory", () => {
     // The run's OWN evidence is registered and must survive — it is what the
     // report points at.
     expect(failure.tree?.mimeType).toBe("text/plain");
-    // The sweep is fire-and-forget so it never spends the diagnostics budget.
-    await vi.waitFor(async () => {
-      expect(
-        await fs
-          .access(stale)
-          .then(() => true)
-          .catch(() => false)
-      ).toBe(false);
-    });
+    // The sweep is fire-and-forget so it never spends the diagnostics budget —
+    // and it stats every entry of a directory SHARED with every other run on
+    // the machine, so the default 1s window is not enough under load.
+    await vi.waitFor(
+      async () => {
+        expect(
+          await fs
+            .access(stale)
+            .then(() => true)
+            .catch(() => false)
+        ).toBe(false);
+      },
+      { timeout: 10_000, interval: 100 }
+    );
     expectVerdict(result, FAILING_VERDICT);
   });
 });

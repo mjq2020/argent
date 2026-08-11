@@ -1075,6 +1075,47 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     expect(rendered).toContain('match: "Check out"  button  id=cta  at 0.50, 0.50');
   });
 
+  it("inlines NO snapshot image when the run typed a secret", async () => {
+    // The producer declines `failure.screenshot` on a secret run because pixels
+    // are never scrubbed — but a snapshot step registers `current` (and
+    // `diff`) itself, independently of the failure diagnostics. Inlining
+    // either one hands the agent the same screen as an image and defeats the
+    // omission entirely.
+    const withSecret = (artifacts: Record<string, unknown>): FlowExecuteResult => ({
+      flow: "visual",
+      ok: false,
+      steps: [
+        {
+          index: 0,
+          kind: "snapshot",
+          status: "fail",
+          target: '"home"',
+          reason: "no baseline for home",
+          artifacts,
+          failure: wireFailure({
+            code: "snapshot-baseline-missing",
+            message: "no baseline for home",
+            data: { platform: "chromium", screenshotOmitted: "secret-typed" },
+          }),
+        },
+      ],
+    });
+
+    for (const artifacts of [
+      { current: artifactHandle("cur2", "home-current.png", "image/png") },
+      { diff: artifactHandle("dif2", "home-diff.png", "image/png") },
+    ]) {
+      const blocks = await flowRunToMcpContent(withSecret(artifacts), {
+        toolsUrl: "http://remote:3001",
+        fetchImpl: fetchReturning([...PNG_SIGNATURE]) as unknown as typeof fetch,
+      });
+      expect(blocks.filter((b) => b.type === "image")).toHaveLength(0);
+      // The PATH still prints — the operator can open it deliberately; what
+      // must not happen is the pixels landing in the model's context.
+      expect(texts(blocks).join("\n")).toMatch(/home-(current|diff)\.png/);
+    }
+  });
+
   it("renders a snapshot failure's image once, under its own role", async () => {
     // `failure.screenshot` on a snapshot failure IS the step's `current`: the
     // producer reuses the handle rather than capturing a second time. Rendering

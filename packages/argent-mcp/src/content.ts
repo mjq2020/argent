@@ -815,8 +815,24 @@ export async function flowRunToMcpContent(
     // and inline the annotated diff image when the assertion failed (once per
     // run, not once per failing step).
     if (isRecord(step.artifacts)) {
+      // A snapshot registers `current` (and `diff`) itself, independently of
+      // the failure diagnostics — so the producer declining `failure.screenshot`
+      // on a secret run removes only a POINTER. Inlining either image here
+      // would hand the agent the same screen as pixels and defeat the omission
+      // whose own text says "a capture of this screen could reveal it".
+      const secretTyped =
+        isRecord(step.failure) &&
+        isRecord(step.failure.data) &&
+        step.failure.data.screenshotOmitted === "secret-typed";
       blocks.push(
-        ...(await stepArtifactBlocks(step.artifacts, step.status, budget, ctx, step.depth))
+        ...(await stepArtifactBlocks(
+          step.artifacts,
+          step.status,
+          budget,
+          ctx,
+          step.depth,
+          secretTyped
+        ))
       );
     }
 
@@ -864,9 +880,14 @@ async function stepArtifactBlocks(
   status: string | undefined,
   budget: ImageBudget,
   ctx?: ContentContext,
-  depth?: number
+  depth?: number,
+  secretTyped = false
 ): Promise<ContentBlock[]> {
-  const failed = status === "fail" || status === "error";
+  // Never inline when the run typed a secret: pixels are the one projection no
+  // scrubber reaches, and these images are of the same screen the producer
+  // declined to capture. Paths still print — an operator can open one
+  // deliberately; what must not happen is the bytes entering model context.
+  const failed = (status === "fail" || status === "error") && !secretTyped;
   const entries: [string, string][] = [];
   let diffImage: ContentBlock | undefined;
   // The annotated `diff` is the most informative image — but the three snapshot
