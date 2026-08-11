@@ -219,16 +219,22 @@ export async function attachFailureDiagnostics(
   // Off the report before anything can throw: a live DescribeNode must not
   // reach the wire even if assembly fails halfway.
   delete report.evidence;
-  // Scrub the REASON, not just the copy of it on the failure object. A failure
-  // reason quotes what was on screen (`assertReason` prints the element's
-  // text), so it is exactly where a credential the app echoed back would land
-  // — and `reason` ships on the wire whether or not anything reads `failure`.
-  // Scrubbing only the copy would leave the leak open while looking closed.
-  // Doing it here also preserves the invariant every renderer relies on:
-  // `failure.message` is byte-identical to `reason`.
+  // Scrub AND cap the REASON, not just the copy of it on the failure object.
+  //
+  // Scrubbing, because a failure reason quotes what was on screen
+  // (`assertReason` prints the element's text), so it is exactly where a
+  // credential the app echoed back would land — and `reason` ships on the wire
+  // whether or not anything reads `failure`. Scrubbing only the copy would
+  // leave the leak open while looking closed.
+  //
+  // Capping, for the same two reasons `baseFailure` caps `message`: the wire
+  // budget is meaningless while an uncapped twin of the capped field rides
+  // beside it on every NDJSON progress event, and the invariant every renderer
+  // relies on — `failure.message` byte-identical to `reason` — held only below
+  // the cap, so the one case the cap exists for was the one case it broke.
   if (report.reason !== undefined) {
-    const scrubbed = createSecretScrubber()(report.reason);
-    if (scrubbed !== report.reason) report.reason = scrubbed;
+    const rewritten = truncateUtf8Field(createSecretScrubber()(report.reason), MESSAGE_BYTE_LIMIT);
+    if (rewritten !== report.reason) report.reason = rewritten;
   }
   // What the capture has assembled SO FAR, published as it enriches. A capture
   // that overruns its budget must not throw its diagnosis away: the screen,

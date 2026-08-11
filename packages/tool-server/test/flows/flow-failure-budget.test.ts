@@ -335,6 +335,56 @@ describe("candidate budget", () => {
   });
 });
 
+// ── Reason / message parity ───────────────────────────────────────────────
+
+describe("the message cap", () => {
+  it("caps `reason` with `message`, so the two stay byte-identical", () => {
+    // Both copies ship on every NDJSON progress event, so capping only one
+    // bounds nothing — and the invariant every renderer relies on
+    // (`failure.message` byte-identical to `reason`) then held everywhere
+    // EXCEPT the one case the cap exists for.
+    //
+    // The vehicle is a container whose hoisted `subtreeText` is the whole
+    // screen's text, which is what `assertReason` quotes.
+    const huge = "the quick brown fox jumps over the lazy dog. ".repeat(6000);
+    currentFetch = () => ({
+      tree: screen([
+        n({
+          identifier: "page",
+          label: "Page",
+          subtreeText: huge,
+          frame: { x: 0, y: 0, width: 1, height: 1 },
+        }),
+      ]),
+      source: "native-devtools",
+    });
+    return (async () => {
+      await writeFlow("huge-reason", {
+        executionPrerequisite: "",
+        steps: [
+          {
+            kind: "assert",
+            condition: "text",
+            selector: { identifier: "page" },
+            expectedText: "Done",
+            textMatch: "equals",
+          },
+        ],
+      });
+
+      const result = await run("huge-reason");
+      const step = result.steps.find((s) => s.failure !== undefined)!;
+      const failure = step.failure!;
+
+      expect(Buffer.byteLength(huge, "utf8")).toBeGreaterThan(200_000);
+      expect(failure.message).toBe(step.reason);
+      // Both land under the cap, marker included.
+      expect(Buffer.byteLength(step.reason!, "utf8")).toBeLessThanOrEqual(4 * 1024);
+      expect(step.reason!.endsWith("\u2026")).toBe(true);
+    })();
+  });
+});
+
 // ── Secrets ────────────────────────────────────────────────────────────────
 
 describe("secret discipline", () => {
