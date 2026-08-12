@@ -81,6 +81,15 @@ function fallbackSourceWarning(source: DescribeSource, platform: string): string
  * the testID-only containers the replay tree keeps. A selector derived from
  * the describe tree could fail — or hit a different element — at replay while
  * recording reported success.
+ *
+ * Same source is not the same target on iOS: recording has no run state, so
+ * this read auto-resolves the frontmost connected app, while replay reads
+ * between a `launch:` and the next raw tool: step are pinned to the launched
+ * app (see `fetchFlowTree`). A pinned read is verified still foreground-like -
+ * not frontmost - so when the pin and another connected app both look
+ * foreground-like the two can diverge: auto-resolve refuses a tie as ambiguous
+ * but resolves a uniquely-active sibling, while the pin keeps reading the
+ * launched app.
  */
 async function captureTapSelector(
   registry: Registry,

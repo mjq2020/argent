@@ -39,7 +39,9 @@ export async function fetchFlowTree(
 ): Promise<DescribeTreeData> {
   if (device.platform === "ios") {
     // Only iOS consumes the pin (see queryFullHierarchyTree for why it
-    // matters); the other tree sources are per-device and never auto-resolve.
+    // matters). The platforms below resolve their tree source per-device and
+    // never auto-resolve; ios-remote has no flow tree source at all and falls
+    // through to the not-supported throw at the end.
     return queryFullHierarchyTree(registry, device, launchedAppId);
   }
   if (device.platform === "android") {
