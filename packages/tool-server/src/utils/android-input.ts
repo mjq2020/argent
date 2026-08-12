@@ -392,7 +392,7 @@ export const MAX_DELETE_COUNT = 150;
 // password field on these levels) would be refused, quoting this constant as
 // though it were a length that had been measured. The refusal is `count >
 // MAX_DELETE_COUNT`, so equality is allowed and `<=` is the relationship.
-// `it("keeps the blind delete count under the length limit")` in
+// `it("blind-deletes every length the measured path would accept")` in
 // test/keyboard-clear.test.ts pins it, because nothing else would catch the two
 // being separated again.
 export const BLIND_DELETE_COUNT = MAX_DELETE_COUNT;
@@ -411,10 +411,14 @@ export const BLIND_DELETE_COUNT = MAX_DELETE_COUNT;
  * IS such a fixed run: see {@link measureFocusedTextLength} for exactly when,
  * and BLIND_DELETE_COUNT for what it covers.
  *
- * Note the dump reports an EMPTY field's hint in the same `text` attribute (on
- * every level tested, including API 36, which carries no separate `hint`
- * attribute to tell them apart), so a measurement can be the placeholder rather
- * than real content. For the delete run that is harmless — it only makes the run
+ * Note the dump reports an EMPTY field's hint in the same `text` attribute, so a
+ * measurement can be the placeholder rather than real content — and on the
+ * levels this fallback actually serves there is nothing to tell them apart:
+ * checked on API 30, whose dump carries no `hint` attribute at all. (API 36 does
+ * emit one — a focused empty Settings search box dumps as `text="Search
+ * settings" … hint="Search settings"` — but that level has `input
+ * keycombination`, so it never reaches this path.) For the delete run the
+ * over-measurement is harmless — it only makes the run
  * slightly longer than needed, and backspace on an empty field does nothing. It
  * is NOT harmless for the MAX_DELETE_COUNT gate below, which turns any
  * over-measurement into a refusal: an empty field whose placeholder is longer
