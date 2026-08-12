@@ -3,6 +3,8 @@ import { Registry, FAILURE_CODES, getFailureSignal, type DeviceInfo } from "@arg
 import { InvalidToolInputError } from "../src/utils/capability";
 import { typeSimulatorServer } from "../src/tools/keyboard/simulator-server-keys";
 import { makeChromiumImpl } from "../src/tools/keyboard/platforms/chromium";
+import { vegaImpl } from "../src/tools/keyboard/platforms/vega";
+import { typeTv } from "../src/tools/keyboard/platforms/tv";
 import { injectVegaNamedKey, injectVegaText } from "../src/utils/vega-input";
 
 // The android clear's own rejection is the one case in this file that has to
@@ -245,6 +247,50 @@ describe("keyboard backends — input rejection is a 400 with a uniform telemetr
       );
     expect(err).not.toBeInstanceOf(InvalidToolInputError);
     expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.KEYBOARD_CLEAR_INEFFECTIVE);
+  });
+
+  it("vega: clear → 400 + KEYBOARD_CLEAR_UNSUPPORTED_TARGET, not the capability code", async () => {
+    // `UnsupportedOperationError` hard-codes TOOL_CAPABILITY_UNSUPPORTED_OPERATION,
+    // so a refused `clear` was filed under the same code as a tool that cannot
+    // run on the target at all — and its message opens by saying the whole tool
+    // is unsupported here, which contradicts the tool's own description and
+    // `argent-tv-interact`, both of which send the agent to `keyboard` to type
+    // on a Vega or TV target.
+    const vegaDevice = {
+      id: "vega-serial",
+      platform: "vega",
+      kind: "vvd",
+    } as unknown as DeviceInfo;
+    const err = await Promise.resolve(
+      vegaImpl.handler({}, { udid: vegaDevice.id, clear: true, text: "hi" }, vegaDevice)
+    ).then(
+      () => {
+        throw new Error("expected the call to reject, but it resolved");
+      },
+      (e: unknown) => e
+    );
+
+    expect(err).toBeInstanceOf(InvalidToolInputError);
+    expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.KEYBOARD_CLEAR_UNSUPPORTED_TARGET);
+    expect((err as Error).message).not.toMatch(/tool 'keyboard' is not supported/i);
+  });
+
+  it("tv: clear → 400 + KEYBOARD_CLEAR_UNSUPPORTED_TARGET, and no tvOS device is called an iOS one", async () => {
+    const appleTv = { id: "TV-UDID", platform: "ios", kind: "simulator" } as unknown as DeviceInfo;
+    const err = await typeTv({} as never, appleTv, {
+      udid: appleTv.id,
+      clear: true,
+      text: "hi",
+    }).then(
+      () => {
+        throw new Error("expected the call to reject, but it resolved");
+      },
+      (e: unknown) => e
+    );
+
+    expect(err).toBeInstanceOf(InvalidToolInputError);
+    expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.KEYBOARD_CLEAR_UNSUPPORTED_TARGET);
+    expect((err as Error).message).not.toMatch(/ios simulator/i);
   });
 
   it("android: clear of a field too long to delete → 400 + KEYBOARD_CLEAR_FIELD_TOO_LONG", async () => {

@@ -1,6 +1,6 @@
-import type { DeviceInfo } from "@argent/registry";
+import { FAILURE_CODES } from "@argent/registry";
 import type { PlatformImpl } from "../../../utils/cross-platform-tool";
-import { UnsupportedOperationError } from "../../../utils/capability";
+import { InvalidToolInputError } from "../../../utils/capability";
 import {
   injectVegaNamedKey,
   injectVegaText,
@@ -12,7 +12,7 @@ import type { KeyboardParams, KeyboardResult } from "../types";
 // `inputd-cli`). The `adb` dependency is declared on this branch's `requires`
 // and preflighted by dispatchByPlatform before the handler runs, so a missing
 // adb fails with a clean 424 install hint rather than a spawn ENOENT.
-async function runVega(device: DeviceInfo, params: KeyboardParams): Promise<KeyboardResult> {
+async function runVega(params: KeyboardParams): Promise<KeyboardResult> {
   let keysPressed = 0;
   // Vega injects through `inputd-cli`, which exposes no modifier-combination
   // primitive, so the select-all chord the iOS/Chromium clears use cannot be
@@ -23,12 +23,22 @@ async function runVega(device: DeviceInfo, params: KeyboardParams): Promise<Keyb
   // issue #449, which this tool has already shipped once. Checked BEFORE any
   // injection so an unsupported request leaves the device untouched.
   if (params.clear) {
-    throw new UnsupportedOperationError(
-      "keyboard",
-      device,
-      "`clear` is not supported on Vega — its `inputd-cli` transport cannot send the " +
-        "select-all modifier chord. Delete the field's contents with repeated " +
-        '`key: "backspace"` presses instead'
+    // An `InvalidToolInputError`, not an `UnsupportedOperationError`: the tool
+    // IS supported here — its own description and `argent-tv-interact` both send
+    // the agent to `keyboard` to type on Vega — and one parameter of this
+    // request is not. That class opens its message by saying the whole tool is
+    // unsupported on the target, and hard-codes
+    // TOOL_CAPABILITY_UNSUPPORTED_OPERATION as its signal, which files a refused
+    // `clear` under the same code as a tool that cannot run here at all.
+    throw new InvalidToolInputError(
+      "keyboard clear: `clear` is not supported on Vega — its `inputd-cli` transport cannot " +
+        "send the select-all modifier chord. Typing works: send the same call without " +
+        '`clear`, and empty the field first with repeated `key: "backspace"` presses.',
+      {
+        error_code: FAILURE_CODES.KEYBOARD_CLEAR_UNSUPPORTED_TARGET,
+        failure_stage: "keyboard_clear_vega",
+        error_kind: "unsupported",
+      }
     );
   }
   // Resolve the named key before injecting text so an unknown name fails fast.
@@ -48,5 +58,5 @@ async function runVega(device: DeviceInfo, params: KeyboardParams): Promise<Keyb
 
 export const vegaImpl: PlatformImpl<Record<string, unknown>, KeyboardParams, KeyboardResult> = {
   requires: ["adb"],
-  handler: (_services, params, device) => runVega(device, params),
+  handler: (_services, params) => runVega(params),
 };

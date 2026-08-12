@@ -4,7 +4,7 @@ import { typeSimulatorServer } from "../src/tools/keyboard/simulator-server-keys
 import { makeChromiumImpl } from "../src/tools/keyboard/platforms/chromium";
 import { vegaImpl } from "../src/tools/keyboard/platforms/vega";
 import { typeTv } from "../src/tools/keyboard/platforms/tv";
-import { UnsupportedOperationError } from "../src/utils/capability";
+import { InvalidToolInputError } from "../src/utils/capability";
 import type { KeyEventArgs } from "../src/blueprints/chromium-cdp";
 
 vi.mock("../src/utils/vega-input", async (importOriginal) => {
@@ -1996,13 +1996,19 @@ describe("keyboard clear — Chromium (CDP)", () => {
 });
 
 describe("keyboard clear — unsupported platforms", () => {
+  // The rejections are `InvalidToolInputError`, not `UnsupportedOperationError`:
+  // the TOOL is supported on both targets — its own description and
+  // `argent-tv-interact` send the agent here to type — and one parameter of the
+  // request is not. `UnsupportedOperationError` says the opposite in its first
+  // clause and hard-codes TOOL_CAPABILITY_UNSUPPORTED_OPERATION, which files a
+  // refused `clear` under the same code as a tool that cannot run here at all.
   it("vega rejects clear with no injection attempted", async () => {
     vi.mocked(injectVegaText).mockClear();
     vi.mocked(injectVegaNamedKey).mockClear();
 
     await expect(
       vegaImpl.handler({}, { udid: VEGA.id, clear: true, text: "hi" }, VEGA)
-    ).rejects.toBeInstanceOf(UnsupportedOperationError);
+    ).rejects.toBeInstanceOf(InvalidToolInputError);
     // A silent no-op here is exactly the #449 failure mode: the caller believes
     // the field was emptied and the new text replaced the old.
     expect(injectVegaText).not.toHaveBeenCalled();
@@ -2022,7 +2028,7 @@ describe("keyboard clear — unsupported platforms", () => {
 
     await expect(
       typeTv(registryWith({ type }), APPLE_TV, { udid: APPLE_TV.id, clear: true, text: "hi" })
-    ).rejects.toBeInstanceOf(UnsupportedOperationError);
+    ).rejects.toBeInstanceOf(InvalidToolInputError);
     expect(type).not.toHaveBeenCalled();
   });
 
@@ -2054,7 +2060,7 @@ describe("keyboard clear — unsupported platforms", () => {
         { udid: ANDROID.id, clear: true, text: "hi" },
         ANDROID
       )
-    ).rejects.toBeInstanceOf(UnsupportedOperationError);
+    ).rejects.toBeInstanceOf(InvalidToolInputError);
     expect(adbShell).not.toHaveBeenCalled();
   });
 
@@ -2074,7 +2080,7 @@ describe("keyboard clear — unsupported platforms", () => {
         { udid: APPLE_TV.id, clear: true, text: "hi" },
         APPLE_TV
       )
-    ).rejects.toBeInstanceOf(UnsupportedOperationError);
+    ).rejects.toBeInstanceOf(InvalidToolInputError);
     expect(pressKey).not.toHaveBeenCalled();
     expect(type).not.toHaveBeenCalled();
   });

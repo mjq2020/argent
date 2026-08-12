@@ -1,5 +1,5 @@
-import type { DeviceInfo, Registry } from "@argent/registry";
-import { UnsupportedOperationError } from "../../../utils/capability";
+import { FAILURE_CODES, type DeviceInfo, type Registry } from "@argent/registry";
+import { InvalidToolInputError, UnsupportedOperationError } from "../../../utils/capability";
 import { resolveTvApi } from "../../tv/tv-service";
 import type { KeyboardParams, KeyboardResult } from "../types";
 
@@ -31,11 +31,23 @@ export async function typeTv(
   // supporting it. Reject rather than silently no-op (issue #449), up front so
   // nothing is typed before the rejection.
   if (params.clear) {
-    throw new UnsupportedOperationError(
-      "keyboard",
-      device,
-      "`clear` is not supported on a TV target — delete the existing value with " +
-        "repeated backspaces on the on-screen keyboard, or use the field's own clear affordance"
+    // An `InvalidToolInputError`, not an `UnsupportedOperationError`: the tool
+    // IS supported here — its own description and `argent-tv-interact` both send
+    // the agent to `keyboard` to type into a focused field on a TV — and one
+    // parameter of this request is not. That class opens its message by saying
+    // the whole tool is unsupported on the target (and labels a tvOS device an
+    // "ios simulator"), and hard-codes TOOL_CAPABILITY_UNSUPPORTED_OPERATION as
+    // its signal, which files a refused `clear` under the same code as a tool
+    // that cannot run here at all.
+    throw new InvalidToolInputError(
+      "keyboard clear: `clear` is not supported on a TV target — delete the existing value " +
+        "with repeated backspaces on the on-screen keyboard, or use the field's own clear " +
+        "affordance. Typing works: send the same call without `clear`.",
+      {
+        error_code: FAILURE_CODES.KEYBOARD_CLEAR_UNSUPPORTED_TARGET,
+        failure_stage: "keyboard_clear_tv",
+        error_kind: "unsupported",
+      }
     );
   }
   const text = params.text ?? "";
