@@ -725,10 +725,13 @@ export async function clearChromiumField(
 
   const modifiers = before.mac ? CDP_MODIFIER_META : CDP_MODIFIER_CTRL;
   const selectAllKey = { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers };
-  // The read-back is in a `finally` so the element is still measured when the
-  // dispatch throws. It does NOT release the slot — see `keep` below — and
-  // nothing in here does: releasing is the caller's, because the parked element
-  // has to outlive the typing that follows.
+  // The read-back is the last thing before the verdict below, so nothing can
+  // slip between the settle and the measurement. On the THROW path it runs and
+  // its value is discarded — the exception propagates before anything reads
+  // `after`, and the slot is let go by the caller's own `finally`, not here.
+  // It does NOT release the slot — see `keep` below — and nothing in here does:
+  // releasing is the caller's, because the parked element has to outlive the
+  // typing that follows.
   let after: ClearedTarget | undefined;
   try {
     await api.dispatchKeyEvent({
