@@ -488,10 +488,10 @@ describe("keyboard clear — Android (adb input)", () => {
   });
 
   it("shares one deadline across the clear's legs instead of a timeout each", async () => {
-    // `keyboard` is not `longRunning`, so the MCP adapter abandons the request
-    // at 30s. Sizing each leg against 30s independently is what produced a 60s
-    // worst case — the client giving up while adb kept deleting on the device.
-    // Time spent on an earlier leg has to come off the next one's budget.
+    // The budget is what has to hold ON THE DEVICE, whatever the client waits
+    // for: sizing each leg against the adapter's 30s independently is what
+    // produced a 60s worst case, with adb still deleting long after the run was
+    // meant to be over. Time spent on an earlier leg comes off the next one's.
     let clock = 1_000_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
     try {
@@ -1213,6 +1213,14 @@ describe("keyboard clear — tool schema", () => {
 
   it("rejects a non-boolean `clear` rather than coercing it", () => {
     expect(tool.zodSchema!.safeParse({ udid: ANDROID.id, clear: "yes" }).success).toBe(false);
+  });
+
+  it("declares itself long-running, since one call budgets a clear and two injections", () => {
+    // The clear is capped at 20s on Android and the `text` / `key` injections
+    // that follow it keep their own 15s caps, so a `{ clear, text, key }` worst
+    // case sums past the MCP adapter's 30s per-request fetch timeout — which
+    // abandons the request while adb is still typing on the device.
+    expect(tool.longRunning).toBe(true);
   });
 
   it("bounds `delayMs`, which one device's typing queue now waits on", () => {

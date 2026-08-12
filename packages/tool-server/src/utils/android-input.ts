@@ -172,12 +172,13 @@ const KEYCODE_DEL = 67;
  * `keycombination` probe, then on a legacy level a `uiautomator dump`, a
  * DUMP_RETRY_BACKOFF_MS wait, a second dump (see {@link readHierarchy}) and the
  * delete run. `text` / `key` injection still follows it inside the same
- * request. `keyboard` does not
- * declare `longRunning`, so the argent-mcp adapter applies its 30s per-request
- * fetch timeout to the lot (`FETCH_TIMEOUT_MS`, mcp-server.ts) — which means the
- * legs CANNOT each be sized against 30s independently, or their worst cases sum
- * past it and the client abandons the request while adb keeps deleting on the
- * device. So they share one deadline instead.
+ * request, under its own ADB_INPUT_TIMEOUT_MS caps, so a `{ clear, text, key }`
+ * worst case sums past the argent-mcp adapter's 30s per-request fetch timeout
+ * (`FETCH_TIMEOUT_MS`, mcp-server.ts) — which is why `keyboard` declares
+ * `longRunning` and the adapter does not apply that timeout to it. The clear's
+ * own legs still share ONE deadline rather than being sized individually: the
+ * budget below is what actually has to hold on the device, whatever the client
+ * is willing to wait for.
  *
  * 20s covers the slowest path measured on API 30 (a ~2s dump plus 6.9s of
  * deletes against the live-filtering Settings search box) with room to spare.
