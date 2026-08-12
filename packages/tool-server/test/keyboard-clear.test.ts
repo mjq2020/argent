@@ -1214,6 +1214,15 @@ describe("keyboard clear — tool schema", () => {
   it("rejects a non-boolean `clear` rather than coercing it", () => {
     expect(tool.zodSchema!.safeParse({ udid: ANDROID.id, clear: "yes" }).success).toBe(false);
   });
+
+  it("bounds `delayMs`, which one device's typing queue now waits on", () => {
+    // iOS typing is serialized per device (the clear holds a modifier down
+    // across awaits, so a concurrent keystroke would land inside the chord), so
+    // an unbounded cadence no longer costs only its own call: it holds that
+    // device's keyboard, and everything queued behind it, for the duration.
+    expect(tool.zodSchema!.safeParse({ udid: IOS_SIM.id, delayMs: 600_000 }).success).toBe(false);
+    expect(tool.zodSchema!.safeParse({ udid: IOS_SIM.id, delayMs: 5000 }).success).toBe(true);
+  });
 });
 
 describe("keyboard clear — Chromium (CDP)", () => {

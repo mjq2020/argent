@@ -45,9 +45,17 @@ const zodSchema = z.object({
     ),
   delayMs: z
     .number()
+    // Bounded because iOS typing is serialized per device: the backend holds a
+    // modifier down across awaits, so a second call arriving inside that window
+    // would have its keystroke delivered as part of the chord, and the fix is a
+    // FIFO chain. An unbounded cadence therefore no longer costs only its own
+    // call — `{ delayMs: 600000 }` holds that device's keyboard, and everything
+    // queued behind it, for ten minutes. 5s per keypress is far past any real
+    // cadence, and matches the bound `await-ui-element` puts on `pollIntervalMs`.
+    .max(5000)
     .optional()
     .describe(
-      "Delay in ms between key presses (default 50). Ignored on Android phones/tablets (typed via `adb input text`, which has no per-key cadence), on Vega (text/keys injected in a single shot), and on TV targets (Apple TV / Android TV type the whole string at the daemon's own cadence)."
+      "Delay in ms between key presses (default 50, max 5000). Ignored on Android phones/tablets (typed via `adb input text`, which has no per-key cadence), on Vega (text/keys injected in a single shot), and on TV targets (Apple TV / Android TV type the whole string at the daemon's own cadence)."
     ),
 });
 
