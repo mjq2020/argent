@@ -5,7 +5,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // two consumers — `describe` and the keyboard clear's measurement — and both
 // mock it out, so nothing owned the command itself.
 const { adbExecOutBinary } = vi.hoisted(() => ({
-  adbExecOutBinary: vi.fn(async (): Promise<Buffer> => Buffer.from("<hierarchy />")),
+  adbExecOutBinary: vi.fn(
+    async (
+      _serial: string,
+      _shellCommand: string,
+      _options?: { timeoutMs?: number }
+    ): Promise<Buffer> => Buffer.from("<hierarchy />")
+  ),
 }));
 vi.mock("../src/utils/adb", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/utils/adb")>()),
@@ -14,7 +20,9 @@ vi.mock("../src/utils/adb", async (importOriginal) => ({
 
 import { dumpAndroidUiXml } from "../src/utils/android-ui-dump";
 
-const commandOf = (call: unknown[]) => call[1] as string;
+type DumpCall = [string, string, { timeoutMs?: number }?];
+const commandOf = (call: DumpCall) => call[1];
+const timeoutOf = (call: DumpCall) => call[2]?.timeoutMs;
 
 describe("dumpAndroidUiXml — the command every hierarchy read rides on", () => {
   beforeEach(() => adbExecOutBinary.mockClear());
@@ -52,7 +60,7 @@ describe("dumpAndroidUiXml — the command every hierarchy read rides on", () =>
     await dumpAndroidUiXml("emulator-5554");
     await dumpAndroidUiXml("emulator-5554");
 
-    const pathOf = (call: unknown[]) => commandOf(call).match(/argent-ui-dump-[^\s]+\.xml/)?.[0];
+    const pathOf = (call: DumpCall) => commandOf(call).match(/argent-ui-dump-[^\s]+\.xml/)?.[0];
     expect(pathOf(adbExecOutBinary.mock.calls[0]!)).toBeDefined();
     expect(pathOf(adbExecOutBinary.mock.calls[0]!)).not.toBe(
       pathOf(adbExecOutBinary.mock.calls[1]!)
@@ -63,11 +71,10 @@ describe("dumpAndroidUiXml — the command every hierarchy read rides on", () =>
     // The clear hands it whatever is left of a shared deadline; `describe` takes
     // the default. A cold uiautomator on a busy emulator is slow either way.
     await dumpAndroidUiXml("emulator-5554");
-    const byDefault = adbExecOutBinary.mock.calls[0]![2] as { timeoutMs: number };
-    expect(byDefault.timeoutMs).toBe(20_000);
+    expect(timeoutOf(adbExecOutBinary.mock.calls[0]!)).toBe(20_000);
 
     await dumpAndroidUiXml("emulator-5554", { timeoutMs: 6_000 });
-    expect((adbExecOutBinary.mock.calls[1]![2] as { timeoutMs: number }).timeoutMs).toBe(6_000);
+    expect(timeoutOf(adbExecOutBinary.mock.calls[1]!)).toBe(6_000);
   });
 
   it("returns the device's bytes as UTF-8", async () => {
