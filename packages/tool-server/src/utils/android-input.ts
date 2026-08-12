@@ -616,9 +616,20 @@ async function readHierarchy(
       return undefined;
     }
     if (waitMs > 0) await sleep(waitMs);
-    const xml = await dumpAndroidUiXml(serial, {
-      timeoutMs: clearLegTimeout(deadline, DELETE_RUN_RESERVE_MS),
-    });
+    // A THROWN attempt has to fall through to the next one, not out of the
+    // loop. `dumpAndroidUiXml` throws on any transport failure — a dropped
+    // socket, an `adb` still attaching to a just-booted device — and those fail
+    // FAST, so an unguarded throw skipped the backoff retry entirely and dropped
+    // to the blind count with almost the whole budget unspent. The retry exists
+    // precisely for a transient reader, and a transient reader is what this is.
+    let xml: string;
+    try {
+      xml = await dumpAndroidUiXml(serial, {
+        timeoutMs: clearLegTimeout(deadline, DELETE_RUN_RESERVE_MS),
+      });
+    } catch {
+      continue;
+    }
     // adb exits 0 even when the dump did not happen — a refused screen reports
     // an in-band `ERROR:` line, a lost race reports `Killed`. Neither carries a
     // hierarchy, which is the one test that covers both.

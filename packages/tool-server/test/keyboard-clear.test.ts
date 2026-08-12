@@ -647,6 +647,36 @@ describe("keyboard clear — Android (adb input)", () => {
     expect(deleteRun(inputCmds()[1]!)).toHaveLength(10 + 8);
   });
 
+  it("retries a dump that THREW as well as one that answered uselessly", async () => {
+    // `dumpAndroidUiXml` throws on any transport failure — a dropped socket, an
+    // `adb` still attaching to a just-booted device — and those fail FAST, so an
+    // unguarded throw escaped the loop, skipped the backoff retry entirely, and
+    // dropped to the blind count with almost the whole budget unspent. A
+    // transient reader is exactly what the retry is for.
+    seedLegacyLevel();
+    adbExecOutBinary.mockImplementationOnce(async () => {
+      throw new Error("adb: device 'emulator-5554' not found");
+    });
+    seedDump(dumpWith("abcdefghij"));
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(adbExecOutBinary).toHaveBeenCalledTimes(2);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(10 + 8);
+  }, 10_000);
+
+  it("falls back to the blind count when BOTH dump attempts throw", async () => {
+    seedLegacyLevel();
+    adbExecOutBinary.mockImplementation(async () => {
+      throw new Error("adb: device offline");
+    });
+
+    await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
+
+    expect(adbExecOutBinary).toHaveBeenCalledTimes(2);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+  }, 10_000);
+
   it("does not spend the retry backoff when the budget cannot fit another dump", async () => {
     // The backoff has to be counted BEFORE it is slept, not after: sleeping and
     // then discovering there is no budget left spends the wait out of the delete
