@@ -238,9 +238,9 @@ export interface AndroidClearOptions {
    * a backoff can wait out, and the cost is not a slow clear: the measurement
    * fails, {@link clearByDeleting} falls to BLIND_DELETE_COUNT, and a field
    * longer than that keeps its head while the tool reports `cleared: true`.
-   * Measured end to end on that emulator, 6/6 — a 200-character field left 72
-   * characters of residue with the new text appended to it, and the
-   * MAX_DELETE_COUNT refusal that would otherwise have caught it never fired.
+   * Measured end to end on that emulator, 6/6 — a 200-character field kept its
+   * head with the new text appended to it, and the MAX_DELETE_COUNT refusal
+   * that would otherwise have caught it never fired.
    * `describe` → tap → `keyboard` is the ordinary call order, so the window is
    * not an edge case.
    *
@@ -342,27 +342,6 @@ const KEYCODE_MOVE_END = 123;
 // Backspace on an empty field is a no-op, so overshooting costs only key events.
 const DELETE_MARGIN = 8;
 
-// Used when the focused field's contents cannot be measured: no focused
-// *editable* node in the dump, a password field (whose reported text is the
-// mask, not the value), or a dump that failed outright. Covers any credential or
-// single-line form field.
-//
-// This IS the fixed run the measurement exists to avoid, so it carries that
-// shape's failure with it: a field longer than this PLUS DELETE_MARGIN — the
-// count actually sent — keeps its head.
-//
-// It MUST NOT exceed MAX_DELETE_COUNT. An unmeasurable focused editable floors
-// the measurement to this value rather than vanishing from it (see
-// measureFocusedTextLength), so the blind count is what the length refusal
-// compares — and if it sat above the limit, every unmeasurable field (every
-// password field on these levels) would be refused, quoting this constant as
-// though it were a length that had been measured. The refusal is `count >
-// MAX_DELETE_COUNT`, so equality is allowed and `<=` is the relationship.
-// `it("keeps the blind delete count under the length limit")` in
-// test/keyboard-clear.test.ts pins it, because the two constants are otherwise
-// edited independently and nothing else connects them.
-export const BLIND_DELETE_COUNT = 120;
-
 // Longest field this path will attempt; beyond it the clear is refused rather
 // than started — see clearByDeleting.
 //
@@ -379,6 +358,36 @@ export const BLIND_DELETE_COUNT = 120;
 // DELETE_RUN_RESERVE_MS the run is guaranteed. It is still well past the
 // single-line inputs this fallback serves — a login, a search box, a form field.
 export const MAX_DELETE_COUNT = 150;
+
+// Used when the focused field's contents cannot be measured: no focused
+// *editable* node in the dump, a password field (whose reported text is the
+// mask, not the value), or a dump that failed outright. Covers any credential or
+// single-line form field.
+//
+// This IS the fixed run the measurement exists to avoid, so it carries that
+// shape's failure with it: a field longer than this PLUS DELETE_MARGIN — the
+// count actually sent — keeps its head. Which is why it is the LIMIT rather than
+// a smaller number of its own: at 120 the blind run left a 140-character field
+// holding its first 12 characters with the new text appended to them, and
+// returned 200 `{"cleared": true}` (reproduced 2/3 on API 30 against three
+// competing `uiautomator dump` loops). Every length below is a field this path
+// accepts when it CAN measure it, so a blind run that stops short corrupts a
+// field the tool otherwise supports. Tied to the limit so the blind run always
+// covers the whole accepted range: past it the clear is refused whenever the
+// length is readable, and only an unreadable over-long field is still truncated
+// — the residue the tool's own description warns about.
+//
+// It MUST NOT exceed MAX_DELETE_COUNT. An unmeasurable focused editable floors
+// the measurement to this value rather than vanishing from it (see
+// measureFocusedTextLength), so the blind count is what the length refusal
+// compares — and if it sat above the limit, every unmeasurable field (every
+// password field on these levels) would be refused, quoting this constant as
+// though it were a length that had been measured. The refusal is `count >
+// MAX_DELETE_COUNT`, so equality is allowed and `<=` is the relationship.
+// `it("keeps the blind delete count under the length limit")` in
+// test/keyboard-clear.test.ts pins it, because nothing else would catch the two
+// being separated again.
+export const BLIND_DELETE_COUNT = MAX_DELETE_COUNT;
 
 /**
  * Empty the focused field on an Android level whose `input` has no
@@ -456,10 +465,11 @@ async function clearByDeleting(
   const dels = Array.from({ length: keys }, () => KEYCODE_DEL).join(" ");
   // One invocation for the whole run: `input keyevent` accepts a keycode list.
   // No reserve withheld — this IS the leg the reserve was held for, so it gets
-  // everything remaining. (Killing adb part-way does NOT stop the device:
-  // measured on API 36, deletes already handed over keep landing, so an
-  // interrupted run finishes anyway and the caller merely sees a spurious
-  // error. The reserve is what keeps that from being the normal outcome.)
+  // everything remaining.
+  // (Killing adb part-way does NOT stop the device: measured on API 36, deletes
+  // already handed over keep landing, so an interrupted run finishes anyway and
+  // the caller merely sees a spurious error. The reserve is what keeps that from
+  // being the normal outcome.)
   await adbShell(serial, `input keyevent ${KEYCODE_MOVE_END} ${dels}`, {
     timeoutMs: clearLegTimeout(deadline),
   });

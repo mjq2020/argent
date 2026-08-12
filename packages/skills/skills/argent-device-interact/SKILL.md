@@ -182,7 +182,7 @@ Special keys: `enter`, `escape`, `backspace`, `tab`, `space`, `arrow-up`, `arrow
 - **Focus a text field first.** Chromium refuses a clear with nothing editable (or a readonly / non-text element) focused, because a select-all there would select the page. iOS and Android dispatch it blind at whatever holds focus and report success either way.
 - iOS, Android and Chromium only — rejected up front on Vega and TV targets.
 - `"cleared": true` is **not proof the field is empty.** Only Chromium reads the field back, and even it goes best-effort on a page it cannot read. `describe` the field when the result matters.
-- **Old Android levels** (no `input keycombination`) delete backwards from end-of-line instead: a multi-line field keeps whatever sits below the caret, and a field over 150 characters is refused rather than half-deleted. A length it cannot read — a password field, or a screen it cannot capture — falls back to a fixed 128 backspaces, so a longer value keeps its head while the call still reports success.
+- **Old Android levels** (no `input keycombination`) delete backwards from end-of-line instead: a multi-line field keeps whatever sits below the caret, and a field over 150 characters is refused rather than half-deleted. A length it cannot read — a password field, or a screen it cannot capture — falls back to a fixed 158 backspaces, which covers every length it accepts, so only a field past that same 150 limit keeps its head while the call still reports success.
 
 **Typing secrets.** To enter a credential without its plaintext ever entering your context, transcript, or logs, use a secret placeholder in `text` (works in `keyboard`, `paste`, `run-sequence` keyboard steps, and flow `type` steps):
 
