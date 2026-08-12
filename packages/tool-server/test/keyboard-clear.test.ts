@@ -1354,6 +1354,26 @@ describe("keyboard clear — Chromium (CDP)", () => {
       });
   });
 
+  it("releases the parked element exactly once on a call that also types", async () => {
+    // Probe counts were asserted only on `{ clear: true }` calls with no typing,
+    // where the release IS the third probe. On a `{ clear, text }` call the
+    // release happens inside the post-typing check instead, and the `finally`
+    // must then skip it — without the `!released` guard every combined call
+    // pays a fourth round trip to re-read an element that is already gone, and
+    // nothing noticed.
+    const { probes, api } = recordingApi();
+
+    await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, text: "ab", delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(probes).toHaveLength(3);
+    // Resolve, read-back (keeps the element), release.
+    expect(probes.filter((p) => p.includes("delete window["))).toHaveLength(1);
+  });
+
   it("parks each clear under its own handle, so two calls cannot collide", async () => {
     // Nothing serializes tool calls against a device, so two clears sharing one
     // slot interleave: B's probe overwrites A's element, or B's release deletes
