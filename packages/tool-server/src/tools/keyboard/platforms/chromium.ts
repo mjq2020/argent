@@ -139,25 +139,6 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
       await sleep(delay);
     }
 
-    // Key after text: a combined call means "type, then submit" (text +
-    // key:"enter"). Pressing the key first submits the still-empty field.
-    if (named) {
-      await api.dispatchKeyEvent({
-        type: "keyDown",
-        key: named.key,
-        code: named.code,
-        windowsVirtualKeyCode: named.windowsVirtualKeyCode,
-      });
-      await sleep(delay);
-      await api.dispatchKeyEvent({
-        type: "keyUp",
-        key: named.key,
-        code: named.code,
-        windowsVirtualKeyCode: named.windowsVirtualKeyCode,
-      });
-      keysPressed++;
-    }
-
     // One sample before the loop cannot cover a blur that lands DURING it: the
     // characters go out `delay` apart, so a page that moves focus part-way
     // through splits the value across two fields. Measured on Chrome 150, where
@@ -178,12 +159,17 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     //   - `{ clear, key: "enter" }` on a search box that blurs on submit — the
     //     ordinary "replace the query and submit" shape.
     //
-    // So the check is narrowed on both axes. A named `key` is excluded outright:
-    // one key event cannot be split across two fields, and for `tab`/`enter` the
-    // focus move IS the requested effect. And for characters, focus loss has to
-    // be corroborated by the target not holding what was typed — after a clear it
-    // should hold exactly those characters, so FEWER means the rest went
-    // somewhere else.
+    // So the check is narrowed on both axes. A named `key` never reaches it: the
+    // sample is taken HERE, between the last character and the key, because one
+    // key event cannot be split across two fields while for `tab`/`enter` the
+    // focus move IS the requested effect. Sampling after the key instead made
+    // every `{ clear, text, key: "enter" }` against the ordinary "send and reset"
+    // handler — a search box, a chat composer, a tag input, all of which empty
+    // the field and blur it on submit — fail with a 500 naming a split that did
+    // not happen, on a request that had done exactly what it was asked to. And
+    // for characters, focus loss has to be corroborated by the target not holding
+    // what was typed — after a clear it should hold exactly those characters, so
+    // FEWER means the rest went somewhere else.
     //
     // Strictly fewer, so a page that LENGTHENS what it receives — an input mask
     // inserting separators, an autocompleter — is not read as a split. A page
@@ -220,6 +206,25 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
           }
         );
       }
+    }
+
+    // Key after text: a combined call means "type, then press" (text +
+    // key:"enter"). Pressing the key first would send the still-empty field.
+    if (named) {
+      await api.dispatchKeyEvent({
+        type: "keyDown",
+        key: named.key,
+        code: named.code,
+        windowsVirtualKeyCode: named.windowsVirtualKeyCode,
+      });
+      await sleep(delay);
+      await api.dispatchKeyEvent({
+        type: "keyUp",
+        key: named.key,
+        code: named.code,
+        windowsVirtualKeyCode: named.windowsVirtualKeyCode,
+      });
+      keysPressed++;
     }
   } finally {
     // Never leave the slot behind: it is the sole retainer of the parked node,

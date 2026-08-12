@@ -1413,6 +1413,55 @@ describe("keyboard clear — Chromium (CDP)", () => {
     }
   });
 
+  it("reads the field back BEFORE the named key, so the key's own effect is not a split", async () => {
+    // `{ clear, text, key: "enter" }` is the combination the tool advertises,
+    // and the standard Enter handler — a search box, a chat composer, a tag
+    // input — sends the value and then empties and blurs the field. Sampled
+    // AFTER the key, that is indistinguishable from "the page moved focus while
+    // the text was being typed": reproduced 3/3 on Chrome 130 through the branch
+    // tool-server, where a request that replaced the value, typed it and ran the
+    // submit handler came back as a 500 naming a cause that never occurred.
+    //
+    // This page reacts on the Enter keyDown, so the verdict depends entirely on
+    // which side of that dispatch the read-back sits.
+    const trace: string[] = [];
+    let entered = false;
+    const api = {
+      dispatchKeyEvent: async (e: KeyEventArgs) => {
+        trace.push(`key:${e.type}:${e.key ?? ""}`);
+        if (e.type === "keyDown" && e.key === "Enter") entered = true;
+      },
+      evaluate: async () => {
+        trace.push("probe");
+        const nth = trace.filter((t) => t === "probe").length;
+        if (nth === 1) {
+          return JSON.stringify({
+            verdict: "editable",
+            label: "INPUT#q",
+            length: 9,
+            mac: true,
+            parked: true,
+          });
+        }
+        if (nth === 2) return JSON.stringify({ tracked: true, length: 0, focused: true });
+        // The field is emptied and blurred by the submit handler, not by a split.
+        return entered
+          ? JSON.stringify({ tracked: true, length: 0, focused: false })
+          : JSON.stringify({ tracked: true, length: 5, focused: true });
+      },
+    };
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, text: "hello", key: "enter", delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(result).toMatchObject({ typed: "hello", keys: 6, cleared: true });
+    // Ordering is the property: release probe, THEN Enter.
+    expect(trace.lastIndexOf("probe")).toBeLessThan(trace.indexOf("key:keyDown:Enter"));
+  });
+
   it("reports how much of the text landed when the value really was split", async () => {
     const { api } = splitApi({ tracked: true, length: 1, focused: false });
 
