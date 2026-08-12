@@ -840,6 +840,29 @@ describe("keyboard clear — Android (adb input)", () => {
       }
     });
 
+    it("falls back to the dump when the helper answers without a hierarchy", async () => {
+      // The helper can answer SUCCESSFULLY and still carry no tree: a `Killed`
+      // from a lost UiAutomation race, an empty reply, a truncated file. Every
+      // other stub here either returns a valid dump or fails outright, so a
+      // check of "did it answer" rather than "did it answer with a hierarchy"
+      // reads identically — and takes `Killed` as the measurement, which lands
+      // on BLIND_DELETE_COUNT and truncates a long field while reporting
+      // `cleared: true`.
+      seedLegacyLevel();
+      seedDump(dumpWith("abcd"));
+      const getHierarchy = vi.fn(async () => ({ xml: "Killed" }));
+
+      await makeAndroidImpl(registryWithDevtools(getHierarchy)).handler(
+        {},
+        { udid: ANDROID.id, clear: true },
+        ANDROID
+      );
+
+      expect(getHierarchy).toHaveBeenCalledTimes(1);
+      // The DUMP's four characters, not the blind count.
+      expect(deleteRun(inputCmds()[1]!)).toHaveLength(4 + 8);
+    });
+
     it("falls back to the dump when the helper cannot answer", async () => {
       seedLegacyLevel();
       seedDump(dumpWith("abcd"));
