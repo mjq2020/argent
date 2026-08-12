@@ -2029,21 +2029,35 @@ describe("keyboard clear — Chromium (CDP)", () => {
     // The probe's own catch carries `mac`, but a failed `evaluate` never runs
     // it. The chord is dispatched on that path regardless, so it should still be
     // the one that machine's users press rather than defaulting to Ctrl.
-    const events: KeyEventArgs[] = [];
-    const api = {
-      dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
-      evaluate: async () => {
-        throw new Error("Runtime.evaluate: main world detached");
-      },
+    //
+    // BOTH platforms are driven here rather than mirroring the expression under
+    // test with `process.platform === "darwin" ? 4 : 2`: that form re-derives
+    // the answer from the same input, so a `mac: false` mutation passes
+    // vacuously on a non-darwin runner — and CI is not a Mac.
+    const chordOn = async (platform: string) => {
+      const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+      Object.defineProperty(process, "platform", { ...original, value: platform });
+      try {
+        const events: KeyEventArgs[] = [];
+        const api = {
+          dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
+          evaluate: async () => {
+            throw new Error("Runtime.evaluate: main world detached");
+          },
+        };
+        await makeChromiumImpl(registryWith(api)).handler(
+          {},
+          { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+          CHROMIUM
+        );
+        return events[0]!.modifiers;
+      } finally {
+        Object.defineProperty(process, "platform", original);
+      }
     };
 
-    await makeChromiumImpl(registryWith(api)).handler(
-      {},
-      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
-      CHROMIUM
-    );
-
-    expect(events[0]!.modifiers).toBe(process.platform === "darwin" ? 4 : 2);
+    expect(await chordOn("darwin")).toBe(4); // Meta
+    expect(await chordOn("linux")).toBe(2); // Ctrl
   });
 
   it("treats an unreadable page as unknown rather than failing the call", async () => {
