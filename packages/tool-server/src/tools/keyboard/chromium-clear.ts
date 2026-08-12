@@ -81,7 +81,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Page-side helper, inlined into both probes: how much content the element
  * holds that `textContent` cannot see.
  *
- * A non-form target is measured by `textContent`, so anything carrying no text
+ * A non-form target is measured by its text, so anything carrying no text
  * node — an `<img>`, a `<video>`/`<canvas>`/`<svg>`, an `<hr>`, an
  * attachment chip, a table — measures 0 and a clear that emptied nothing reports
  * success (measured on Chrome 150: an `<img>`-only editor returned
@@ -114,6 +114,55 @@ const COUNT_EMBEDS_FN = `
     } catch (e) {
       return 0;
     }
+  };`;
+
+/**
+ * Page-side helper: the text an editable holds that is the USER's, as opposed to
+ * the editor's own empty state.
+ *
+ * `textContent` cannot tell the two apart, and an editor whose empty state is a
+ * CHARACTER rather than an element then fails every clear that worked. Measured
+ * in Chrome: `slate-react` renders a `ZeroWidthString` — a literal U+FEFF text
+ * node — for every empty leaf whatever the configuration, so an emptied Slate
+ * editable reads as 1 character and the clear is reported as "the field was NOT
+ * emptied", with the requested `text` never typed and no retry able to help.
+ * Reproduced 3/3 on the isolated leaf, and again on `&nbsp;` padding and on a
+ * text placeholder.
+ *
+ * Two exclusions, mirroring how the element count treats the same content:
+ *
+ *   - text inside a `contenteditable="false"` subtree, which is how every editor
+ *     marks an ATOMIC embed — a mention pill, an attachment chip, and Slate's
+ *     placeholder, which sits INSIDE the editable. Whether such a node is
+ *     residue or an empty-state marker is decided by `countEmbeds` + the
+ *     before/after rule in `clearChromiumField`, not by its text: content that
+ *     was there before and survived is still caught there, so nothing is lost by
+ *     keeping it out of the character count as well.
+ *   - zero-width characters, and a remainder that is only whitespace. Blink pads
+ *     an empty line with `&nbsp;`, and the zero-width leaf above carries no
+ *     meaning at all. The cost is a field whose surviving content is nothing but
+ *     spaces, which reads as empty; the alternative is failing a whole class of
+ *     editors on content the user cannot see.
+ */
+const EDITABLE_TEXT_FN = `
+  const editableText = (root) => {
+    let out = "";
+    const stack = [root];
+    while (stack.length) {
+      const node = stack.pop();
+      for (let child = node.firstChild; child; child = child.nextSibling) {
+        if (child.nodeType === 3) { out += child.nodeValue || ""; continue; }
+        if (child.nodeType !== 1) continue;
+        const ce = child.getAttribute ? child.getAttribute("contenteditable") : null;
+        if (ce != null && String(ce).toLowerCase() === "false") continue;
+        stack.push(child);
+      }
+    }
+    return out;
+  };
+  const userText = (raw) => {
+    const stripped = raw.replace(/[\\u200B-\\u200D\\uFEFF]/g, "");
+    return stripped.trim() === "" ? "" : stripped;
   };`;
 
 /**
@@ -307,7 +356,8 @@ export const focusedEditableProbe = (handle: string) => `(() => {
  * the same. Reading one of the three raw is enough to break the other two.
  *
  * `nodes` counts residue a text measurement cannot see. On a non-form target the
- * value read is `textContent`, so content carrying no text node — an `<img>`, a
+ * value read is the element's text (see `editableText`), so content carrying no
+ * text node — an `<img>`, a
  * `<video>`/`<canvas>`/`<svg>`, an `<hr>` — measures 0 and a clear that emptied
  * nothing reports success. Measured on Chrome 150: two contenteditables on one
  * page cancelling the same `beforeinput`, the one holding text refused (7/7) and
@@ -322,6 +372,7 @@ export const focusedEditableProbe = (handle: string) => `(() => {
 // Exported for test/keyboard-clear-probe.test.ts — see focusedEditableProbe.
 export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
   ${COUNT_EMBEDS_FN}
+  ${EDITABLE_TEXT_FN}
   try {
     const el = window[${JSON.stringify(handle)}];
     ${keep ? "" : `delete window[${JSON.stringify(handle)}];`}
@@ -401,7 +452,10 @@ export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
     const tag = (el.tagName || "").toUpperCase();
     const form = tag === "INPUT" || tag === "TEXTAREA";
     const bad = form && !!(el.validity && el.validity.badInput);
-    const value = form ? (el.value || "") : (el.textContent || "");
+    // A form control's \`value\` is exactly what the user has, with no empty state
+    // of its own to discount — see \`editableText\` for why the other branch
+    // cannot use its raw text.
+    const value = form ? (el.value || "") : userText(editableText(el));
     const nodes = countEmbeds(el, form);
     return JSON.stringify({
       tracked: true,

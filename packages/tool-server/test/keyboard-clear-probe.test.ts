@@ -381,6 +381,65 @@ describe("chromium clear — focused-element probe", () => {
   });
 });
 
+/**
+ * The child nodes of a contenteditable, the way a page really builds them.
+ *
+ * The release probe walks them rather than reading `textContent`, because an
+ * editor's own EMPTY STATE lives in there too — Slate's U+FEFF zero-width leaf,
+ * Blink's `&nbsp;` padding, a placeholder inside a `contenteditable="false"`
+ * span — and `textContent` reports all of it as surviving user content.
+ * `textContent` is set here as well, to the raw concatenation, so a regression
+ * back to reading it shows up as a length instead of passing silently.
+ */
+const textNode = (value: string) => ({ nodeType: 3, nodeValue: value });
+const element = (
+  tagName: string,
+  attributes: Record<string, string>,
+  ...kids: FakeNode[]
+): FakeNode => ({
+  nodeType: 1,
+  tagName,
+  getAttribute: (name: string) => attributes[name] ?? null,
+  ...linked(kids),
+});
+/** An editor's atomic embed: a mention pill, an attachment chip, a placeholder. */
+const atom = (value: string) => element("SPAN", { contenteditable: "false" }, textNode(value));
+
+interface FakeNode {
+  nodeType: number;
+  nodeValue?: string;
+  tagName?: string;
+  getAttribute?: (name: string) => string | null;
+  firstChild?: FakeNode | null;
+  nextSibling?: FakeNode | null;
+}
+
+function linked(kids: FakeNode[]): { firstChild: FakeNode | null } {
+  kids.forEach((kid, i) => (kid.nextSibling = kids[i + 1] ?? null));
+  return { firstChild: kids[0] ?? null };
+}
+
+const rawTextOf = (node: FakeNode): string =>
+  node.nodeType === 3
+    ? (node.nodeValue ?? "")
+    : (() => {
+        let out = "";
+        for (let c = node.firstChild; c; c = c.nextSibling ?? null) out += rawTextOf(c);
+        return out;
+      })();
+
+/** A focused contenteditable holding `kids`. */
+function editable(...kids: FakeNode[]): FakeEl {
+  const el = {
+    tagName: "DIV",
+    isConnected: true,
+    isContentEditable: true,
+    ...linked(kids),
+  } as unknown as FakeEl & FakeNode;
+  el.textContent = kids.map(rawTextOf).join("");
+  return el;
+}
+
 describe("chromium clear — release probe", () => {
   const release = (seed: Record<string, unknown>) =>
     runProbe(clearedTargetProbe(HANDLE), makeDoc(null), seed);
@@ -411,17 +470,50 @@ describe("chromium clear — release probe", () => {
     ).toEqual({ tracked: false });
   });
 
-  it("reads textContent for a contenteditable and value for a form control", () => {
+  it("reads the text for a contenteditable and the value for a form control", () => {
     // The other half of the inheritance trap: a <textarea>'s textContent is its
     // DEFAULT value, so measuring that would report a cleared field as still full.
-    expect(
-      release({ [HANDLE]: { tagName: "DIV", textContent: "still here", isConnected: true } }).result
-    ).toMatchObject({ tracked: true, length: 10 });
+    expect(release({ [HANDLE]: editable(textNode("still here")) }).result).toMatchObject({
+      tracked: true,
+      length: 10,
+    });
     expect(
       release({
         [HANDLE]: { tagName: "TEXTAREA", value: "ab", textContent: "stale", isConnected: true },
       }).result
     ).toMatchObject({ tracked: true, length: 2 });
+  });
+
+  it("does not count an editor's own empty state as surviving content", () => {
+    // The clear worked — the user's content is gone — and every one of these
+    // reported "the field was NOT emptied" and refused to type the replacement,
+    // with no retry able to help (reproduced 3/3 each on Chrome 130 through the
+    // branch tool-server).
+    const emptyStates: [string, FakeNode[]][] = [
+      // `slate-react` renders a ZeroWidthString for every empty leaf, whatever
+      // the configuration — 1 character, unconditionally.
+      ["a zero-width leaf", [element("SPAN", { "data-slate-zero-width": "n" }, textNode("﻿"))]],
+      // Blink pads an emptied line with a non-breaking space.
+      ["an &nbsp; pad", [textNode(" ")]],
+      // Slate's placeholder is a real text node INSIDE the editable, marked
+      // atomic the way every editor marks an embed.
+      ["a placeholder", [textNode("﻿"), atom("Enter some plain text...")]],
+    ];
+
+    for (const [name, kids] of emptyStates) {
+      const el = editable(...kids);
+      // The raw text is exactly what made these fail.
+      expect(el.textContent!.length, name).toBeGreaterThan(0);
+      expect(release({ [HANDLE]: el }).result, name).toMatchObject({ tracked: true, length: 0 });
+    }
+  });
+
+  it("still counts real text left beside an atomic embed", () => {
+    // The exclusion is scoped to the embed's own subtree: a delete the page
+    // cancelled leaves the user's text where it was, and that is residue.
+    expect(release({ [HANDLE]: editable(atom("@alice"), textNode("hello")) }).result).toMatchObject(
+      { tracked: true, length: 5 }
+    );
   });
 
   it("still reports residue for a badInput number field reading empty", () => {
