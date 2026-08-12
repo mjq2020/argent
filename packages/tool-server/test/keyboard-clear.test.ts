@@ -912,6 +912,13 @@ describe("keyboard clear — Android (adb input)", () => {
     ).rejects.toThrow(/1200 characters.*Nothing was modified and nothing was typed/s);
     // Probe only — no delete run was issued.
     expect(inputCmds()).toEqual([SELECT_ALL_CMD]);
+    // And the refusal is decided from a READ, so this 400 is reached only after
+    // two round trips have already gone to the device — the one rejection the
+    // tool description cannot claim never reaches it. Neither changes the field:
+    // the probe is the `keycombination` this level has no subcommand for, and
+    // the dump is a screen capture.
+    expect(adbExecOutBinary).toHaveBeenCalledTimes(1);
+    expect(adbExecOutBinary.mock.calls[0]![1]).toMatch(/^uiautomator dump /);
   });
 
   it("does not attribute the refused count to the field the caller meant", async () => {
