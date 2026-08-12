@@ -946,6 +946,36 @@ describe("keyboard clear — Android (adb input)", () => {
       expect(getHierarchy).toHaveBeenCalledTimes(1);
       expect(deleteRun(inputCmds()[1]!)).toHaveLength(4 + 8);
     });
+
+    it("still gets BOTH dumps after a live helper has spent its whole share", async () => {
+      // The combination neither neighbour covers, and the one H3 reproduces: a
+      // helper that is ALIVE but never answers, so it burns
+      // PREFERRED_READ_BUDGET_MS, AND dumps that come back `Killed` because
+      // something else holds the UiAutomation connection. The read legs then
+      // have to fund a dump, the backoff and a second dump out of what the
+      // preferred read left — which is what the budget's own comments claim,
+      // and what a flat 20s budget could not actually do: the retry guard
+      // declined, leaving one attempt and the blind count.
+      //
+      // Real timers, because both the 5s race budget and the 2.5s backoff are
+      // real waits — which is also what makes this pin the CONSTANTS rather
+      // than an arithmetic restatement of them.
+      seedLegacyLevel();
+      seedDump("Killed");
+      seedDump(dumpWith("abcdefghij")); // the retry wins once the holder lets go
+      const getHierarchy = vi.fn(() => new Promise<{ xml: string }>(() => {}));
+
+      await makeAndroidImpl(registryWithDevtools(getHierarchy)).handler(
+        {},
+        { udid: ANDROID.id, clear: true },
+        ANDROID
+      );
+
+      expect(getHierarchy).toHaveBeenCalledTimes(1);
+      expect(adbExecOutBinary).toHaveBeenCalledTimes(2);
+      // The retry's ten characters — not BLIND_DELETE_COUNT.
+      expect(deleteRun(inputCmds()[1]!)).toHaveLength(10 + 8);
+    }, 30_000);
   });
 
   it("falls back to the blind count when the dump cannot be parsed", async () => {
