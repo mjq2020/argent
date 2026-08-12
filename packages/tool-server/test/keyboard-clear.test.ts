@@ -125,6 +125,35 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     expect(result.cleared).toBe(true);
   });
 
+  it("lets Command go even when the write inside the chord throws", async () => {
+    // Modifier state lives in the GUEST and a modifier left down stays down, so
+    // a transport that dies between `Down 227` and the A it is holding for
+    // latches Command there: the next `{ text: "h" }` reaches the device as
+    // Cmd+H, which backgrounds the app, and the call reports the character as
+    // typed. Only the `finally` in `pressKeyCode` covers that — the existing iOS
+    // failure test rejects before any write, so deleting the try/finally stayed
+    // green.
+    const events: string[] = [];
+    const api = {
+      pressKey: (direction: "Down" | "Up", keyCode: number) => {
+        events.push(`${direction}:${keyCode}`);
+        // The A of the select-all chord, with Left GUI already down.
+        if (direction === "Down" && keyCode === 4) throw new Error("simulator-server: EPIPE");
+      },
+    };
+
+    await expect(
+      typeSimulatorServer(registryWith(api), IOS_SIM, {
+        udid: IOS_SIM.id,
+        clear: true,
+        delayMs: 0,
+      })
+    ).rejects.toThrow(/EPIPE/);
+
+    // The failure propagates, but the guest is not left holding Command.
+    expect(events).toEqual(["Up:225", "Up:227", "Down:227", "Down:4", "Up:227"]);
+  });
+
   it("serializes overlapping calls so a keystroke never lands inside the chord", async () => {
     // The modifier is held across awaits, and nothing else serializes tool calls
     // against a device. A `{ text: "w" }` arriving inside that window used to be
