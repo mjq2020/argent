@@ -2173,6 +2173,60 @@ describe("keyboard clear — Chromium (CDP)", () => {
     expect(result.cleared).toBe(true);
   });
 
+  it.each([
+    // `evaluateJson` insists the probes return a JSON STRING, and the probes'
+    // own doc calls that contract load-bearing: it is what makes an unreadable
+    // page fall to the best-effort branch. Both ways of breaking it were
+    // unexecuted by the suite, so a probe rewritten to return an object — the
+    // shape the sibling CDP helpers use with `returnByValue` — would have put
+    // every clear on the best-effort branch silently.
+    ["an object instead of a JSON string", { verdict: "editable", label: "INPUT#q" }],
+    ["a string that is not JSON", "verdict=editable"],
+    ["nothing at all", undefined],
+  ])("treats %s from a probe as unknown rather than failing the call", async (_case, raw) => {
+    const events: KeyEventArgs[] = [];
+    const api = {
+      dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
+      evaluate: async () => raw,
+    };
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, text: "hi", delayMs: 0 },
+      CHROMIUM
+    );
+
+    // Dispatched anyway (best effort), and the text still typed.
+    expect(events.filter((e) => e.type === "rawKeyDown")).toHaveLength(1);
+    expect(result).toMatchObject({ typed: "hi", keys: 2, cleared: true });
+  });
+
+  it("keeps a successful clear successful when the release read fails", async () => {
+    // The release runs from a `finally`, so a throw there would replace the
+    // call's real outcome with a teardown error. Nothing else in the suite
+    // drives a clear whose LAST probe fails.
+    const events: KeyEventArgs[] = [];
+    let calls = 0;
+    const api = {
+      dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
+      evaluate: async () => {
+        calls++;
+        if (calls === 1) return JSON.stringify({ verdict: "editable", label: "INPUT#q" });
+        if (calls === 2) return JSON.stringify({ tracked: true, length: 0, focused: true });
+        throw new Error("Runtime.evaluate: target closed");
+      },
+    };
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(calls).toBe(3);
+    expect(result).toMatchObject({ typed: "", keys: 0, cleared: true });
+  });
+
   it("pairs the rawKeyDown with a keyUp and nothing else when text is absent", async () => {
     const { events, api } = recordingApi();
 
