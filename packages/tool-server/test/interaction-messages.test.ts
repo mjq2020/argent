@@ -116,6 +116,25 @@ describe("tool interaction messages", () => {
     expect(keyboard.startedMsg!({ params: { udid: "device-1", clear: true, key: "enter" } })).toBe(
       "Clearing a field and pressing a key"
     );
+    // The completed tense of that arm, and the three-part request — both
+    // unpinned, so the two tenses could drift apart on exactly the shape the
+    // tool advertises as its headline ("replaces a field's value and then
+    // presses Enter, in a single call").
+    expect(
+      keyboard.completedMsg!({
+        params: { udid: "device-1", clear: true, key: "enter" },
+        result: {},
+      })
+    ).toBe("Cleared a field and pressed a key");
+    expect(
+      keyboard.startedMsg!({ params: { udid: "device-1", clear: true, text: "hi", key: "enter" } })
+    ).toBe("Clearing a field and entering text and pressing a key");
+    expect(
+      keyboard.completedMsg!({
+        params: { udid: "device-1", clear: true, text: "hi", key: "enter" },
+        result: {},
+      })
+    ).toBe("Cleared a field and entered text and pressed a key");
 
     expect(
       definitions.get("screenshot")!.interaction!.completedMsg!({
