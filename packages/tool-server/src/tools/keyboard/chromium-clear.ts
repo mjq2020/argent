@@ -648,6 +648,16 @@ const CDP_MODIFIER_META = 4;
  * Blink applies them in order, which fires `oninput` once (`deleteContentBackward`)
  * and leaves a controlled/React input correctly updated.
  *
+ * `secretText` says the value the caller is about to type came from a
+ * `{{secret:…}}` placeholder, which makes the RESIDUE's length credential
+ * material too: the box a credential is typed into is usually the box that
+ * already holds one, and the page-side `secret` flag is `type === "password"`
+ * alone — false for an API-key field, a TOTP input, or a password field a
+ * show/hide control has switched to `type="text"`. `redactSecretsFromError`
+ * substitutes the value string and cannot redact a count, so the count has to be
+ * withheld here. Same reasoning, and the same three shapes, as the split-across-
+ * fields guard in `platforms/chromium.ts`.
+ *
  * Neither form of the key is universally safe from the page, which is why the
  * result is verified rather than assumed: unmodified, any shortcut bound to a
  * bare `a` fires and can cancel the edit; modified, an app that binds the
@@ -659,7 +669,8 @@ const CDP_MODIFIER_META = 4;
 export async function clearChromiumField(
   api: ChromiumCdpApi,
   handle: string,
-  delayMs: number
+  delayMs: number,
+  secretText = false
 ): Promise<ClearOutcome> {
   const settleMs = Math.max(delayMs, CLEAR_SETTLE_MS);
   const before = await readFocusedEditable(api, handle);
@@ -759,7 +770,7 @@ export async function clearChromiumField(
   }
 
   const held =
-    after.secret || before.secret
+    after.secret || before.secret || secretText
       ? "its contents"
       : remaining > 0
         ? `${remaining} character(s)`

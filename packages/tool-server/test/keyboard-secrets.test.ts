@@ -434,6 +434,66 @@ describe("keyboard tool with secret placeholders", () => {
     expect(caught!.message).not.toMatch(/\b7 character/);
   });
 
+  it("says nothing about the residue's length when the clear was refused", async () => {
+    // The sibling of the split message, on the other failure the clear can
+    // report. The residue counted here is the field's OWN surviving value, and
+    // the box a credential is typed into is usually the box that already holds
+    // one — so with a `{{secret:…}}` in the request the count is the previous
+    // credential's exact length, in the agent's context, transcript and logs.
+    vi.stubEnv("ARGENT_SECRET_APP_PASSWORD", "hunter2");
+    let probes = 0;
+    const api = {
+      dispatchKeyEvent: async () => {},
+      evaluate: async () => {
+        probes++;
+        // A plain `type="text"` API-key box, so the page-side `secret` flag is
+        // false and only the REQUEST makes the count sensitive. Probe 2 is the
+        // read-back: the page cancelled the chord, so the value survived.
+        return JSON.stringify(
+          probes === 1
+            ? { verdict: "editable", label: "INPUT#apiKey", mac: true, parked: true }
+            : { tracked: true, length: 39, focused: true }
+        );
+      },
+    };
+    const tool = createKeyboardTool(registryWith(api));
+
+    let caught: Error | undefined;
+    try {
+      await tool.execute(
+        {},
+        { udid: CHROMIUM_UDID, clear: true, text: "{{secret:APP_PASSWORD}}", delayMs: 0 }
+      );
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toMatch(/still holds its contents/);
+    expect(caught!.message).not.toMatch(/\b39 character/);
+  });
+
+  it("still counts the residue of an ordinary clear the page refused", async () => {
+    // The other half, again: with no secret in the request the count is what
+    // makes the message actionable.
+    let probes = 0;
+    const api = {
+      dispatchKeyEvent: async () => {},
+      evaluate: async () => {
+        probes++;
+        return JSON.stringify(
+          probes === 1
+            ? { verdict: "editable", label: "INPUT#q", mac: true, parked: true }
+            : { tracked: true, length: 39, focused: true }
+        );
+      },
+    };
+    const tool = createKeyboardTool(registryWith(api));
+
+    await expect(
+      tool.execute({}, { udid: CHROMIUM_UDID, clear: true, text: "plain", delayMs: 0 })
+    ).rejects.toThrow(/still holds 39 character\(s\)/);
+  });
+
   it("still counts the characters of ordinary text the page split", async () => {
     // The other half: with no secret in the request the counts are what make the
     // message actionable, so suppressing them everywhere would cost more than it

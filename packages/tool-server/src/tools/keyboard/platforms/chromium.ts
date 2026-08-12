@@ -86,7 +86,7 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
       // only as a FLOOR on that settle — a caller asking for a slower cadence
       // gets a longer wait, but a fast one cannot shrink the window the verdict
       // rests on (see CLEAR_SETTLE_MS).
-      const outcome = await clearChromiumField(api, handle, delay);
+      const outcome = await clearChromiumField(api, handle, delay, params.secretText === true);
       clearedLabel = outcome.label;
       // Emptying a field routinely moves focus off it — a field that blurs once
       // empty, an app that advances to the next input, a re-render. The keys
