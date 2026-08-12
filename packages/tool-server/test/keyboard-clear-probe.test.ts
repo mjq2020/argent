@@ -270,6 +270,39 @@ describe("chromium clear — focused-element probe", () => {
     }
   );
 
+  it("records the BEFORE embed count, which the survival rule is decided on", () => {
+    // `FakeEl` has no `querySelectorAll`, so `countEmbeds` short-circuits to 0
+    // in every other focused-probe fixture and this field is silently absent —
+    // deleting it from the probe kept the suite green. It is the sole input to
+    // the "was it there BEFORE, and did it survive?" rule, which is the only
+    // detector for the `<img>`-only editor whose delete the page cancelled.
+    const el = {
+      tagName: "DIV",
+      id: "composer",
+      isContentEditable: true,
+      querySelectorAll: (sel: string) =>
+        sel.includes("img") ? [{ tagName: "IMG" }, { tagName: "HR" }] : [],
+    } as unknown as FakeEl;
+
+    expect(focused(el).result).toMatchObject({ verdict: "editable", nodes: 2 });
+  });
+
+  it("never asks a form control for its embed count", () => {
+    // A <textarea>'s child nodes are its DEFAULT value and never track `value`,
+    // so counting them would report a cleared field as still full.
+    const el = {
+      tagName: "TEXTAREA",
+      id: "t",
+      value: "draft",
+      querySelectorAll: () => {
+        throw new Error("must not be asked");
+      },
+    } as unknown as FakeEl;
+
+    expect(focused(el).result).toMatchObject({ verdict: "editable" });
+    expect(focused(el).result.nodes).toBeUndefined();
+  });
+
   it("accepts a plain contenteditable element", () => {
     // The rich-text-editor case this module is largely written around. Both
     // "contenteditable" cases below take the form-control branch instead, so
@@ -639,6 +672,22 @@ describe("chromium clear — release probe", () => {
         [HANDLE]: editable(styled({ display: "block", visibility: "visible" }, textNode("SRONLY"))),
       }).result
     ).toMatchObject({ tracked: true, length: 6 });
+  });
+
+  it("counts text NESTED below the editing host, not just its direct children", () => {
+    // Every other fixture here puts the text one level down, so the walk never
+    // has to recurse — deleting its `stack.push(child)` kept the whole suite
+    // green. Real editors nest 100% of user text at least one level below the
+    // parked host (Quill `<p>`, Lexical `<p><span data-lexical-text>`,
+    // ProseMirror, Slate, TinyMCE), so a regression there reads a full composer
+    // as `length: 0` and reports a clean replacement over surviving content.
+    expect(
+      release({
+        [HANDLE]: editable(
+          element("P", {}, element("SPAN", { "data-lexical-text": "true" }, textNode("draft")))
+        ),
+      }).result
+    ).toMatchObject({ tracked: true, length: 5 });
   });
 
   it("still counts real text left beside an atomic embed", () => {
