@@ -299,6 +299,40 @@ describe("keyboard backends — input rejection is a 400 with a uniform telemetr
     expect((err as Error).message).not.toMatch(/ios simulator/i);
   });
 
+  it.each([
+    [
+      "tv",
+      (device: DeviceInfo, params: Record<string, unknown>) =>
+        typeTv({} as never, device, { udid: device.id, ...params } as never),
+    ],
+    [
+      "vega",
+      (device: DeviceInfo, params: Record<string, unknown>) =>
+        vegaImpl.handler({}, { udid: device.id, ...params } as never, device),
+    ],
+  ])(
+    "%s: a request invalid in BOTH halves reports the clear, not the key",
+    async (_backend, call) => {
+      // Both backends refuse `clear` AND a named `key`, so the order they check
+      // them in decides what a doubly-invalid request reports. Taking the key
+      // first sent `{ clear: true, key: "enter" }` back as
+      // TOOL_CAPABILITY_UNSUPPORTED_OPERATION — "Tool 'keyboard' is not
+      // supported on ios simulator …", the exact class `platforms/tv.ts` avoids
+      // for `clear`, on the exact request that refusal exists for.
+      const device = { id: "TV-UDID", platform: "ios", kind: "simulator" } as unknown as DeviceInfo;
+      const err = await call(device, { clear: true, key: "enter" }).then(
+        () => {
+          throw new Error("expected the call to reject, but it resolved");
+        },
+        (e: unknown) => e
+      );
+
+      expect(getFailureSignal(err)?.error_code).toBe(
+        FAILURE_CODES.KEYBOARD_CLEAR_UNSUPPORTED_TARGET
+      );
+    }
+  );
+
   it("android: clear of a field too long to delete → 400 + KEYBOARD_CLEAR_FIELD_TOO_LONG", async () => {
     adbShell.mockReset();
     adbExecOutBinary.mockReset();

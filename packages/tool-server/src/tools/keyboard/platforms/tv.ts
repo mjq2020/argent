@@ -12,14 +12,6 @@ export async function typeTv(
   device: DeviceInfo,
   params: KeyboardParams
 ): Promise<KeyboardResult> {
-  if (params.key) {
-    throw new UnsupportedOperationError(
-      "keyboard",
-      device,
-      "named keys are not supported on a TV target — move focus with `tv-remote` " +
-        "(up/down/left/right/select) instead"
-    );
-  }
   // `clear` is not implemented for either TV family, and the reason differs by
   // family — so the message states the outcome rather than a cause that would be
   // wrong for one of them. Apple TV genuinely cannot: its typing backend sends
@@ -48,6 +40,21 @@ export async function typeTv(
         failure_stage: "keyboard_clear_tv",
         error_kind: "unsupported",
       }
+    );
+  }
+  // AFTER the clear, so a request that is invalid in both halves reports the
+  // destructive one — and reports it the way this file went to the trouble of
+  // wording. Checked first, `{ clear: true, key: "enter" }` came back as
+  // TOOL_CAPABILITY_UNSUPPORTED_OPERATION / "Tool 'keyboard' is not supported on
+  // ios simulator …": exactly the class the comment above rejects, on the exact
+  // request `clear`'s own refusal exists for (verified live on tvOS 26.5).
+  // `platforms/vega.ts` already takes the two in this order.
+  if (params.key) {
+    throw new UnsupportedOperationError(
+      "keyboard",
+      device,
+      "named keys are not supported on a TV target — move focus with `tv-remote` " +
+        "(up/down/left/right/select) instead"
     );
   }
   const text = params.text ?? "";
