@@ -143,8 +143,36 @@ const COUNT_EMBEDS_FN = `
  *     meaning at all. The cost is a field whose surviving content is nothing but
  *     spaces, which reads as empty; the alternative is failing a whole class of
  *     editors on content the user cannot see.
+ *   - text Blink does not RENDER, which it therefore neither selects nor
+ *     deletes. `<style>`, `<script>` and a `display: none` a11y span are all
+ *     ordinary rich-text-editor furniture, and counting their characters made a
+ *     clear that emptied the editor report "the field was NOT emptied" with the
+ *     requested `text` never typed — permanently, since no retry can remove
+ *     content the chord cannot touch (measured on Chrome 148: `hello` plus a
+ *     `display: none` span reported 18 surviving characters with `hello` gone,
+ *     3/3; the same shapes with the hidden node removed cleared and typed
+ *     correctly). `visibility` counts alongside `display` because Blink's
+ *     selection skips that content too — measured on the same build, a
+ *     `visibility: hidden` span survived the delete while a clipped
+ *     `position: absolute` "screen-reader only" span, which IS rendered, was
+ *     removed with the rest.
  */
 const EDITABLE_TEXT_FN = `
+  const isRendered = (el) => {
+    try {
+      // The top-level view's \`getComputedStyle\` resolves an element in a
+      // same-origin subframe correctly (measured on Chrome 148), so the parked
+      // element's own document does not have to be reached for.
+      const style = typeof getComputedStyle === "function" ? getComputedStyle(el) : null;
+      if (!style) return true;
+      return style.display !== "none" && style.visibility !== "hidden" &&
+        style.visibility !== "collapse";
+    } catch (e) {
+      // Unreadable style counts as rendered: this measurement exists to CATCH
+      // residue, so anything it cannot judge has to stay in the count.
+      return true;
+    }
+  };
   const editableText = (root) => {
     let out = "";
     const stack = [root];
@@ -155,6 +183,7 @@ const EDITABLE_TEXT_FN = `
         if (child.nodeType !== 1) continue;
         const ce = child.getAttribute ? child.getAttribute("contenteditable") : null;
         if (ce != null && String(ce).toLowerCase() === "false") continue;
+        if (!isRendered(child)) continue;
         stack.push(child);
       }
     }

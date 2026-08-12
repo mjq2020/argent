@@ -80,6 +80,22 @@ function makeDoc(active: FakeEl | null): FakeDoc {
 type Root = Record<string, unknown>;
 
 /**
+ * The page's `getComputedStyle`, modelled only as far as the probes read it:
+ * `display` and `visibility`, which is how the text walk decides whether Blink
+ * renders — and therefore can select and delete — a subtree.
+ *
+ * `<style>` and `<script>` carry `display: none` from the UA stylesheet
+ * (confirmed on Chrome 148), so they are hidden here without a per-test opt-in;
+ * anything else defaults to rendered and takes its overrides from `__style`.
+ */
+const UA_DISPLAY_NONE = new Set(["STYLE", "SCRIPT"]);
+const getComputedStyle = (el: { tagName?: string; __style?: Record<string, string> }) => ({
+  display: UA_DISPLAY_NONE.has((el.tagName ?? "").toUpperCase()) ? "none" : "block",
+  visibility: "visible",
+  ...(el.__style ?? {}),
+});
+
+/**
  * The roots the containment walk climbs through, built the way a browser
  * declares them: `activeElement` and `defaultView` are accessors on
  * `Document.prototype`, `host` is one on `ShadowRoot.prototype`. None of the
@@ -146,6 +162,7 @@ function runProbe(
     document: doc,
     navigator: { platform },
     Document: documentGlobal,
+    getComputedStyle,
     Object,
     JSON,
     Math,
@@ -450,10 +467,17 @@ const element = (
 /** An editor's atomic embed: a mention pill, an attachment chip, a placeholder. */
 const atom = (value: string) => element("SPAN", { contenteditable: "false" }, textNode(value));
 
+/** A span the page styles itself — what `getComputedStyle` above reports for it. */
+const styled = (style: Record<string, string>, ...kids: FakeNode[]): FakeNode => ({
+  ...element("SPAN", {}, ...kids),
+  __style: style,
+});
+
 interface FakeNode {
   nodeType: number;
   nodeValue?: string;
   tagName?: string;
+  __style?: Record<string, string>;
   getAttribute?: (name: string) => string | null;
   firstChild?: FakeNode | null;
   nextSibling?: FakeNode | null;
@@ -551,6 +575,44 @@ describe("chromium clear — release probe", () => {
       expect(el.textContent!.length, name).toBeGreaterThan(0);
       expect(release({ [HANDLE]: el }).result, name).toMatchObject({ tracked: true, length: 0 });
     }
+  });
+
+  it("does not count text Blink never renders, which the chord cannot delete", () => {
+    // The clear WORKED in every one of these — `hello` was gone — and the
+    // character count of the leftover furniture made it report "the field was
+    // NOT emptied", with the requested `text` never typed and no retry able to
+    // help, because the chord cannot remove content it does not select
+    // (reproduced 3/3 each on Chrome 148 through the branch tool-server).
+    const unrendered: [string, FakeNode][] = [
+      // Scoped CSS inside an editing host; `<script>` in a `designMode` BODY is
+      // the same shape and hit the `document.designMode` editor.
+      ["a scoped <style>", element("STYLE", {}, textNode(".a{color:red}"))],
+      ["an inline <script>", element("SCRIPT", {}, textNode("var x = 1;"))],
+      // Hidden a11y text — ordinary rich-text-editor furniture.
+      ["a display:none span", styled({ display: "none" }, textNode("SCREEN READER ONLY"))],
+      // Rendered, but not selectable either: measured on Chrome 148, the
+      // `visibility: hidden` span survived the delete with everything else gone.
+      ["a visibility:hidden span", styled({ visibility: "hidden" }, textNode("VIS"))],
+    ];
+
+    for (const [name, kid] of unrendered) {
+      const el = editable(kid);
+      expect(el.textContent!.length, name).toBeGreaterThan(0);
+      expect(release({ [HANDLE]: el }).result, name).toMatchObject({ tracked: true, length: 0 });
+    }
+  });
+
+  it("still counts text that is merely INVISIBLE, which the chord does delete", () => {
+    // The other side of the rule, and the reason it is not "anything the user
+    // cannot see": a clipped `position: absolute` screen-reader span is
+    // rendered, so Blink selects and deletes it with the rest — measured on
+    // Chrome 148. Surviving it is residue, and skipping it would report a
+    // cancelled delete as a clean one.
+    expect(
+      release({
+        [HANDLE]: editable(styled({ display: "block", visibility: "visible" }, textNode("SRONLY"))),
+      }).result
+    ).toMatchObject({ tracked: true, length: 6 });
   });
 
   it("still counts real text left beside an atomic embed", () => {
