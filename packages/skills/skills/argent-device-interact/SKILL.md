@@ -170,7 +170,7 @@ Values: `home`, `back`, `power`, `volumeUp`, `volumeDown`, `appSwitch`, `actionB
 { "udid": "<UDID>", "text": "search query", "key": "enter" }
 ```
 
-Special keys: `enter`, `escape`, `backspace`, `tab`, `space`, `arrow-up`, `arrow-down`, `arrow-left`, `arrow-right`, `f1`–`f12`. Optional: `"delayMs": 100` between keystrokes (default 50ms) — applies to the iOS simulator and Chromium; it is ignored on Android phones/tablets (typed via `adb input text`, no per-key cadence), on Vega, and on TV targets.
+Special keys: `enter`, `escape`, `backspace`, `tab`, `space`, `arrow-up`, `arrow-down`, `arrow-left`, `arrow-right`, `f1`–`f12`. Optional: `"delayMs": 100` between keystrokes (default 50ms, **max 5000**) — applies to the iOS simulator and Chromium; it is ignored on Android phones/tablets (typed via `adb input text`, no per-key cadence), on Vega, and on TV targets. The bound is enforced on every dispatch path, including a flow replay: a recorded step whose `args` carry a larger `delayMs` is rejected rather than run, so lower it in the YAML.
 
 **Replacing a field's value.** Typing **appends**. Pass `"clear": true` to empty the focused field first:
 
