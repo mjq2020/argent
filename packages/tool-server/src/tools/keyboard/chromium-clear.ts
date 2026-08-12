@@ -295,6 +295,21 @@ export const focusedEditableProbe = (handle: string) => `(() => {
         secret: (el.type || "") === "password",
       });
     }
+    // The rest of the natively focusable form controls, refused BY TAG for the
+    // same inheritance reason and BEFORE the branch below — they hold no
+    // editable text of their own, so falling through would park a widget the
+    // chord never edits. Blink scopes select-all to the EDITING HOST, so a
+    // <select> in a composer had the whole editor selected and deleted while the
+    // parked node went with it and re-read as \`tracked: false\` — reported as a
+    // clean \`cleared: true\` (measured on Chrome 148, 3/3, with an identical
+    // <button> result). Outside an editing host both already land on the same
+    // refusal at the end of this function, so only the inherited case changes.
+    // Reachable by an ordinary tap: clicking a <select> inside a contenteditable
+    // focuses the SELECT (a <button> yields focus to the host, but \`focus()\`
+    // still lands on it).
+    if (tag === "SELECT" || tag === "BUTTON") {
+      return JSON.stringify({ verdict: "not-editable", label, mac });
+    }
     if (el.isContentEditable === true) {
       window[${JSON.stringify(handle)}] = el;
       return JSON.stringify({

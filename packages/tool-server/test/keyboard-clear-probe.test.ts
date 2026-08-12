@@ -294,6 +294,22 @@ describe("chromium clear — focused-element probe", () => {
     ).toMatchObject({ verdict: "editable", label: "TEXTAREA#ta" });
   });
 
+  it.each(["SELECT", "BUTTON"])(
+    "refuses a focused <%s> inside a contenteditable, which the chord would not edit",
+    (tagName) => {
+      // The other half of the inheritance trap, and the destructive one. A
+      // <select> in a composer reports `isContentEditable: true` like the
+      // <input> above (measured on Chrome 148, and clicking it really does focus
+      // the SELECT), but it holds no editable text — so parking it and
+      // dispatching the chord empties the EDITING HOST instead, taking the
+      // widget with it. The re-read then finds the parked node detached, reports
+      // `tracked: false`, and a destroyed editor comes back as `cleared: true`.
+      const { result, window } = focused({ tagName, id: "w", isContentEditable: true });
+      expect(result).toMatchObject({ verdict: "not-editable", label: `${tagName}#w` });
+      expect(window[HANDLE]).toBeUndefined();
+    }
+  );
+
   it("flags a password field so its length is never echoed back", () => {
     expect(
       focused({ tagName: "INPUT", id: "pw", type: "password", value: "s3cret" }).result.secret
