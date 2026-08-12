@@ -32,7 +32,7 @@ const zodSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Named key to press: enter, escape, backspace, tab, space, arrow-up, arrow-down, arrow-left, arrow-right, f1–f12. When combined with `text`, the key is pressed AFTER the text is typed (so text + enter types and submits). Not supported on TV targets — move focus with `tv-remote` (up/down/left/right) instead."
+      "Named key to press: enter, escape, backspace, tab, space, arrow-up, arrow-down, arrow-left, arrow-right, f1–f12. When combined with `text`, the key is pressed AFTER the text is typed (text first, then the key — whether Enter submits is the app's business; on Chromium it does not). Not supported on TV targets — move focus with `tv-remote` (up/down/left/right) instead."
     ),
   clear: z
     .boolean()
@@ -145,7 +145,7 @@ A rejected request never reaches the device. An unsupported key name, un-typeabl
 - key: presses a single named key (enter, escape, backspace, tab, arrow-up/down/left/right, f1–f12) — NOT supported on TV targets; move focus with \`tv-remote\` instead.
 - clear: empties the focused field before typing. Typing alone APPENDS — against a field that already holds a value (a remembered login, a restored draft, a re-run step) the old text stays and the new text lands after it. Use \`{ clear: true, text: "…" }\` to replace a value, \`{ clear: true }\` alone to just empty it. iOS, Android and Chromium; rejected on Vega and TV targets. Focus a text field first: Chromium refuses a clear with nothing editable — or a readonly / non-text element — focused, while iOS and Android dispatch it blind at whatever holds focus. Only Chromium reads the field back, and even it falls back to best-effort on a page it cannot read, so \`cleared: true\` never means "seen NOT empty" but is not proof the field is empty either — assert the value whenever the result matters. On iOS and Android nothing is read back, and a widget that swallows the select-all leaves the following delete acting as a plain backspace: the field ends up ONE CHARACTER SHORTER, not unchanged, and a combined \`text\` then appends to that. On Android levels older than \`input keycombination\` the clear deletes backwards from end-of-LINE, so a multi-line field keeps what sits below the caret, and a field over 150 characters is refused rather than partly deleted; a length that cannot be read at all (a password field, or a screen the device would not capture) falls back to a fixed 128 backspaces, so a longer value keeps its head.
 On a TV target (runtimeKind 'tv') only \`text\` applies — focus a text field first (with \`tv-remote\`), then type into it (injected HID keyboard on Apple TV, \`adb input text\` on Android TV).
-Provide text, key, or both — when both are given, the text is typed first and the key is pressed after it (text + key:"enter" types and submits). Order within one call is always clear → text → key, so { clear: true, text: "hello", key: "enter" } replaces a field's value and then presses Enter, in a single call.`,
+Provide text, key, or both — when both are given, the text is typed first and the key is pressed after it (text + key:"enter" types, then presses Enter). Order within one call is always clear → text → key, so { clear: true, text: "hello", key: "enter" } replaces a field's value and then presses Enter, in a single call.`,
     zodSchema,
     capability,
     // One request can run a clear AND a text injection AND a named key, and the
