@@ -146,7 +146,7 @@ Call `flow-finish-recording`, then read the saved YAML. Apply only meaning-prese
 
 | Recorded form                | Finished form                                                      |
 | ---------------------------- | ------------------------------------------------------------------ |
-| focus tap + `tool: keyboard` | `type:`                                                            |
+| focus tap + `tool: keyboard` | `type:` — but keep the raw step when it carries `clear: true`      |
 | keyboard ending in Enter     | submitted `type:` without Enter in its text                        |
 | `tool: await-ui-element`     | `await:` or `assert:`                                              |
 | element-seeking movement     | `scroll-to:`                                                       |
@@ -161,7 +161,7 @@ Only these unrecorded insertions are allowed, at states observed live:
 - `await: { idle: true }` after a navigation identity check.
 - The Chromium launch that packages the live boot.
 
-Keep raw forms only when conversion changes behavior. Examples include point-anchored or panning pinch, velocity-sensitive swipe, or rotation with a tested start angle, radius, pivot, duration, or speed. A `tool: keyboard` step carrying `clear: true` is one of them: `type:` has no `clear`, so rewriting it silently drops the emptying and the replay appends into the pre-filled field. Keep screenshots for human evidence. Use `snapshot:` for automated visual comparison. Read [Flow YAML](flow-yaml.md) for syntax.
+Keep raw forms only when conversion changes behavior. Examples include point-anchored or panning pinch, velocity-sensitive swipe, or rotation with a tested start angle, radius, pivot, duration, or speed. The `clear: true` exception in the table above is the same rule: `type:` accepts only `into`, `text` and `submit`, so rewriting such a step drops the emptying without a word, and the replay appends into the pre-filled field — and still reports PASS. Keep screenshots for human evidence. Use `snapshot:` for automated visual comparison. Read [Flow YAML](flow-yaml.md) for syntax.
 
 If polish reveals a missing action or structural check, restore its preceding state and record it. Do not add remembered behavior directly to YAML.
 
