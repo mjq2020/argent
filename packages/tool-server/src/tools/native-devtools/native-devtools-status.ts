@@ -49,10 +49,10 @@ Returns { envSetup, appRunning, connected, requiresRestart, nextLaunchWillBeInje
 - connected: the dylib is active in the current running process for this bundleId
 - requiresRestart: the app is already running but its current process does not have native devtools injected (always false for a non-injectable app)
 - nextLaunchWillBeInjected: if you launch this bundle now, native devtools env setup is already in place (always false for a non-injectable app)
-- injectable: whether native devtools can ever be injected into this app. Apple system apps (bundle ids under com.apple.) are platform binaries with library validation, so the dylib can never load into them.
+- injectable: whether this app is a supported target for Argent native devtools. Apple system apps (bundle ids under com.apple.) are not: they are never the app under test, and reads against system processes hang or describe offscreen UI, so the native tools refuse them.
 
 Call this before using app-scoped native hierarchy tools or native-network-logs.
-If injectable is false: this is a TERMINAL state — the app can never be injected. Do NOT restart/retry. Use the standard \`describe\` tool (its accessibility path reads the screen without injection) or \`screenshot\` (then interact by coordinate). Do not fall back to the native-devtools feature tools (native-describe-screen, native-find-views, native-full-hierarchy, native-network-logs, native-view-at-point, native-user-interactable-view-at-point) — they run the same injection precheck and fail with the same non-injectable error.
+If injectable is false: this is a TERMINAL state - the app is not a supported native-devtools target. Do NOT restart/retry. Use the standard \`describe\` tool (its accessibility path reads the screen without injection) or \`screenshot\` (then interact by coordinate). Do not fall back to the native-devtools feature tools (native-describe-screen, native-find-views, native-full-hierarchy, native-network-logs, native-view-at-point, native-user-interactable-view-at-point) — they run the same injection precheck and fail with the same non-injectable error.
 If appRunning is false and nextLaunchWillBeInjected is true: use launch-app normally.
 If requiresRestart is true: call restart-app, then proceed with the native feature.
 Returns { status: "init_failed", message, attempts } instead when the simulator's native-devtools environment failed to initialize.
@@ -67,17 +67,18 @@ Fails if the simulator server is not running for the given UDID.`,
 
     const api = services.nativeDevtools as NativeDevtoolsApi;
 
-    // Terminal case first, mirroring precheckNativeDevtools: non-injectable
-    // apps (Apple system apps) can never load the dylib no matter how many
-    // times they relaunch, and injectability is a static property of the
-    // bundle id — so a broken env must not mask this terminal state behind the
-    // precheck's init_failed block, whose "re-boot the simulator" guidance can
-    // never make a system app injectable. Report a terminal state so agents
-    // stop looping restart-app → retry: no restart is required and the next
-    // launch will not be injected either. appRunning/connected are still
-    // measured and envSetup is read from the cached latch — unlike the
-    // injectable path below, there is no point running the precheck's env
-    // init or reverifying the env for an app that can never inject.
+    // Terminal case first, mirroring precheckNativeDevtools: Apple system
+    // apps are not supported native-devtools targets, and that refusal is a
+    // static property of the bundle id no relaunch changes - so a broken env
+    // must not mask this terminal state behind the precheck's init_failed
+    // block, whose "re-boot the simulator" guidance does not change the
+    // verdict either. Report a terminal state so agents stop looping
+    // restart-app → retry: requiresRestart and nextLaunchWillBeInjected are
+    // pinned false because no restart or relaunch makes the app a supported
+    // target. appRunning/connected are still measured and envSetup is read
+    // from the cached latch - unlike the injectable path below, there is no
+    // point running the precheck's env init or reverifying the env for an app
+    // the gate refuses anyway.
     if (!isInjectableBundleId(params.bundleId)) {
       let appRunning: boolean;
       try {

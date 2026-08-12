@@ -163,7 +163,7 @@ describe("native-devtools-status tool", () => {
   });
 
   it("reports a com.apple.* system app as a terminal, non-injectable state", async () => {
-    // Apple system apps can never load the dylib. Even with the app running and
+    // Apple system apps are refused as targets. Even with the app running and
     // env set up, status must report injectable:false and neither require a
     // restart nor promise the next launch will be injected — otherwise an agent
     // loops restart-app → retry forever.
@@ -195,7 +195,7 @@ describe("native-devtools-status tool", () => {
   it("reports the terminal non-injectable state even when env init has given up", async () => {
     // The precheck's init_failed block must not mask the statically-knowable
     // terminal signal: its "re-boot the simulator" guidance can never make a
-    // system app injectable. Mirrors the same ordering inside
+    // system app a supported target. Mirrors the same ordering inside
     // precheckNativeDevtools (terminal case before the env plumbing).
     const { api, ensureEnvReady } = makeNativeApi({
       appRunning: true,
@@ -220,7 +220,7 @@ describe("native-devtools-status tool", () => {
       injectable: false,
     });
 
-    // No env work is spent on an app that can never inject.
+    // No env work is spent on an app the gate refuses.
     expect(ensureEnvReady).not.toHaveBeenCalled();
   });
 
@@ -314,7 +314,7 @@ describe("precheckNativeDevtools — non-injectable terminal error", () => {
   it("throws the terminal error even when env init has given up", async () => {
     // Injectability is a static property of the bundle id — a broken env must
     // not mask the terminal signal behind init_failed's "re-boot the simulator"
-    // guidance, which can never make a system app injectable.
+    // guidance, which can never make a system app a supported target.
     const { api } = makeNativeApi({
       initFailure: {
         attempts: MAX_NATIVE_DEVTOOLS_INIT_ATTEMPTS,
@@ -334,7 +334,7 @@ describe("precheckNativeDevtools — non-injectable terminal error", () => {
 
   it("fires before any env work — ensureEnvReady never runs for a non-injectable bundle", async () => {
     // Same ordering guarantee from the other side: no env-setup work is spent
-    // on an app that can never load the dylib, and a transiently failing
+    // on an app the gate refuses, and a transiently failing
     // ensureEnvReady cannot swallow the terminal signal.
     const { api } = makeNativeApi({
       initFailure: { attempts: 1, lastError: "first attempt failed", givenUp: false },

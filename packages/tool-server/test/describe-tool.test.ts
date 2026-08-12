@@ -260,15 +260,15 @@ describe("describe tool", () => {
   });
 
   it("does NOT return should_restart for a non-injectable Apple system app (no restart loop)", async () => {
-    // com.apple.* apps can never load the injected dylib, so requiresAppRestart
-    // is always true for them in an unmocked run. Without an injectability gate,
+    // com.apple.* apps are refused as native-devtools targets, and one argent
+    // never saw connect makes requiresAppRestart report true. Without the gate,
     // describe returns should_restart:true → the agent restarts the system app →
     // AX is still empty → describe again → unbounded loop. The fallback must
     // instead return the (empty) AX result with a screenshot hint.
     const axApi = makeAXServiceApi({ alertVisible: false, elements: [] });
     const nativeApi = makeNativeDevtoolsApi({
       connectedBundleIds: [],
-      requiresRestart: true, // real behavior: a com.apple.* app never connects
+      requiresRestart: true, // an unconnected system app reports restart-required
     });
     const registry = makeMockRegistry({ axService: axApi, nativeDevtools: nativeApi });
     const tool = createDescribeTool(registry);
@@ -357,7 +357,7 @@ describe("describe tool", () => {
         },
       ],
     });
-    // requiresRestart:true mirrors a real com.apple.* app (it never connects);
+    // requiresRestart:true mirrors a com.apple.* app argent never saw connect;
     // it must stay irrelevant here because the non-empty tree returns before the
     // native fallback that would ever consult it.
     const nativeApi = makeNativeDevtoolsApi({
