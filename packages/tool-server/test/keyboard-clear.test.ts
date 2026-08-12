@@ -1609,6 +1609,26 @@ describe("keyboard clear — Chromium (CDP)", () => {
     expect(result.cleared).toBe(true);
   });
 
+  it("does not call a FALLEN embed count residue", async () => {
+    // The third state of the same rule, and the one neither fixture covered:
+    // the count went DOWN. Three embeds before and one after means the delete
+    // reached the content, so what is left is not what survived — changing
+    // `>= embedsBefore` to a bare `> 0` kept both existing fixtures green while
+    // failing this clear.
+    const { api } = recordingApi(
+      { verdict: "editable", label: "DIV#composer", mac: true, parked: true, nodes: 3 },
+      { tracked: true, length: 0, nodes: 1, focused: true }
+    );
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(result.cleared).toBe(true);
+  });
+
   it("settles for its own window, not the caller's typing cadence", async () => {
     // `delayMs` is documented as the delay between key presses. Spending it as
     // the settle before the read-back made it the width of a correctness window
