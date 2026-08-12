@@ -273,6 +273,19 @@ export interface AndroidClearOptions {
    *     calls on one client socket, so ordinary usage does not produce it.
    */
   readHierarchy?: () => Promise<string | undefined>;
+  /**
+   * The value the caller is about to type came from a `{{secret:…}}`
+   * placeholder, so the over-length refusal must not quote the field's exact
+   * character count.
+   *
+   * The box a credential is typed into is usually the box that already holds
+   * one, and the count here is that field's length — reachable with
+   * `{ clear: true, text: "{{secret:X}}" }` against a plain (non-`password`) box
+   * holding a long token. `redactSecretsFromError` substitutes the resolved
+   * value string and cannot redact a number. Same rule, and the same reasoning,
+   * as the chromium backend's two messages.
+   */
+  secretText?: boolean;
 }
 
 /**
@@ -332,7 +345,7 @@ export async function injectAndroidClear(
     { timeoutMs: clearLegTimeout(deadline, DELETE_RUN_RESERVE_MS) }
   );
   if (/unknown command|usage: input/i.test(out)) {
-    await clearByDeleting(serial, deadline, options.readHierarchy);
+    await clearByDeleting(serial, deadline, options);
     return;
   }
   await adbShell(serial, `input keyevent ${KEYCODE_DEL}`, {
@@ -440,10 +453,10 @@ export const BLIND_DELETE_COUNT = MAX_DELETE_COUNT;
 async function clearByDeleting(
   serial: string,
   deadline: number,
-  preferredRead?: () => Promise<string | undefined>
+  options: AndroidClearOptions
 ): Promise<void> {
   const count =
-    (await measureFocusedTextLength(serial, deadline, preferredRead)) ?? BLIND_DELETE_COUNT;
+    (await measureFocusedTextLength(serial, deadline, options.readHierarchy)) ?? BLIND_DELETE_COUNT;
   const keys = count + DELETE_MARGIN;
   // Refuse BEFORE touching the field, and on length alone. Time is deliberately
   // not a second ground: the run is already bounded by DELETE_RUN_RESERVE_MS,
@@ -454,9 +467,16 @@ async function clearByDeleting(
   // MAX_DELETE_COUNT), and on the blind path there is no measured length to
   // predict from.
   if (count > MAX_DELETE_COUNT) {
+    // The count is the FIELD's length, and a request carrying a `{{secret:…}}`
+    // is usually aimed at the box that already holds one — so quoting it there
+    // puts a credential's exact length in the agent's context, transcript and
+    // logs. See AndroidClearOptions.secretText.
+    const reports = options.secretText
+      ? `reports more characters than`
+      : `reports ${count} characters, more than`;
     throw new InvalidToolInputError(
-      `keyboard clear: a focused text field on this screen reports ${count} characters, more ` +
-        `than this Android level can clear. Without \`input keycombination\` (added after API ` +
+      `keyboard clear: a focused text field on this screen ${reports} ` +
+        `this Android level can clear. Without \`input keycombination\` (added after API ` +
         `30) the only available clear is one backspace per character, which is too slow to ` +
         `finish reliably past ${MAX_DELETE_COUNT}. The count comes from the screen's view ` +
         `hierarchy, which reports an empty field's placeholder in the same attribute as its ` +

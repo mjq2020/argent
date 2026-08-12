@@ -997,6 +997,32 @@ describe("keyboard clear — Android (adb input)", () => {
     ).rejects.toThrow(/a focused text field on this screen reports 200 characters/);
   });
 
+  it("says nothing about that length when the text came from a secret", async () => {
+    // The count is the FIELD's length, and a `{{secret:…}}` request is usually
+    // aimed at the box that already holds a credential — a long API key or
+    // token in a plain `type="text"` box, which carries no `password` flag for
+    // the dump to hide behind. `redactSecretsFromError` substitutes the
+    // resolved value and cannot redact a number, so the count has to be
+    // withheld here, exactly as the chromium backend withholds its two.
+    seedLegacyLevel();
+    seedDump(dumpWith("x".repeat(200)));
+
+    const err = await makeAndroidImpl(registryWith({}))
+      .handler({}, { udid: ANDROID.id, clear: true, text: "tok", secretText: true }, ANDROID)
+      .then(
+        () => {
+          throw new Error("expected the call to reject, but it resolved");
+        },
+        (e: unknown) => e as Error
+      );
+
+    expect(err.message).toMatch(/reports more characters than this Android level can clear/);
+    expect(err.message).not.toMatch(/\b200\b/);
+    // The LIMIT is a constant, not credential material, and it is what tells
+    // the caller how far over the field is.
+    expect(err.message).toMatch(/past 150/);
+  });
+
   it("uses the blind count for a password field, whose text is unreadable", async () => {
     // uiautomator reports empty text for password nodes, so a measured 0 would
     // clear nothing at all — the one case where a fixed run is the right answer.

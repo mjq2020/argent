@@ -74,6 +74,7 @@ async function typeAndroidPhone(
   if (params.clear) {
     await injectAndroidClear(device.id, {
       readHierarchy: devtoolsHierarchyReader(registry, device),
+      secretText: params.secretText === true,
     });
   }
   if (params.text) {
