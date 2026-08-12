@@ -1645,6 +1645,39 @@ describe("keyboard clear — Chromium (CDP)", () => {
     expect(readBack.at - trace[lastKey]!.at).toBeGreaterThanOrEqual(40);
   });
 
+  it("gives a slower caller the longer settle it asked for", async () => {
+    // The other half of `Math.max(delayMs, CLEAR_SETTLE_MS)`. Every Chromium
+    // test here passes `delayMs: 0`, so only the FLOOR was pinned and
+    // `const settleMs = CLEAR_SETTLE_MS` stayed green — silently dropping the
+    // longer window on the slow page that asked for it, which is the one case
+    // where more settle can only help.
+    const trace: { kind: string; at: number }[] = [];
+    const probes: string[] = [];
+    const api = {
+      dispatchKeyEvent: async () => void trace.push({ kind: "key", at: Date.now() }),
+      evaluate: async () => {
+        probes.push("probe");
+        trace.push({ kind: "probe", at: Date.now() });
+        return JSON.stringify(
+          probes.length === 1
+            ? { verdict: "editable", label: "INPUT#email", length: 8, mac: true, parked: true }
+            : { tracked: true, length: 0, focused: true }
+        );
+      },
+    };
+
+    await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, delayMs: 200 },
+      CHROMIUM
+    );
+
+    const lastKey = trace.findLastIndex((e) => e.kind === "key");
+    const readBack = trace[lastKey + 1]!;
+    expect(readBack.kind).toBe("probe");
+    expect(readBack.at - trace[lastKey]!.at).toBeGreaterThanOrEqual(180);
+  });
+
   it("refuses to press a named key when the clear moved focus off the field", async () => {
     // The `key` half of the same guard: Enter dispatched at whatever holds focus
     // after the clear submits the wrong form, and reports success doing it.
