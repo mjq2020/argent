@@ -352,6 +352,15 @@ export const focusedEditableProbe = (handle: string) => `(() => {
     // Reachable by an ordinary tap: clicking a <select> inside a contenteditable
     // focuses the SELECT (a <button> yields focus to the host, but \`focus()\`
     // still lands on it).
+    //
+    // By tag, deliberately, rather than "editable only by INHERITANCE": the
+    // narrower rule would rescue exactly one shape, a <button
+    // contenteditable="true"> used as a text field (Blink does let you edit its
+    // label — measured on Chrome 148), while still refusing a <select> that
+    // carries the attribute itself, since a replaced widget's content is not
+    // editable text either way. Refusing costs that one shape a working clear,
+    // with a message that names the element and points at its own control;
+    // guessing costs a destroyed editor reported as success.
     if (tag === "SELECT" || tag === "BUTTON") {
       return JSON.stringify({ verdict: "not-editable", label, mac });
     }
