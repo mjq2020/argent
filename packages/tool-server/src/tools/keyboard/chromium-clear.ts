@@ -304,10 +304,17 @@ export const focusedEditableProbe = (handle: string) => `(() => {
       return JSON.stringify({ verdict: "none", mac });
     }
     const tag = (el.tagName || "").toUpperCase();
-    // The id is page-controlled and unbounded, and this string reaches the
-    // agent's context in an error message — cap it the way the TV blueprint caps
-    // device-supplied text.
-    const label = (tag + (el.id ? "#" + el.id : "")).slice(0, 60);
+    // Both halves are page-controlled and unbounded, and this string is
+    // interpolated verbatim into four agent-facing error messages — so it is
+    // capped the way the TV blueprint caps device-supplied text, and narrowed to
+    // the characters an identifier is actually made of. The cap alone bounds
+    // LENGTH, not content, and ~55 characters of arbitrary page text is enough
+    // to carry an instruction into the model's context. Spaces, quotes,
+    // punctuation and newlines are what make that possible, and no real tag or
+    // id needs them; an id made only of those degrades to the bare tag.
+    const identChars = (value) => String(value || "").replace(/[^A-Za-z0-9_-]/g, "");
+    const safeId = identChars(el.id);
+    const label = (identChars(tag) + (safeId ? "#" + safeId : "")).slice(0, 60);
     // Form controls first: \`isContentEditable\` is INHERITED, so an <input>
     // inside a contenteditable host reports true, and reading its textContent
     // (always "") would make every verification pass vacuously. A <textarea>
