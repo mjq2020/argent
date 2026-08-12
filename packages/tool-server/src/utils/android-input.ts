@@ -16,7 +16,7 @@
  * it) instead of a silent success. Touch injection is unaffected and stays on the
  * simulator-server; only key/text/button events move to this transport.
  */
-import { FAILURE_CODES } from "@argent/registry";
+import { FAILURE_CODES, FailureError, getFailureSignal } from "@argent/registry";
 import {
   attrIsTrue,
   parseUiAutomatorXml,
@@ -165,6 +165,21 @@ const KEYCODE_A = 29;
 const KEYCODE_DEL = 67;
 
 /**
+ * Held back from the read legs (probe, dump) so the delete run always has time
+ * to finish once it starts.
+ *
+ * Without a reservation the dump's own cap is the whole remaining budget, so a
+ * slow `uiautomator` can spend all of it and the delete run then starts against
+ * a few hundred milliseconds. Which leg to starve is not symmetric: a squeezed
+ * dump degrades to BLIND_DELETE_COUNT, which is merely less exact, while a
+ * squeezed delete run risks a partly-deleted field.
+ *
+ * Sized to cover the largest run MAX_DELETE_COUNT permits at the worst rate ever
+ * measured (~7.3s — see there), with headroom.
+ */
+const DELETE_RUN_RESERVE_MS = 11_000;
+
+/**
  * Wall-clock budget for one whole clear, shared across every adb round trip it
  * makes.
  *
@@ -180,31 +195,24 @@ const KEYCODE_DEL = 67;
  * budget below is what actually has to hold on the device, whatever the client
  * is willing to wait for.
  *
- * 20s covers the slowest path measured on API 30 (a ~2s dump plus 6.9s of
- * deletes against the live-filtering Settings search box) with room to spare.
+ * Sized as the support probe's share PLUS the delete run's reserve, rather than
+ * as a round number. The probe is one ordinary `input` invocation, so starving
+ * it below ADB_INPUT_TIMEOUT_MS — the cap every other `input` call in this file
+ * gets — made `{ clear: true }` fail on a device where `{ text: "…" }` succeeds:
+ * at a flat 20s budget the probe's own cap was 9s, and a loaded API 30 emulator
+ * SIGKILLed it there. Deriving the budget from the two constants keeps the
+ * probe's share equal to the ordinary one and the reserve intact, and leaves the
+ * read legs whatever the probe does not spend — in the ordinary case (a warm
+ * ~1s probe) about 14s, which is what makes {@link readHierarchy}'s two dumps
+ * plus its backoff actually fit.
+ *
  * It bounds the CLEAR only: `text` and `key` keep their own ADB_INPUT_TIMEOUT_MS
  * caps, which is the pre-existing budget for a call without a clear. So this
  * stops the clear from blowing the request budget on its own; it does not turn
  * the whole tool call into one deadline, which would mean threading it through
  * the text/key injectors the Android-TV blueprint shares.
  */
-const ANDROID_CLEAR_BUDGET_MS = 20_000;
-
-/**
- * Held back from the read legs (probe, dump) so the delete run always has time
- * to finish once it starts.
- *
- * Without a reservation the dump's own cap is the whole remaining budget, so a
- * slow `uiautomator` can spend all of it and the delete run then starts against
- * a few hundred milliseconds. Which leg to starve is not symmetric: a squeezed
- * dump degrades to BLIND_DELETE_COUNT, which is merely less exact, while a
- * squeezed delete run risks a partly-deleted field.
- *
- * Sized to cover the largest run MAX_DELETE_COUNT permits at the worst rate ever
- * measured (~7.3s — see there), with headroom. The read legs keep the remaining
- * ~9s, which covers a warm probe plus two dumps.
- */
-const DELETE_RUN_RESERVE_MS = 11_000;
+const ANDROID_CLEAR_BUDGET_MS = ADB_INPUT_TIMEOUT_MS + DELETE_RUN_RESERVE_MS;
 
 /**
  * Timeout for the next leg of a clear: whatever is left of the shared budget.
@@ -466,13 +474,37 @@ async function clearByDeleting(
   // One invocation for the whole run: `input keyevent` accepts a keycode list.
   // No reserve withheld — this IS the leg the reserve was held for, so it gets
   // everything remaining.
-  // (Killing adb part-way does NOT stop the device: measured on API 36, deletes
-  // already handed over keep landing, so an interrupted run finishes anyway and
-  // the caller merely sees a spurious error. The reserve is what keeps that from
-  // being the normal outcome.)
-  await adbShell(serial, `input keyevent ${KEYCODE_MOVE_END} ${dels}`, {
-    timeoutMs: clearLegTimeout(deadline),
-  });
+  try {
+    await adbShell(serial, `input keyevent ${KEYCODE_MOVE_END} ${dels}`, {
+      timeoutMs: clearLegTimeout(deadline),
+    });
+  } catch (cause) {
+    // A run that does not come back leaves the field in a state no caller can
+    // guess: killing adb part-way does NOT stop the device (measured on API 36,
+    // deletes already handed over keep landing), and the reserve above is what
+    // keeps this from being the normal outcome — but a loaded emulator still
+    // reaches it, and it did, leaving a 113-character field holding 3.
+    //
+    // Rewrapped rather than propagated because `adbShell`'s own error is the
+    // wrong report for that: it is filed under ANDROID_ADB_COMMAND_FAILED, its
+    // message is the argv — here a ~700-character dump of `input keyevent 123
+    // 67 67 67 …` — and nothing in it says the field was modified at all, so a
+    // caller reads a transport fault and retries against a field it believes is
+    // untouched. The cause is deliberately not quoted: it carries no
+    // information this message does not, and all of its length.
+    throw new FailureError(
+      `keyboard clear: the delete run did not finish on this device, so the focused field is ` +
+        `PARTLY emptied — ${keys} backspaces were sent and an unknown number of them landed. ` +
+        `Nothing was typed. Read the field's actual contents before continuing; do not treat ` +
+        `it as unchanged, and do not send a replacement that assumes it is empty.`,
+      {
+        error_code: FAILURE_CODES.KEYBOARD_CLEAR_INTERRUPTED,
+        failure_stage: "keyboard_clear_delete_run_android",
+        failure_area: "tool_server",
+        error_kind: getFailureSignal(cause)?.error_kind ?? "subprocess",
+      }
+    );
+  }
 }
 
 // The winner of a UiAutomation race holds the connection for the whole dump

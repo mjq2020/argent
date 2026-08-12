@@ -543,16 +543,21 @@ describe("keyboard clear — Android (adb input)", () => {
         (call[2] as { timeoutMs: number }).timeoutMs;
       // The probe is a READ leg too, and the FIRST one — if it kept a cap of its
       // own the shared deadline would never bind, which is the whole mechanism
-      // this block introduced. 20s budget − 0s spent − 11s reserved.
-      expect(timeoutOf(adbShell.mock.calls[0]!)).toBe(9_000);
+      // this block introduced. 26s budget − 0s spent − 11s reserved, which is
+      // exactly ADB_INPUT_TIMEOUT_MS: the probe is one ordinary `input`
+      // invocation, and starving it below that made `{ clear: true }` fail on a
+      // device where `{ text: "…" }` succeeds. The budget is derived from those
+      // two constants so the equality holds by construction.
+      expect(timeoutOf(adbShell.mock.calls[0]!)).toBe(15_000);
       // The dump is a READ leg, so it gets what is left MINUS the reserve held
-      // back for the delete run: 20s budget − 3s spent − 11s reserved. Without that subtraction a slow dump can spend the whole
-      // budget and the run it measured for then starts with nothing left.
-      expect(timeoutOf(adbExecOutBinary.mock.calls[0]!)).toBe(6_000);
+      // back for the delete run: 26s budget − 3s spent − 11s reserved. Without
+      // that subtraction a slow dump can spend the whole budget and the run it
+      // measured for then starts with nothing left.
+      expect(timeoutOf(adbExecOutBinary.mock.calls[0]!)).toBe(12_000);
       // The delete run is the MUTATING leg, so it gets everything remaining
-      // (20s − 7s) rather than a fresh full-size cap — being killed part-way
+      // (26s − 7s) rather than a fresh full-size cap — being killed part-way
       // through is what leaves a half-deleted field.
-      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(13_000);
+      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(19_000);
     } finally {
       nowSpy.mockRestore();
     }
@@ -561,7 +566,7 @@ describe("keyboard clear — Android (adb input)", () => {
   it("keeps the modern path's DEL on the shared deadline too", async () => {
     // The common path (a level that HAS `keycombination`) is probe + DEL, and
     // the DEL is a device write like any other. A fresh full-size cap here
-    // stacks 15s on top of the probe's 9s and the text injection's 15s, which
+    // stacks 15s on top of the probe's 15s and the text injection's 15s, which
     // is the 30s-per-request overrun the shared budget exists to prevent.
     let clock = 1_000_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
@@ -580,9 +585,9 @@ describe("keyboard clear — Android (adb input)", () => {
       const timeoutOf = (call: [string, string, unknown?]) =>
         (call[2] as { timeoutMs: number }).timeoutMs;
       expect(adbShell.mock.calls[1]![1]).toBe(DEL_CMD);
-      // 20s budget − 2s spent, with no reserve withheld: this IS the mutating
+      // 26s budget − 2s spent, with no reserve withheld: this IS the mutating
       // leg. A fresh ADB_INPUT_TIMEOUT_MS would read 15_000.
-      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(18_000);
+      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(24_000);
     } finally {
       nowSpy.mockRestore();
     }
@@ -653,7 +658,7 @@ describe("keyboard clear — Android (adb input)", () => {
     try {
       adbShell.mockImplementationOnce(async () => "Usage: input …");
       adbExecOutBinary.mockImplementationOnce(async () => {
-        clock += 5_000; // leaves too little for a backoff plus another dump
+        clock += 11_000; // leaves too little for a backoff plus another dump
         return Buffer.from("Killed");
       });
 

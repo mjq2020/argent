@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
-import { Registry, FAILURE_CODES, getFailureSignal, type DeviceInfo } from "@argent/registry";
+import {
+  Registry,
+  FAILURE_CODES,
+  FailureError,
+  getFailureSignal,
+  type DeviceInfo,
+} from "@argent/registry";
 import { InvalidToolInputError } from "../src/utils/capability";
 import { typeSimulatorServer } from "../src/tools/keyboard/simulator-server-keys";
 import { makeChromiumImpl } from "../src/tools/keyboard/platforms/chromium";
@@ -311,5 +317,43 @@ describe("keyboard backends — input rejection is a 400 with a uniform telemetr
       injectAndroidClear("emulator-5554"),
       FAILURE_CODES.KEYBOARD_CLEAR_FIELD_TOO_LONG
     );
+  });
+
+  it("android: a delete run adb could not finish → KEYBOARD_CLEAR_INTERRUPTED, naming the field", async () => {
+    // The one android clear failure that leaves the field CHANGED. `adbShell`'s
+    // own error is filed under ANDROID_ADB_COMMAND_FAILED and its message is the
+    // argv — a ~700-character `input keyevent 123 67 67 67 …` dump that never
+    // mentions the field at all — so a caller reads a transport fault and
+    // retries against a field it believes is untouched.
+    adbShell.mockReset();
+    adbExecOutBinary.mockReset();
+    adbShell.mockImplementationOnce(async () => "Usage: input …");
+    adbExecOutBinary.mockImplementationOnce(async () =>
+      Buffer.from(
+        `<hierarchy><node text="abcd" class="android.widget.EditText" ` +
+          `password="false" focused="true" /></hierarchy>`
+      )
+    );
+    adbShell.mockImplementationOnce(async () => {
+      throw new FailureError("adb -s emulator-5554 shell input keyevent 123 67 67 … failed", {
+        error_code: FAILURE_CODES.ANDROID_ADB_COMMAND_FAILED,
+        failure_stage: "android_adb_command",
+        failure_area: "tool_server",
+        error_kind: "timeout",
+      });
+    });
+
+    const err = await injectAndroidClear("emulator-5554").then(
+      () => {
+        throw new Error("expected the call to reject, but it resolved");
+      },
+      (e: unknown) => e as Error
+    );
+
+    expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.KEYBOARD_CLEAR_INTERRUPTED);
+    // The kind is carried through, so a killed leg still reads as a timeout.
+    expect(getFailureSignal(err)?.error_kind).toBe("timeout");
+    expect(err.message).toMatch(/PARTLY emptied/);
+    expect(err.message).not.toMatch(/input keyevent/);
   });
 });
