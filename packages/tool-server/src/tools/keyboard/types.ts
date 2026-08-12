@@ -16,6 +16,15 @@ export interface KeyboardParams {
   clear?: boolean;
   /** Delay in ms between key presses (default 50). */
   delayMs?: number;
+  /**
+   * True when `text` was resolved from a `{{secret:…}}` placeholder, so its
+   * LENGTH is credential material and must not be quoted back in an error.
+   *
+   * Set by the tool's own `execute` alongside the resolved text, never by the
+   * caller: the zod schema does not declare it, so a request carrying it has the
+   * key stripped before it gets here.
+   */
+  secretText?: boolean;
 }
 
 export interface KeyboardResult {

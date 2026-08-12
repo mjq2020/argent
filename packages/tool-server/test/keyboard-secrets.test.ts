@@ -390,6 +390,82 @@ describe("keyboard tool with secret placeholders", () => {
     expect(caught!.message).not.toMatch(/\b7 of\b/);
   });
 
+  it("says nothing about its length when the field itself is not a password", async () => {
+    // The page-side `secret` flag is `type === "password"` alone, so it is false
+    // for every other box a credential is typed into: an API-key field, a TOTP
+    // input, a password field a show/hide control has switched to `type="text"`.
+    // The REQUEST is what makes the count sensitive here, and `redactSecrets-
+    // FromError` substitutes the value string — it cannot redact a number.
+    vi.stubEnv("ARGENT_SECRET_APP_PASSWORD", "hunter2");
+    let probes = 0;
+    const api = {
+      dispatchKeyEvent: async () => {},
+      evaluate: async () => {
+        probes++;
+        if (probes === 1) {
+          return JSON.stringify({
+            verdict: "editable",
+            label: "INPUT#apiKey",
+            length: 8,
+            mac: true,
+            parked: true,
+          });
+        }
+        return JSON.stringify(
+          probes === 2
+            ? { tracked: true, length: 0, focused: true }
+            : { tracked: true, length: 1, focused: false }
+        );
+      },
+    };
+    const tool = createKeyboardTool(registryWith(api));
+
+    let caught: Error | undefined;
+    try {
+      await tool.execute(
+        {},
+        { udid: CHROMIUM_UDID, clear: true, text: "{{secret:APP_PASSWORD}}", delayMs: 0 }
+      );
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toMatch(/not all of the text is in it/);
+    expect(caught!.message).not.toMatch(/\b7 character/);
+  });
+
+  it("still counts the characters of ordinary text the page split", async () => {
+    // The other half: with no secret in the request the counts are what make the
+    // message actionable, so suppressing them everywhere would cost more than it
+    // protects.
+    let probes = 0;
+    const api = {
+      dispatchKeyEvent: async () => {},
+      evaluate: async () => {
+        probes++;
+        if (probes === 1) {
+          return JSON.stringify({
+            verdict: "editable",
+            label: "INPUT#apiKey",
+            length: 8,
+            mac: true,
+            parked: true,
+          });
+        }
+        return JSON.stringify(
+          probes === 2
+            ? { tracked: true, length: 0, focused: true }
+            : { tracked: true, length: 1, focused: false }
+        );
+      },
+    };
+    const tool = createKeyboardTool(registryWith(api));
+
+    await expect(
+      tool.execute({}, { udid: CHROMIUM_UDID, clear: true, text: "hunter2", delayMs: 0 })
+    ).rejects.toThrow(/only 1 of the 7 character\(s\)/);
+  });
+
   it("scrubs the resolved value from errors thrown on the clear path", async () => {
     vi.stubEnv("ARGENT_SECRET_APP_PASSWORD", "hunter2");
     const api = {

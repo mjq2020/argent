@@ -187,11 +187,15 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
       const after = await releaseTarget();
       const landed = after?.length ?? 0;
       if (after?.tracked && after.focused === false && landed < descs.length) {
-        // A password field's length is credential material, so the counts are
-        // reported only for a field that is not one.
-        const missing = after.secret
-          ? `not all of the text is in it`
-          : `only ${landed} of the ${descs.length} character(s) are in it`;
+        // Both halves of the count are credential material: the field's own
+        // length when it is a password input, and the REQUEST's length when the
+        // text came from a `{{secret:…}}` placeholder — which a plain
+        // `type="text"` box takes just as often (an API key, a TOTP code, a
+        // password field a show/hide control has toggled to text).
+        const missing =
+          after.secret || params.secretText
+            ? `not all of the text is in it`
+            : `only ${landed} of the ${descs.length} character(s) are in it`;
         throw new FailureError(
           `keyboard: the page moved focus away from ${clearedLabel ?? "the field"} while the text ` +
             `was being typed, and ${missing} — so the rest of the value most likely landed ` +
