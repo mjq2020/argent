@@ -1,4 +1,6 @@
 import {
+  FAILURE_CODES,
+  FailureError,
   TypedEventEmitter,
   type DeviceInfo,
   type ServiceBlueprint,
@@ -213,12 +215,22 @@ export const androidTvControlBlueprint: ServiceBlueprint<TvControlApi, DeviceInf
       // keyboard clear's measurement now share one dump implementation, so a
       // concurrent reader is exactly as reachable from a TV target.
       if (!raw.includes("<hierarchy")) {
-        throw new Error(
+        throw new FailureError(
           `uiautomator could not capture the screen: ${raw.trim().slice(0, 200) || "(no output)"}. ` +
             `Common causes: device locked / keyguard, DRM or secure overlay, Play Integrity ` +
             `screen, or another uiautomator dump holding the device. Retry once — a lost race ` +
             `clears once the holder finishes — then unlock the device or take a screenshot as ` +
-            `a fallback.`
+            `a fallback.`,
+          {
+            // The same SIGNAL as the phone path, not just the same words: a bare
+            // `Error` carries none, so the identical device output was
+            // classified from `describe` and unclassified from `tv-remote`, and
+            // no dashboard slicing on the code could see the TV half at all.
+            error_code: FAILURE_CODES.ANDROID_UIAUTOMATOR_CAPTURE_FAILED,
+            failure_stage: "android_uiautomator_capture",
+            failure_area: "tool_server",
+            error_kind: "subprocess",
+          }
         );
       }
       return raw;

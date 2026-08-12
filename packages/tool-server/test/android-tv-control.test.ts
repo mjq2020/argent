@@ -207,6 +207,27 @@ describe("android-tv-control — describe", () => {
     const api = await makeApi();
     await expect(api.describe()).rejects.toThrow(matcher);
   });
+
+  it("classifies it the way the phone twin does, not as a bare Error", async () => {
+    // Same words was not the same diagnosis: a bare `Error` carries no failure
+    // signal, so byte-identical device output was classified when `describe`
+    // asked for it and unclassified when `tv-remote` did — invisible to any
+    // dashboard slicing on the code.
+    mockExecOut.mockResolvedValue(Buffer.from("Killed \n"));
+    const api = await makeApi();
+
+    const err = await api.describe().then(
+      () => {
+        throw new Error("expected the dump to be reported as a failure");
+      },
+      (e: unknown) => e
+    );
+
+    expect(getFailureSignal(err)?.error_code).toBe(
+      FAILURE_CODES.ANDROID_UIAUTOMATOR_CAPTURE_FAILED
+    );
+    expect(getFailureSignal(err)?.error_kind).toBe("subprocess");
+  });
 });
 
 describe("android-tv-control — recycleAx is a no-op", () => {
