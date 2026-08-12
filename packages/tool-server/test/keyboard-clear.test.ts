@@ -811,6 +811,35 @@ describe("keyboard clear — Android (adb input)", () => {
       expect(deleteRun(inputCmds()[1]!)).toHaveLength(5 + 8);
     }, 20_000);
 
+    it("disarms the budget timer the helper's answer beat", async () => {
+      // The loser of a race is abandoned, not cancelled, and an armed
+      // `setTimeout` holds the event loop open by itself — so the read that WON
+      // used to leave a 5s handle behind. Invisible in the long-lived
+      // tool-server; it delays the exit of any short-lived process instead.
+      vi.useFakeTimers();
+      try {
+        seedLegacyLevel();
+        const getHierarchy = vi.fn(async () => ({ xml: dumpWith("abc") }));
+
+        const run = makeAndroidImpl(registryWithDevtools(getHierarchy)).handler(
+          {},
+          { udid: ANDROID.id, clear: true },
+          ANDROID
+        );
+        // Let the microtasks settle: the helper answers on one, so the race is
+        // decided without any timer firing.
+        await vi.advanceTimersByTimeAsync(0);
+        const armed = vi.getTimerCount();
+        await vi.runAllTimersAsync();
+        await run;
+
+        expect(getHierarchy).toHaveBeenCalledTimes(1);
+        expect(armed).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("falls back to the dump when the helper cannot answer", async () => {
       seedLegacyLevel();
       seedDump(dumpWith("abcd"));

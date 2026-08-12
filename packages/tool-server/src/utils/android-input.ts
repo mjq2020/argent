@@ -519,14 +519,25 @@ async function readHierarchy(
     deadline - Date.now() - DELETE_RUN_RESERVE_MS - MIN_USEFUL_DUMP_MS
   );
   if (preferredRead && preferredBudgetMs > 0) {
+    // The loser of a race is abandoned, not cancelled, and an armed
+    // `setTimeout` holds the event loop open on its own — so when
+    // `preferredRead` wins, a bare `sleep()` here keeps a handle alive for the
+    // rest of the budget. Harmless in the long-lived tool-server, but it delays
+    // the exit of any short-lived process that imports this, so the timer is
+    // cleared either way.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const xml = await Promise.race([
         preferredRead(),
-        sleep(preferredBudgetMs).then(() => undefined),
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), preferredBudgetMs);
+        }),
       ]);
       if (xml && xml.includes("<hierarchy")) return xml;
     } catch {
       // The helper is not usable — same fallthrough.
+    } finally {
+      clearTimeout(timer);
     }
   }
   for (let attempt = 0; attempt < 2; attempt++) {
