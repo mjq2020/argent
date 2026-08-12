@@ -121,12 +121,19 @@ const subDoc = (activeElement: unknown, frameElement: unknown = null, decoys: Ro
 /** An open shadow root, identified by the `host` accessor a browser declares. */
 const shadowRoot = (activeElement: unknown, host: unknown) => rootWith({ activeElement, host });
 
-/** Run a probe against a fake page, returning the parsed verdict and the window. */
+/**
+ * Run a probe against a fake page, returning the parsed verdict and the window.
+ *
+ * `documentGlobal` is what the page exposes as `Document`. A page can reassign
+ * it (`window.Document = {}` — a polyfill, a sandbox shim), leaving no
+ * `prototype` to read the accessors off.
+ */
 function runProbe(
   expression: string,
   doc: FakeDoc,
   seedWindow: Record<string, unknown> = {},
-  platform = "MacIntel"
+  platform = "MacIntel",
+  documentGlobal: { prototype?: Record<string, unknown> } = { prototype: {} }
 ): { result: FocusedEditable & ClearedTarget; window: Record<string, unknown> } {
   // Not a spread: copying descriptors is the whole point of the refused-park
   // case, and `{...seed}` would turn a non-writable slot into a writable one.
@@ -138,7 +145,7 @@ function runProbe(
     window,
     document: doc,
     navigator: { platform },
-    Document: { prototype: {} },
+    Document: documentGlobal,
     Object,
     JSON,
     Math,
@@ -150,6 +157,7 @@ function runProbe(
     ["body", "__body"],
     ["documentElement", "__root"],
   ] as const) {
+    if (!sandbox.Document.prototype) break;
     Object.defineProperty(sandbox.Document.prototype, name, {
       get(this: FakeDoc) {
         return this[backing];
@@ -364,6 +372,27 @@ describe("chromium clear — focused-element probe", () => {
       },
     });
     expect(focused(el, {}, "MacIntel").result).toMatchObject({ verdict: "unknown", mac: true });
+  });
+
+  it("still resolves the field on a page that reassigned the Document global", () => {
+    // `window.Document = {}` — a polyfill, a sandbox shim — leaves no
+    // `Document.prototype`, so the descriptor read throws and the verdict is
+    // `unknown`, which drops EVERY clear on that page onto the unverified
+    // best-effort branch. Measured on Chrome 130: a page that cancels its
+    // `beforeinput` was correctly refused, and returned `cleared: true` with the
+    // field untouched once `Document` was shimmed (2/2) — the silent no-op this
+    // parameter exists to prevent.
+    const el: FakeEl = { tagName: "INPUT", id: "email", value: "hello123" };
+    const doc = makeDoc(el);
+    // No named-getter decoys: with no accessor to read, the plain property is
+    // all there is, and this is a page with nothing shadowing it.
+    doc.activeElement = el;
+    doc.body = doc.__body;
+    doc.documentElement = doc.__root;
+
+    const { result } = runProbe(focusedEditableProbe(HANDLE), doc, {}, "MacIntel", {});
+
+    expect(result).toMatchObject({ verdict: "editable", label: "INPUT#email" });
   });
 
   it("reports a park the page refused, so nothing is verified against a decoy", () => {

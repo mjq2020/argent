@@ -214,7 +214,18 @@ export const focusedEditableProbe = (handle: string) => `(() => {
   let mac = false;
   try { mac = /Mac|iPhone|iPad/i.test((navigator && navigator.platform) || ""); } catch (e) {}
   try {
-    const docProto = typeof Document === "undefined" ? {} : Document.prototype;
+    // Falls back to {} for anything that is not a usable prototype, not just for
+    // an absent \`Document\`. A page that reassigns the global (\`window.Document =
+    // {}\` — a polyfill, a sandbox shim) leaves \`Document.prototype\` undefined,
+    // the descriptor read below throws, and the catch reports \`unknown\` — which
+    // silently disables the whole verification and hands every clear on that page
+    // the unverified best-effort branch. Measured on Chrome 130: the same page
+    // that cancels its \`beforeinput\` refused the clear normally and returned
+    // \`cleared: true\` with the field untouched once \`Document\` was shimmed (2/2).
+    // With no accessor the reads below fall back to the plain property, which is
+    // shadowable but right on every page that is not attacking us.
+    const proto = typeof Document === "undefined" ? undefined : Document && Document.prototype;
+    const docProto = proto && typeof proto === "object" ? proto : {};
     const protoGet = (name) => (Object.getOwnPropertyDescriptor(docProto, name) || {}).get;
     const activeOf = protoGet("activeElement");
     const bodyOf = protoGet("body");
