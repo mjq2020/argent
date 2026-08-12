@@ -110,7 +110,13 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
             `that field. Tap the field again and send the rest of the request without \`clear\` — ` +
             `the field is already empty.`,
           {
-            error_code: FAILURE_CODES.KEYBOARD_CLEAR_INEFFECTIVE,
+            // Its own code, not INEFFECTIVE: the field WAS emptied here, and
+            // INEFFECTIVE means it was not. A client keying on the signal has
+            // to tell "re-clear required" from "the field is already empty,
+            // send the rest without `clear`" — and `failure_stage`, the only
+            // thing that separated them, never reaches the wire (`http.ts`
+            // serializes `error_code` and `error_kind` only).
+            error_code: FAILURE_CODES.KEYBOARD_CLEAR_FOCUS_LOST,
             failure_stage: "keyboard_clear_focus_lost_chromium",
             failure_area: "tool_server",
             error_kind: "unsupported",
@@ -203,7 +209,9 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
             `receives holds a shorter value legitimately.) Either way this was not a clean ` +
             `replacement — re-read the screen before continuing.`,
           {
-            error_code: FAILURE_CODES.KEYBOARD_CLEAR_INEFFECTIVE,
+            // Same reason as the sibling above: the clear itself worked, and
+            // what failed is where the characters went.
+            error_code: FAILURE_CODES.KEYBOARD_CLEAR_FOCUS_LOST,
             failure_stage: "keyboard_clear_focus_lost_typing_chromium",
             failure_area: "tool_server",
             error_kind: "unsupported",

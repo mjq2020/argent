@@ -200,7 +200,11 @@ describe("keyboard backends — input rejection is a 400 with a uniform telemetr
     );
   });
 
-  it("chromium: clear of a readonly field → 400 + KEYBOARD_CLEAR_NO_EDITABLE_FOCUS", async () => {
+  it("chromium: clear of a readonly field → 400 + KEYBOARD_CLEAR_READ_ONLY", async () => {
+    // Its OWN code, not the nothing-focused one: the two remedies are opposite
+    // — tapping the field fixes one and can never fix the other — and
+    // `failure_stage`, which was the only thing separating them, is not
+    // serialized onto the wire.
     const registry = new Registry();
     vi.spyOn(registry, "resolveService").mockResolvedValue({
       dispatchKeyEvent: vi.fn(async () => {}),
@@ -215,7 +219,7 @@ describe("keyboard backends — input rejection is a 400 with a uniform telemetr
         { udid: chromiumDevice.id, clear: true },
         chromiumDevice
       ),
-      FAILURE_CODES.KEYBOARD_CLEAR_NO_EDITABLE_FOCUS
+      FAILURE_CODES.KEYBOARD_CLEAR_READ_ONLY
     );
   });
 
@@ -253,6 +257,41 @@ describe("keyboard backends — input rejection is a 400 with a uniform telemetr
       );
     expect(err).not.toBeInstanceOf(InvalidToolInputError);
     expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.KEYBOARD_CLEAR_INEFFECTIVE);
+  });
+
+  it("chromium: clear that WORKED but lost focus → KEYBOARD_CLEAR_FOCUS_LOST, not INEFFECTIVE", async () => {
+    // The opposite outcome to the case above, and it used to carry the same
+    // code. The remedies are opposite too — "re-clear required" versus "the
+    // field is already empty, send the rest without `clear`" — and
+    // `failure_stage`, the only thing separating them, is not serialized onto
+    // the wire, so a client keying on the signal could not tell them apart.
+    const registry = new Registry();
+    vi.spyOn(registry, "resolveService").mockResolvedValue({
+      dispatchKeyEvent: vi.fn(async () => {}),
+      evaluate: (() => {
+        let calls = 0;
+        return vi.fn(async () => {
+          calls++;
+          return JSON.stringify(
+            calls === 1
+              ? { verdict: "editable", label: "INPUT#q", mac: true, parked: true }
+              : // Emptied — and the page moved focus off it in response.
+                { tracked: true, length: 0, focused: false }
+          );
+        });
+      })(),
+    } as never);
+
+    const err = await makeChromiumImpl(registry)
+      .handler({}, { udid: chromiumDevice.id, clear: true, text: "hi" }, chromiumDevice)
+      .then(
+        () => {
+          throw new Error("expected the call to reject, but it resolved");
+        },
+        (e: unknown) => e
+      );
+    expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.KEYBOARD_CLEAR_FOCUS_LOST);
+    expect((err as Error).message).toMatch(/the field is already empty/);
   });
 
   it("vega: clear → 400 + KEYBOARD_CLEAR_UNSUPPORTED_TARGET, not the capability code", async () => {

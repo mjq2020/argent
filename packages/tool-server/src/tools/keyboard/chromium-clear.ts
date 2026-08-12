@@ -703,7 +703,13 @@ export async function clearChromiumField(
       `keyboard clear: the focused element ${before.label ?? ""} is read-only, so its ` +
         `contents cannot be deleted.`,
       {
-        error_code: FAILURE_CODES.KEYBOARD_CLEAR_NO_EDITABLE_FOCUS,
+        // Its own code, not NO_EDITABLE_FOCUS: the two remedies are opposite.
+        // "Nothing editable has focus" is fixed by tapping the field; a
+        // `readonly` field stays unclearable however often it is tapped, and
+        // `failure_stage` — the only thing that told them apart — is not
+        // serialized onto the wire (`http.ts` sends `error_code` and
+        // `error_kind` only), so a client keying on the signal could not.
+        error_code: FAILURE_CODES.KEYBOARD_CLEAR_READ_ONLY,
         failure_stage: "keyboard_clear_readonly_chromium",
         error_kind: "unsupported",
       }
