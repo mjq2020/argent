@@ -301,20 +301,6 @@ const NATIVE_READY_TIMEOUT_MS = 15000;
 const NATIVE_READY_POLL_MS = 250;
 
 /**
- * `tool:` steps that can change or relaunch the foreground app — running one
- * invalidates {@link ActionEnv.launchedAppId}. `button` is included for
- * its `home` case; distinguishing button kinds here would couple this list to
- * that tool's arg schema for little gain.
- */
-const FOREGROUND_CHANGING_TOOLS = new Set([
-  "launch-app",
-  "restart-app",
-  "reinstall-app",
-  "open-url",
-  "button",
-]);
-
-/**
  * Poll until native-devtools is connected for `bundleId`. Returns true once
  * connected, false on timeout / abort / the service being unavailable. The
  * caller decides how to treat false (iOS flows fail; see treeSourceGate).
@@ -457,6 +443,10 @@ async function runLaunch(state: ExecState, app: Launch): Promise<DirectiveOutcom
       reason: `no app id declared for platform "${device.platform}" — add a launch entry for it`,
     };
   }
+  // Once restart-app is attempted the old pin may no longer describe the
+  // foreground app (the previous app terminated, the new one launching), so a
+  // failed or aborted launch must not leave it behind.
+  state.launchedAppId = undefined;
   try {
     await invokeOnDevice(env, "restart-app", { bundleId });
   } catch (err) {
@@ -2229,15 +2219,15 @@ async function execLeafStep(
       if (step.delayMs && !(await sleepOrAbort(step.delayMs, signal))) {
         return { ...base, status: "skip", tool: step.name, reason: "run aborted during delay" };
       }
+      // A raw tool step is an escape hatch whose effect on the device is opaque
+      // to the runner - launch-app foregrounds another app, open-url may open
+      // Safari, button can press home, and nested orchestrators can do any of
+      // that - so drop the iOS tree-read pin: frontmost auto-resolve (the
+      // pre-pin behavior) is the only honest target after it. Dropped BEFORE
+      // invoking, since a tool that throws mid-way may still have switched
+      // apps. The next `launch` step re-pins.
+      state.launchedAppId = undefined;
       try {
-        // These sub-tools can change (or relaunch) the foreground app, so the
-        // pin no longer names what is on screen. Cleared BEFORE invoking: a
-        // tool that throws mid-way may still have switched apps, and a stale
-        // pin is worse than none (tree reads fall back to plain
-        // auto-resolution, the pre-pin behavior).
-        if (FOREGROUND_CHANGING_TOOLS.has(step.name)) {
-          state.launchedAppId = undefined;
-        }
         const result = await invokeSubTool(registry, ctx, step.name, args);
         if (isUnmetUiWaitResult(step.name, result)) {
           const note = (result as { note?: string }).note;
