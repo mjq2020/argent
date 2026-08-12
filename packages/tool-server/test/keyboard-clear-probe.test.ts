@@ -811,14 +811,33 @@ describe("chromium clear — release probe", () => {
     // unpinned. (Widening the production selector by `br,div,p,span` then turns
     // every successfully-cleared rich-text editor into a hard failure, since
     // `<p><br></p>` is Blink's, Quill's and TinyMCE's empty state.)
-    const withChildren = (childTags: string[]) => {
+    //
+    // It also models the two case rules a browser applies, because the
+    // `contenteditable` half of the selector rests on both: a TAG name matches
+    // case-insensitively in HTML, while an attribute selector's VALUE match is
+    // case-SENSITIVE unless the Selectors 4 `i` flag is present.
+    interface Child {
+      tag: string;
+      attrs?: Record<string, string>;
+    }
+    const ATTR_SELECTOR = /^\[([a-z-]+)=([^\]\s]+)(\s+i)?\]$/i;
+    const matchesSelector = (child: Child, selector: string): boolean => {
+      const attr = ATTR_SELECTOR.exec(selector);
+      if (!attr) return child.tag.toLowerCase() === selector.toLowerCase();
+      const [, name, value, insensitive] = attr;
+      const held = child.attrs?.[name];
+      if (held === undefined) return false;
+      return insensitive ? held.toLowerCase() === value.toLowerCase() : held === value;
+    };
+    const withChildren = (children: (string | Child)[]) => {
+      const nodes = children.map((child) => (typeof child === "string" ? { tag: child } : child));
       const el = {
         tagName: "DIV",
         textContent: "",
         isConnected: true,
         querySelectorAll: (sel: string) => {
-          const wanted = sel.split(",").map((s) => s.trim().toLowerCase());
-          return childTags.filter((tag) => wanted.includes(tag.toLowerCase()));
+          const parts = sel.split(",").map((s) => s.trim());
+          return nodes.filter((node) => parts.some((part) => matchesSelector(node, part)));
         },
       };
       return release({ [HANDLE]: el }).result;
@@ -831,6 +850,36 @@ describe("chromium clear — release probe", () => {
 
     it("counts nothing for an editor that really is empty", () => {
       expect(withChildren([])).toMatchObject({ tracked: true, length: 0, nodes: 0 });
+    });
+
+    it.each(["false", "FALSE", "False"])(
+      'counts an atomic embed marked contenteditable="%s"',
+      (value) => {
+        // How every rich-text editor marks a mention pill or an attachment chip
+        // — the only catcher for one, since <span> is deliberately absent from
+        // the tag list. `contenteditable` is an enumerated attribute, so the
+        // uppercase spelling is valid and browsers honour it; HTML pasted from
+        // Word/Outlook and older serializers produces exactly that. Matching it
+        // case-sensitively left such a subtree invisible to this count AND to
+        // the text walk, which lowercases — so a page that cancelled the edit
+        // reported a clean replacement with the pill still in the DOM.
+        expect(withChildren([{ tag: "span", attrs: { contenteditable: value } }])).toMatchObject({
+          tracked: true,
+          nodes: 1,
+        });
+      }
+    );
+
+    it("counts nothing for a NESTED editor, which is not an atomic embed", () => {
+      // The other value of the same enumerated attribute: `true` (and its empty
+      // form) marks editable content, not a survivor, and matching the attribute
+      // rather than its value would count both.
+      expect(
+        withChildren([
+          { tag: "div", attrs: { contenteditable: "true" } },
+          { tag: "div", attrs: { contenteditable: "" } },
+        ])
+      ).toMatchObject({ tracked: true, nodes: 0 });
     });
 
     it("never counts the structural leftovers an emptied editor keeps", () => {

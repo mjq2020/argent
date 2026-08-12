@@ -109,7 +109,16 @@ const COUNT_EMBEDS_FN = `
     // so counting them would report a cleared field as still full.
     if (isFormControl || !node || !node.querySelectorAll) return 0;
     try {
-      const seen = node.querySelectorAll(EMBED_TAGS + ",[contenteditable=false]");
+      // \`i\` — the Selectors 4 case-insensitivity flag. An attribute selector's
+      // VALUE match is case-sensitive by default, and \`contenteditable\` is an
+      // enumerated attribute, so \`FALSE\` is valid and browsers honour it (it is
+      // what HTML pasted from Word/Outlook and older serializers produces).
+      // Without the flag such a subtree was skipped by the text walk, which
+      // lowercases, AND missed by this count — invisible to both halves of the
+      // verification, so a page that cancelled the edit reported \`cleared: true\`
+      // with the pill untouched (measured on Chrome 148, against a matched
+      // lowercase control that was correctly refused).
+      const seen = node.querySelectorAll(EMBED_TAGS + ",[contenteditable=false i]");
       return seen.length;
     } catch (e) {
       return 0;
