@@ -51,7 +51,7 @@ vi.mock("../src/utils/ios-devices", async (importOriginal) => ({
 
 import { injectVegaNamedKey, injectVegaText } from "../src/utils/vega-input";
 import { makeAndroidImpl } from "../src/tools/keyboard/platforms/android";
-import { BLIND_DELETE_COUNT, MAX_DELETE_COUNT } from "../src/utils/android-input";
+import { MAX_DELETE_COUNT } from "../src/utils/android-input";
 import { makeIosImpl, makeIosRemoteImpl } from "../src/tools/keyboard/platforms/ios";
 import { createKeyboardTool } from "../src/tools/keyboard";
 
@@ -620,18 +620,6 @@ describe("keyboard clear — Android (adb input)", () => {
     }
   });
 
-  it("blind-deletes every length the measured path would accept", () => {
-    // Both directions of one rule. Above the limit, every unmeasurable field
-    // (every password field on these levels) would be rejected instead of
-    // cleared, and the error would quote this constant as a length that was
-    // never measured. BELOW it, a blind run stops short of lengths this path
-    // accepts whenever it can measure them — which is the truncation the
-    // measurement exists to prevent, reported as `cleared: true` (at 120 a
-    // 140-character field kept its first 12 characters with the new text
-    // appended, reproduced 2/3 on a live API 30 emulator).
-    expect(BLIND_DELETE_COUNT).toBe(MAX_DELETE_COUNT);
-  });
-
   it("retries a dump the device refused before falling back to the blind count", async () => {
     // The device serves one UiAutomation connection, so concurrent readers race
     // and the loser gets a bare `Killed` with adb still exiting 0. Degrading
@@ -674,7 +662,7 @@ describe("keyboard clear — Android (adb input)", () => {
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
     expect(adbExecOutBinary).toHaveBeenCalledTimes(2);
-    expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(MAX_DELETE_COUNT + 8);
   }, 10_000);
 
   it("does not spend the retry backoff when the budget cannot fit another dump", async () => {
@@ -705,7 +693,7 @@ describe("keyboard clear — Android (adb input)", () => {
       // cannot flake this while a real backoff would still fail it.
       expect(elapsedMs).toBeLessThan(2_000);
       // …and it still clears, blind, rather than failing.
-      expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+      expect(deleteRun(inputCmds()[1]!)).toHaveLength(MAX_DELETE_COUNT + 8);
     } finally {
       nowSpy.mockRestore();
     }
@@ -790,7 +778,7 @@ describe("keyboard clear — Android (adb input)", () => {
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
     expect(adbExecOutBinary).toHaveBeenCalledTimes(2);
-    expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(MAX_DELETE_COUNT + 8);
   });
 
   describe("reading the hierarchy from the connection's holder", () => {
@@ -985,12 +973,20 @@ describe("keyboard clear — Android (adb input)", () => {
     // DELETE_MARGIN backspaces against a field of unknown length and the tool
     // would report `cleared: true` over most of the value. Unmeasurable has to
     // mean the blind count.
+    //
+    // And that count is MAX_DELETE_COUNT, in every assertion of this shape:
+    // every length below it is one this path accepts whenever it CAN measure
+    // it, so a blind run that stops short truncates a field the tool otherwise
+    // supports — silently, since the call still returns `cleared: true`. At the
+    // 120 this PR shipped with, a 140-character field kept its first 12
+    // characters with the new text appended (reproduced 2/3 on a live API 30
+    // emulator against three competing `uiautomator dump` loops).
     seedLegacyLevel();
     seedDump('<hierarchy rotation="0"');
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(MAX_DELETE_COUNT + 8);
   });
 
   it("measures only a FOCUSED editable, ignoring other fields on screen", async () => {
@@ -1091,7 +1087,7 @@ describe("keyboard clear — Android (adb input)", () => {
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(MAX_DELETE_COUNT + 8);
   });
 
   it("uses the blind count when the dump itself fails", async () => {
@@ -1102,7 +1098,7 @@ describe("keyboard clear — Android (adb input)", () => {
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(MAX_DELETE_COUNT + 8);
   });
 
   it("uses the blind count when the device refused the dump", async () => {
@@ -1113,7 +1109,7 @@ describe("keyboard clear — Android (adb input)", () => {
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(MAX_DELETE_COUNT + 8);
   });
 
   it("measures the focused EDITABLE node, not a focused container above it", async () => {
@@ -1178,7 +1174,7 @@ describe("keyboard clear — Android (adb input)", () => {
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(MAX_DELETE_COUNT + 8);
   });
 
   it("still prefers a longer measurable field over an unmeasurable one", async () => {
@@ -1211,7 +1207,7 @@ describe("keyboard clear — Android (adb input)", () => {
 
     await makeAndroidImpl(registryWith({})).handler({}, { udid: ANDROID.id, clear: true }, ANDROID);
 
-    expect(deleteRun(inputCmds()[1]!)).toHaveLength(BLIND_DELETE_COUNT + 8);
+    expect(deleteRun(inputCmds()[1]!)).toHaveLength(MAX_DELETE_COUNT + 8);
   });
 
   it("clears a field exactly at the length limit, and refuses one past it", async () => {

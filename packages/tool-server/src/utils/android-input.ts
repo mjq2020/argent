@@ -408,7 +408,12 @@ export const MAX_DELETE_COUNT = 150;
 // `it("blind-deletes every length the measured path would accept")` in
 // test/keyboard-clear.test.ts pins it, because nothing else would catch the two
 // being separated again.
-export const BLIND_DELETE_COUNT = MAX_DELETE_COUNT;
+// Not exported: it IS MAX_DELETE_COUNT, so a second exported name for the same
+// value is a duplicate export. The name stays because the two roles are
+// different — one is the longest field this path accepts, the other is how far
+// it deletes when it cannot measure — and the whole point of the fix is that
+// they have to be the same number.
+const BLIND_DELETE_COUNT = MAX_DELETE_COUNT;
 
 /**
  * Empty the focused field on an Android level whose `input` has no
