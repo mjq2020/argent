@@ -1626,8 +1626,22 @@ function stepTarget(step: FlowStep): string | undefined {
       // The as-written path, so a report line shows exactly what the flow
       // references (`run ../shared/login.yaml`), not just the attribution stem.
       return step.flow;
-    default:
+    case "echo":
+    case "tool":
+      // Each carries its subject in a report field of its own (`message`,
+      // `tool`) that renderers print in the target's place.
       return undefined;
+    case "launch":
+      // A launch's app id may be per-platform (`appIdForPlatform`), and a step
+      // alone does not know the run device.
+      return undefined;
+    case "wait":
+      return undefined;
+    default: {
+      const unclassified: never = step;
+      void unclassified;
+      return undefined;
+    }
   }
 }
 
@@ -1845,11 +1859,12 @@ function reportBlockSkipped(
 /**
  * Dispatch a block directive to its executor. The `never` default arm is the
  * run-time site a kind registered in BLOCK_DIRECTIVE_KEYS cannot miss: an
- * unhandled registered kind fails tsc here instead of falling through to
- * execLeafStep as an "unsupported step kind" error that skips the block's
- * children without a report. Binds `step.kind` rather than `step` - while the
- * registry has one entry BlockStep is not a union, so only the discriminant
- * narrows to `never`.
+ * unhandled registered kind fails tsc here instead of returning silently and
+ * leaving the block out of the report entirely, not even its own marker.
+ * Preventing execLeafStep's "unsupported step kind" error is the isBlockStep
+ * gate's doing, not this arm's - a registered kind never reaches the leaf
+ * switch. Binds `step.kind` rather than `step` - while the registry has one
+ * entry BlockStep is not a union, so only the discriminant narrows to `never`.
  */
 async function execBlockStep(state: ExecState, step: BlockStep, scope: StepScope): Promise<void> {
   switch (step.kind) {
