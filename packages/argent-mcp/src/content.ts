@@ -912,7 +912,13 @@ export async function flowRunToMcpContent(
 
     // Structured diagnosis, rendered in one section after the summary so the
     // step list stays a scannable timeline. Absent on older tool-servers.
-    if (isRecord(step.failure)) failures.push({ num, step, failure: step.failure });
+    //
+    // Not for narration: an echo has no step number, so a `failure` on one —
+    // which no honest server sends, since echo only ever passes or skips —
+    // would head its block with the PREVIOUS step's number, or with 0 before
+    // any real step has run. The CLI's `renderFailures` drops them for the same
+    // reason.
+    if (!isEcho && isRecord(step.failure)) failures.push({ num, step, failure: step.failure });
   }
 
   if (result.ok !== undefined) {

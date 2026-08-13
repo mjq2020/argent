@@ -1414,6 +1414,32 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     expect(block).not.toContain("screen:");
   });
 
+  it("renders no failure block for a failure a hostile server hung on narration", async () => {
+    // Echo takes no step number, so a `failure` on one — which the runner never
+    // produces, since echo only passes or skips — would head its block with the
+    // previous step's number, or with 0 before any real step has run. The CLI
+    // drops them for the same reason.
+    const input: FlowExecuteResult = {
+      flow: "hostile",
+      ok: false,
+      steps: [
+        {
+          index: 0,
+          kind: "echo",
+          status: "pass",
+          message: "narration",
+          failure: wireFailure({ code: "selector-not-found", message: "impossible" }),
+        },
+      ],
+    };
+
+    const rendered = texts(await flowRunToMcpContent(input)).join("\n");
+
+    expect(rendered).toContain("› ✓ narration");
+    expect(rendered).not.toContain("Failures:");
+    expect(rendered).not.toContain("0)");
+  });
+
   it("pins the whole failure block, line for line", async () => {
     // Every other assertion in this section is `toContain`, so an injected
     // extra line — or a slot silently dropped — survives the suite. One
