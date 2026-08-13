@@ -35,6 +35,8 @@ interface FakeEl {
   shadowRoot?: { activeElement: FakeEl | null } | null;
   contentDocument?: FakeDoc | null;
   validity?: { badInput: boolean };
+  /** The field's own cap, reflected as -1 when the attribute is absent. */
+  maxLength?: number;
   /** The element's own root — a Document or an open ShadowRoot. */
   getRootNode?: () => { activeElement: FakeEl | null } | null;
   /** The document the element lives in, for the frame-chain focus walk. */
@@ -710,6 +712,22 @@ describe("chromium clear — release probe", () => {
       [HANDLE]: { tagName: "INPUT", value: "", isConnected: true, validity: { badInput: true } },
     });
     expect(result.length).toBeGreaterThan(0);
+  });
+
+  it("reports a field that is FULL at its own maxlength", () => {
+    // What tells a segmented OTP / PIN box — which holds 1 of N by design —
+    // from a field that lost the rest of the value to a split. `maxLength`
+    // reflects as -1 when the attribute is absent, so no cap must not read as a
+    // cap of nothing.
+    const full = { tagName: "INPUT", value: "9", maxLength: 1, isConnected: true };
+    const room = { tagName: "INPUT", value: "9", maxLength: 6, isConnected: true };
+    const uncapped = { tagName: "INPUT", value: "", maxLength: -1, isConnected: true };
+
+    expect(release({ [HANDLE]: full }).result.full).toBe(true);
+    expect(release({ [HANDLE]: room }).result.full).toBe(false);
+    expect(release({ [HANDLE]: uncapped }).result.full).toBe(false);
+    // A contenteditable has no `maxlength` to be full at.
+    expect(release({ [HANDLE]: editable(textNode("hi")) }).result.full).toBe(false);
   });
 
   it("flags a password field so the failure message reports no count", () => {

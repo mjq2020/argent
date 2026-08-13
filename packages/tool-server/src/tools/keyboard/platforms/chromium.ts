@@ -206,7 +206,19 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     if (handle && descs.length > 0 && !textMovesFocus) {
       const after = await releaseTarget();
       const landed = after?.length ?? 0;
-      if (after?.tracked && after.focused === false && landed < descs.length) {
+      // A field at its own `maxlength` is the third exclusion, and the one the
+      // comment above got wrong about the OTP shape: the pattern it was measured
+      // against is the SINGLE-field variant, where the whole value fits and
+      // `landed == descs.length` saves it. A SEGMENTED one — six `<input
+      // maxlength="1">` boxes with the standard auto-advance handler, which is
+      // how essentially every 2FA code, PIN and split card number is built —
+      // holds 1 of N BY DESIGN, so the corroboration confirmed the split instead
+      // of vetoing it (measured on Chrome 151, 3/3: the boxes read the requested
+      // code exactly, the stale digit gone, and the tool told the caller the code
+      // was mis-entered). A field that cannot hold another character explains its
+      // own short value; that also covers the plain `maxlength` truncation the
+      // comment above admits it cannot separate from a split.
+      if (after?.tracked && after.focused === false && landed < descs.length && !after.full) {
         // Both halves of the count are credential material: the field's own
         // length when it is a password input, and the REQUEST's length when the
         // text came from a `{{secret:…}}` placeholder — which a plain

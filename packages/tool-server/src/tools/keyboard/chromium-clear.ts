@@ -590,12 +590,19 @@ export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
     // Un-stamp on the release pass only, so the stamps outlive the verdict read
     // exactly as long as the parked element itself does.
     const residue = countStampedEmbeds(el, form, ${keep ? "false" : "true"});
+    // \`maxLength\` reflects as -1 when the attribute is absent, so a negative
+    // limit means "no limit" rather than "holds nothing".
+    const limit = form && typeof el.maxLength === "number" ? el.maxLength : -1;
     return JSON.stringify({
       tracked: true,
       focused,
       residue,
       secret: (el.type || "") === "password",
       length: bad ? Math.max(1, value.length) : value.length,
+      // A boolean, not the limit: the caller only needs to know whether the
+      // field's own cap explains a short value, and a password field's capacity
+      // is one more thing about a credential not to echo back.
+      full: limit >= 0 && value.length >= limit,
     });
   } catch (e) {
     return JSON.stringify({ tracked: false });
@@ -626,6 +633,13 @@ export interface ClearedTarget {
    * stamped ones, not a fresh count. See `countEmbedsFns`.
    */
   residue?: number;
+  /**
+   * The field is at its own `maxlength`, so it could not hold another character
+   * whatever else happened — which is what makes a value shorter than the
+   * request its own explanation rather than evidence of a split. See the guard
+   * in `platforms/chromium.ts`.
+   */
+  full?: boolean;
 }
 
 /**

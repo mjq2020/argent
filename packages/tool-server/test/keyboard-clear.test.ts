@@ -1628,6 +1628,45 @@ describe("keyboard clear — Chromium (CDP)", () => {
     }
   });
 
+  it("does not call a SEGMENTED input's own layout a split", async () => {
+    // The OTP shape the exclusion above was measured against is the
+    // single-field one, where the whole value fits and the count check saves it.
+    // A segmented one — six `<input maxlength="1">` boxes with the standard
+    // auto-advance handler — holds 1 of 6 by design, so the count check
+    // CONFIRMED the split: measured on Chrome 151, 3/3, the six boxes held the
+    // requested code exactly while the tool told the caller it was mis-entered
+    // and invited a retype into boxes that were already right.
+    const { api, events } = splitApi({
+      tracked: true,
+      length: 1,
+      focused: false,
+      full: true,
+    });
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, text: "123456", delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(result).toMatchObject({ typed: "123456", keys: 6, cleared: true });
+    expect(events.filter((e) => e.type === "char")).toHaveLength(6);
+  });
+
+  it("still calls it a split when the short field could have held more", async () => {
+    // The other side of the same exclusion: `full` is what makes the shortfall
+    // its own explanation, so a field with room left keeps the failure.
+    const { api } = splitApi({ tracked: true, length: 1, focused: false, full: false });
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: "123456", delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/only 1 of the 6 character\(s\)/);
+  });
+
   it.each(["\n", "\r", "\t"])(
     "does not call the same focus move a split when it arrives inside `text` (%j)",
     async (char) => {
