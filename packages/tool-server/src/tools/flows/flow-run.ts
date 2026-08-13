@@ -240,8 +240,8 @@ export interface StepReport {
   /** Snapshot-step artifacts (baseline/current/diff) as materializable handles. */
   artifacts?: SnapshotArtifacts;
   /**
-   * Nesting depth for display: omitted at top level, +1 inside each block
-   * directive's expanded steps (a `when:` block's guarded steps, a `run:`
+   * Nesting depth for display: omitted at top level, +1 inside each nesting
+   * step's expanded steps (a `when:` block's guarded steps, a `run:`
    * fragment's steps). Renderers indent by it without knowing which directives
    * nest — the report is a flat list with no block-end marker, so depth cannot
    * be reconstructed downstream.
