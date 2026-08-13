@@ -57,10 +57,17 @@ const zodSchema = z.object({
     // backend honours (`simulator-server-keys.ts`) — a client that hangs up
     // releases the chain within about one keypress. 5s per keypress is still far
     // past any real cadence, which is what makes it a sane ceiling.
+    //
+    // A bare `.max()`, deliberately NOT the bound `await-ui-element` puts on
+    // `pollIntervalMs` (`.int().min(50).max(5000)`): a cadence has no floor worth
+    // enforcing — 0 means "as fast as the transport goes", which is what this
+    // PR's own Chromium tests pass — and a fractional or negative value is
+    // harmless to `setTimeout`. Verified: `delayMs: -1000` and `delayMs: 2.5` are
+    // both accepted, only `5001` is rejected.
     .max(5000)
     .optional()
     .describe(
-      "Delay in ms between key presses (default 50, max 5000). Ignored on Android phones/tablets (typed via `adb input text`, which has no per-key cadence), on Vega (text/keys injected in a single shot), and on TV targets (Apple TV / Android TV type the whole string at the daemon's own cadence)."
+      "Delay in ms between key presses (default 50, max 5000). Ignored on Android phones/tablets (typed via `adb input text`, which has no per-key cadence), on Vega (text/keys injected in a single shot), and on TV targets (Apple TV / Android TV type the whole string at the daemon's own cadence). On Chromium it ALSO floors how long a `clear` waits before reading the field back (the wait is the larger of this and 50ms), so a slow cadence adds that wait once per clear."
     ),
 });
 
