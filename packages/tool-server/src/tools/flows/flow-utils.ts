@@ -744,13 +744,13 @@ export type FlowFile = {
  * off the device, and dead in a run while `when`, whose header already
  * classifies device-requiring, is the only block kind.
  *
- * Five sites asked `kind === "when"` directly before this existed — the five in
- * the runner; `flowRequiresDevice`'s walk arrived after the predicate and never
- * had to. A second block directive would have had to remember all five,
- * and a forgotten one drops a whole block from the report — or from the
- * preflight — silently. Now it is one case here — and it is the same case the
- * PARSER exempts from the single-key sibling check, because the kinds come from
- * {@link BLOCK_DIRECTIVE_KEYS} rather than being restated.
+ * Six sites asked `kind === "when"` directly before this existed: five for the
+ * children, one for the dispatch (now {@link isBlockStep}/`execBlockStep`);
+ * `flowRequiresDevice`'s walk arrived after the predicate and never had to. A
+ * second block directive would have had to remember all six; a forgotten one
+ * drops a whole block from the report or preflight silently. Now both are one
+ * case here, the same case the PARSER exempts from the single-key sibling
+ * check: the kinds come from {@link BLOCK_DIRECTIVE_KEYS}, not restated.
  */
 export function blockSteps(step: FlowStep): FlowStep[] | undefined {
   return isBlockStep(step) ? (step.steps satisfies FlowStep[]) : undefined;
