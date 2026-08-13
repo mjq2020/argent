@@ -175,6 +175,12 @@ describe("when: parse/serialize", () => {
     ).toThrow(/no other keys/i);
   });
 
+  // Hand-written, and ONE copy for the three tests below: the prefix names the
+  // registered block directives, so a second one must update this literal
+  // consciously. Deriving it from BLOCK_DIRECTIVE_KEYS would move it with the
+  // source and pin nothing; restating it per test made that three edits to find.
+  const DEPTH_CAP_MESSAGE = "`when:` blocks nest deeper than 20 levels";
+
   it("rejects a cyclic YAML alias on when steps with a structured error", () => {
     // The yaml library materializes `steps: *s` as a cyclic object; without
     // the depth cap the parser would recurse forever and escape as a raw
@@ -185,14 +191,11 @@ describe("when: parse/serialize", () => {
     } catch (err) {
       thrown = err;
     }
-    // The whole message is pinned, not only the "nest deeper than" half: the
-    // prefix names the registered block directives (a literal on purpose - it
-    // must be updated consciously when a new directive registers, not drift
-    // with the source), and the alias hint is what points the author at the
-    // actual mistake.
+    // The only site that pins the whole message: the alias hint is what points
+    // the author at the actual mistake here, so it is part of the contract.
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).message).toContain(
-      "`when:` blocks nest deeper than 20 levels — check for a cyclic YAML alias (`steps: &s … steps: *s`)"
+      `${DEPTH_CAP_MESSAGE} — check for a cyclic YAML alias (\`steps: &s … steps: *s\`)`
     );
     // A raw RangeError would carry no signal — this is what makes it structured.
     const signal = getFailureSignal(thrown);
@@ -229,7 +232,7 @@ describe("when: parse/serialize", () => {
       thrown = err;
     }
     expect(thrown).toBeInstanceOf(Error); // a raised cap would leave this unset
-    expect((thrown as Error).message).toContain("`when:` blocks nest deeper than 20 levels");
+    expect((thrown as Error).message).toContain(DEPTH_CAP_MESSAGE);
     expect(getFailureSignal(thrown)?.error_code).toBe(FAILURE_CODES.FLOW_ENTRY_UNRECOGNIZED);
   });
 
@@ -260,7 +263,7 @@ describe("when: parse/serialize", () => {
         thrown = err;
       }
       expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toContain("`when:` blocks nest deeper than 20 levels");
+      expect((thrown as Error).message).toContain(DEPTH_CAP_MESSAGE);
       // Not just "the depth error is in there": the shallower check must not be
       // what answered, which is the whole difference the early call makes.
       expect((thrown as Error).message).not.toContain(shallow);
