@@ -429,7 +429,47 @@ describe("keyboard backends — input rejection is a 400 with a uniform telemetr
     expect(err.message).toMatch(/PARTLY emptied/);
     expect(err.message).not.toMatch(/input keyevent/);
     // The count is the field's measured length plus the public margin.
-    expect(err.message).toMatch(/\b12 backspaces were sent\b/);
+    expect(err.message).toMatch(/up to 12 backspaces were sent/);
+  });
+
+  it("android: an interrupted delete run does not assert a state it cannot know", async () => {
+    // The same catch covers a cause that stopped the run before anything went
+    // out — the device went offline, adb lost authorisation — where the field is
+    // untouched. Only the `timeout` cause was ever exercised, so the message was
+    // free to assert "the focused field IS partly emptied" for a run that never
+    // started.
+    adbShell.mockReset();
+    adbExecOutBinary.mockReset();
+    adbShell.mockImplementationOnce(async () => "Usage: input …");
+    adbExecOutBinary.mockImplementationOnce(async () =>
+      Buffer.from(
+        `<hierarchy><node text="abcd" class="android.widget.EditText" ` +
+          `password="false" focused="true" /></hierarchy>`
+      )
+    );
+    adbShell.mockImplementationOnce(async () => {
+      throw new FailureError("adb: device 'emulator-5554' not found", {
+        error_code: FAILURE_CODES.ANDROID_ADB_COMMAND_FAILED,
+        failure_stage: "android_adb_command",
+        failure_area: "tool_server",
+        error_kind: "subprocess",
+      });
+    });
+
+    const err = await injectAndroidClear("emulator-5554").then(
+      () => {
+        throw new Error("expected the call to reject, but it resolved");
+      },
+      (e: unknown) => e as Error
+    );
+
+    expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.KEYBOARD_CLEAR_INTERRUPTED);
+    // The kind of a cause that is not a timeout is carried through as well.
+    expect(getFailureSignal(err)?.error_kind).toBe("subprocess");
+    expect(err.message).toMatch(/may be PARTLY emptied/);
+    expect(err.message).toMatch(/up to 12 backspaces/);
+    // The remedy still stands — it is the assertion that was wrong.
+    expect(err.message).toMatch(/Read the field's actual contents/);
   });
 
   it("android: an interrupted delete run says nothing about a SECRET field's length", async () => {

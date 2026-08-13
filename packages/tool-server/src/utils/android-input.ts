@@ -566,10 +566,15 @@ async function clearByDeleting(
     // sibling rather than reasoning separately about a blind count.
     const sent = options.secretText
       ? `as many backspaces as the field's length needed were sent`
-      : `${keys} backspaces were sent`;
+      : `up to ${keys} backspaces were sent`;
+    // "MAY be", not "is": the run is killed part-way on a timeout, but the same
+    // catch also covers a cause that stopped it before anything went out at all
+    // (the device went offline, adb lost authorisation), where the field is
+    // untouched. The remedy is the same either way — read it, do not assume —
+    // and asserting a state that did not happen is what the message must not do.
     throw new FailureError(
-      `keyboard clear: the delete run did not finish on this device, so the focused field is ` +
-        `PARTLY emptied — ${sent} and an unknown number of them landed. ` +
+      `keyboard clear: the delete run did not finish on this device, so the focused field may ` +
+        `be PARTLY emptied — ${sent} and an unknown number of them landed. ` +
         `Nothing was typed. Read the field's actual contents before continuing; do not treat ` +
         `it as unchanged, and do not send a replacement that assumes it is empty.`,
       {
