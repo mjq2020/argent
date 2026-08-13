@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { buildJUnitXml, parseReporterSpec, xmlEscape } from "../src/flow-report.js";
 import { FlagParseException } from "../src/flag-parser.js";
 import type { FlowReport, FlowStepFailure, StepReport } from "../src/flow.js";
@@ -75,6 +76,30 @@ function mkReport(overrides: Partial<FlowReport> = {}): FlowReport {
     steps: MIXED_STEPS,
     ...overrides,
   };
+}
+
+/**
+ * Parse the document rather than grepping it. Every JUnit assertion here used
+ * to be `toContain`, which is satisfied by a fragment sitting ANYWHERE — so an
+ * `<error>` in a position no schema allows passed the suite unnoticed.
+ */
+type XmlNode = Record<string, unknown>;
+const parser = new XMLParser({ ignoreAttributes: false, isArray: (name) => name === "testcase" });
+
+function parseSuites(xml: string): XmlNode[] {
+  expect(XMLValidator.validate(xml), `not well-formed XML:\n${xml}`).toBe(true);
+  const doc = parser.parse(xml) as XmlNode;
+  const suites = (doc["testsuites"] as XmlNode)["testsuite"];
+  return Array.isArray(suites) ? (suites as XmlNode[]) : [suites as XmlNode];
+}
+
+function testcases(suite: XmlNode): XmlNode[] {
+  return (suite["testcase"] as XmlNode[] | undefined) ?? [];
+}
+
+/** An XML attribute is always text; the counters are read as the numbers they mean. */
+function attrNumber(node: XmlNode, name: string): number {
+  return Number(node[`@_${name}`]);
 }
 
 describe("parseReporterSpec", () => {
@@ -262,9 +287,16 @@ describe("buildJUnitXml", () => {
     expect(xml).not.toContain('<error type="selector-not-found"');
   });
 
-  it("emits a suite-level <error> for a cancelled run with no failing step", () => {
+  it("wraps a cancelled run's <error> in a testcase, as every consumer expects", () => {
     // ok:false does not imply a failing step. Reporting the suite as clean
     // would show green in the checks UI next to a red build.
+    //
+    // The `<error>` used to sit directly under `<testsuite>`, where JUnit's
+    // content model (`properties?, testcase*, system-out?, system-err?`) does
+    // not allow it — so a validating consumer rejected the whole document,
+    // which in CI means no annotations at all out of a file that exists and
+    // looks plausible. pytest and surefire both wrap it in a synthetic
+    // testcase; so does this.
     const xml = buildJUnitXml(
       mkReport({
         ok: false,
@@ -277,12 +309,75 @@ describe("buildJUnitXml", () => {
         ],
       })
     );
-    expect(xml).toContain(
-      '<error type="run-incomplete" message="run cancelled before it completed"/>'
-    );
-    // The attribute agrees with the element that is actually present.
-    expect(xml).toContain('errors="1"');
+    const suite = parseSuites(xml)[0]!;
+    expect(suite["error"], "an <error> directly under <testsuite> is illegal").toBeUndefined();
+    const incomplete = testcases(suite).find((c) => c["@_name"] === "run")!;
+    expect(incomplete["error"]).toMatchObject({
+      "@_type": "run-incomplete",
+      "@_message": "run cancelled before it completed",
+    });
+    // The attribute agrees with the elements that are actually present.
+    expect(attrNumber(suite, "errors")).toBe(1);
     expect(xml).toContain('<skipped message="run aborted"/>');
+  });
+
+  it("counts the synthetic testcase, so a rejected flow is never an empty green report", () => {
+    // `tests` counts steps, and a rejected or cancelled flow has none — so the
+    // document carried `tests="0"` with zero testcases. Any consumer that
+    // derives results from testcases, which is most of them, read that as an
+    // empty PASSING report for a run that exited 1.
+    const xml = buildJUnitXml(
+      {
+        flow: "broken",
+        device: "",
+        ok: false,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        errored: 0,
+        steps: [],
+      },
+      { incompleteMessage: 'unknown step kind "tapp"' }
+    );
+    const suite = parseSuites(xml)[0]!;
+    expect(attrNumber(suite, "tests")).toBe(1);
+    expect(testcases(suite)).toHaveLength(1);
+  });
+
+  it("keeps every document well-formed and structurally valid", () => {
+    // Every assertion in this file was `toContain` or a regex, which passes
+    // wherever in the document a fragment happens to sit — which is exactly how
+    // an element in an illegal position survived the suite.
+    for (const xml of [
+      buildJUnitXml(mkReport()),
+      buildJUnitXml(mkReport({ ok: false, aborted: true, failed: 0, errored: 0, steps: [] })),
+      buildJUnitXml({
+        flow: "broken",
+        device: "",
+        ok: false,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        errored: 0,
+        steps: [],
+      }),
+    ]) {
+      expect(XMLValidator.validate(xml)).toBe(true);
+      for (const suite of parseSuites(xml)) {
+        // The whole content model in one assertion: nothing but the four legal
+        // children, and the counters agree with the elements below them.
+        expect(
+          Object.keys(suite)
+            .filter((k) => !k.startsWith("@_"))
+            .sort()
+        ).toEqual(expect.arrayContaining([]));
+        for (const key of Object.keys(suite)) {
+          if (key.startsWith("@_")) continue;
+          expect(["properties", "testcase", "system-out", "system-err"]).toContain(key);
+        }
+        expect(attrNumber(suite, "tests")).toBe(testcases(suite).length);
+      }
+    }
   });
 
   it("falls back to reason-only output for a pre-diagnostics tool-server", () => {

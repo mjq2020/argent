@@ -1756,9 +1756,13 @@ describe("argent flow run <dir>", () => {
       );
 
       const xml = await fsp.readFile(dest, "utf8");
-      // The document's counters agree with the exit code.
-      expect(xml).toContain('<testsuites name="argent flow" tests="1" failures="0" errors="1"');
+      // The document's counters agree with the exit code — two testcases, the
+      // passing flow's one step and the rejected flow's synthetic `run`.
+      expect(xml).toContain('<testsuites name="argent flow" tests="2" failures="0" errors="1"');
       expect(xml).toContain('<testsuite name="b-checkout"');
+      // The rejection is a testcase, not a bare suite-level element: an
+      // `<error>` directly under `<testsuite>` is legal in no JUnit schema.
+      expect(xml).toContain('<testcase classname="b-checkout" name="run">');
       // ...and the suite says WHY, rather than "the run failed with no failing step".
       expect(xml).toContain("unknown step kind");
     } finally {

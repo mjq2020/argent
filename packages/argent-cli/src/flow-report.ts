@@ -736,6 +736,13 @@ export function secretArtifactWarning(s: StepReport, f: NormalizedFailure): stri
   );
 }
 
+/**
+ * The synthetic testcase a run with no failing step reports under. Named for
+ * the WHOLE run rather than a step, and distinct from every real testcase name
+ * (which is `NN <label>`), so a reader can tell the two apart at a glance.
+ */
+const INCOMPLETE_TESTCASE_NAME = "run";
+
 /** One flow's contribution to the document's `<testsuites>` counters. */
 interface SuiteTotals {
   tests: number;
@@ -785,7 +792,11 @@ function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; tot
     meta.timestamp ?? (startedAt !== undefined ? new Date(startedAt).toISOString() : undefined);
 
   const totals: SuiteTotals = {
-    tests: counted.length,
+    // The synthetic testcase below counts, or a rejected flow — which has no
+    // steps — shipped `tests="0"` with zero `<testcase>` elements. Any consumer
+    // that derives results from testcases, which is most of them, read that as
+    // an empty, green report for a build that exited 1.
+    tests: counted.length + (incomplete ? 1 : 0),
     failures,
     errors: errors + (incomplete ? 1 : 0),
     skipped,
@@ -820,14 +831,28 @@ function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; tot
   }
 
   if (incomplete) {
+    // Wrapped in a synthetic `<testcase>`, as pytest and surefire emit it.
+    // JUnit's content model for `testsuite` is `properties?, testcase*,
+    // system-out?, system-err?` — an `error` directly under the suite is legal
+    // nowhere, so every schema-validating consumer rejected the whole document,
+    // which in CI means no annotations at all out of a file that exists and
+    // looks plausible. No `time`: this case was never measured, and charging it
+    // the suite's wall clock would double-count against the real testcases.
     out.push(
-      `    <error type="run-incomplete" message="${xmlEscape(
+      `    <testcase${attrs([
+        ["classname", flow],
+        ["name", INCOMPLETE_TESTCASE_NAME],
+      ])}>`
+    );
+    out.push(
+      `      <error type="run-incomplete" message="${xmlEscape(
         wireText(meta.incompleteMessage) ??
           (report.aborted
             ? "run cancelled before it completed"
             : "the run failed with no failing step")
       )}"/>`
     );
+    out.push("    </testcase>");
   }
 
   let ordinal = 0;
