@@ -1822,6 +1822,33 @@ describe("argent flow run <dir>", () => {
     expect(out).toContain("FAIL — 3 flows: 1 passed, 1 failed, 1 skipped");
   });
 
+  it("keeps the flows a stopped batch skipped in the JUnit document", async () => {
+    // The terminal summary counts them; the XML used to omit them entirely and
+    // keep `skipped="0"`, so the two surfaces disagreed about the same run.
+    // They are neither failures nor errors — JUnit has `<skipped/>` for this.
+    const dir = await fsp.mkdtemp(path.join(tmpdir(), "flow-batch-skipped-"));
+    try {
+      const dest = path.join(dir, "junit.xml");
+      toolsClientMock.callTool
+        .mockResolvedValueOnce({ data: report({ flow: "a-login" }) })
+        .mockRejectedValueOnce(new Error("tool-server unreachable"));
+
+      await expect(
+        flow(["run", flowsDir, "-r", "--reporter", `junit:${dest}`], opts)
+      ).rejects.toThrow("process.exit:1");
+
+      const xml = await fsp.readFile(dest, "utf8");
+      expect(xml).toContain('<testsuite name="c-search"');
+      expect(xml).toContain("not run — the batch stopped at an earlier flow");
+      // The document's counter agrees with the terminal's "1 skipped".
+      expect(xml).toMatch(/<testsuites [^>]*skipped="1"/);
+      // A skipped flow is not an errored one.
+      expect(xml).toMatch(/<testsuites [^>]*errors="1"/);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("continues past a flow the tool-server rejects as invalid", async () => {
     toolsClientMock.callTool
       .mockRejectedValueOnce(

@@ -8,9 +8,8 @@ import {
   settleTree,
   invokeOnDevice,
   waitForFrame,
-  offscreenHint,
+  selectorMiss,
   createTreeReadSink,
-  selectorMissEvidence,
   DEFAULT_ACTION_TIMEOUT_MS,
   type ActionEnv,
 } from "./flow-actions";
@@ -206,11 +205,10 @@ export async function runSnapshot(
     if (frame === undefined) {
       return {
         status: "fail",
-        reason: offscreenHint(opts.cropOn),
         // A cropOn miss is a SELECTOR failure, not a snapshot one — it is the
         // same not-found/not-visible split every directive gets, so it earns
-        // the same candidates and the same codes.
-        evidence: selectorMissEvidence(opts.cropOn, sink, DEFAULT_ACTION_TIMEOUT_MS),
+        // the same candidates, the same codes and the same prose.
+        ...selectorMiss(opts.cropOn, sink, DEFAULT_ACTION_TIMEOUT_MS),
       };
     }
     cropFrame = frame;

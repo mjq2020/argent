@@ -1656,25 +1656,32 @@ async function runFlowDirectory(
     console.log(`\n${renderBatchSummary(counts)}`);
   }
 
-  // Every flow the batch FAILED becomes a `<testsuite>`, with or without a
+  // EVERY flow the batch touched becomes a `<testsuite>`, with or without a
   // report. A flow the tool-server rejected before it ran (bad YAML, an
   // unknown step key) produces none — and filtering those out left the file
   // saying `failures="0"` for a run that exited 1, which is the one thing a
   // CI artifact must never do. An empty suite trips `junitSuite`'s own
   // `incomplete` branch, so it reports as an error carrying the real reason.
-  const reported = results
-    .filter((r) => r.report !== undefined || r.status === "fail")
-    .map((r) => ({
-      report: r.report ?? rejectedFlowReport(r.path),
-      meta: {
-        platform: args.platform,
-        // The flow's real path, keyed the way the batch addressed it — a
-        // recursive run has several flows and `argent.flowFile` is what tells
-        // a CI reader which one a suite belongs to.
-        flowFile: path.join(dir, r.path),
-        ...(r.report === undefined && r.error !== undefined ? { incompleteMessage: r.error } : {}),
-      },
-    }));
+  //
+  // Flows the batch SKIPPED after a hard stop are reportless too, and they used
+  // to be filtered out with them: the terminal summary counted them as skipped
+  // while the XML omitted them entirely and kept `skipped="0"`. They are
+  // neither failures nor errors, and JUnit has `<skipped/>` for exactly this,
+  // so they get a suite carrying that instead.
+  const reported = results.map((r) => ({
+    report: r.report ?? rejectedFlowReport(r.path),
+    meta: {
+      platform: args.platform,
+      // The flow's real path, keyed the way the batch addressed it — a
+      // recursive run has several flows and `argent.flowFile` is what tells
+      // a CI reader which one a suite belongs to.
+      flowFile: path.join(dir, r.path),
+      ...(r.status === "skip" && r.report === undefined
+        ? { notRunMessage: "not run — the batch stopped at an earlier flow" }
+        : {}),
+      ...(r.report === undefined && r.error !== undefined ? { incompleteMessage: r.error } : {}),
+    },
+  }));
   await writeReporterFiles(reported, args.reporter);
 
   const indeterminate = reported.some((r) => hasIndeterminateFailure(r.report));

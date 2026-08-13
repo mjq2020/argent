@@ -97,6 +97,35 @@ describe("rankCandidates", () => {
     });
   });
 
+  it("never offers a hidden node a selector that resolves to a different element", () => {
+    // The retargeting the whole `resolvesToNode` check exists to prevent,
+    // reached through the branch meant to be the lenient one: a hidden node
+    // only had to be AMONG the derived selector's matches, so a ghost sharing
+    // its label with a visible element elsewhere produced a row describing the
+    // GHOST's rectangle beside a selector that lands on the other one.
+    const ghost = n({
+      role: "AXStaticText",
+      label: "Check out",
+      frame: { x: 0.5, y: 0.9, width: 0, height: 0 },
+    });
+    const elsewhere = n({
+      role: "AXStaticText",
+      label: "Check out",
+      frame: { x: 0.1, y: 0.2, width: 0.4, height: 0.05 },
+    });
+    const tree = screen([ghost, elsewhere]);
+
+    const { candidates } = rankCandidates(tree, { text: "Checkout" });
+
+    // Whatever survives, no row may pair the ghost's zero-area rectangle with
+    // a selector that resolves somewhere else.
+    for (const c of candidates) {
+      if (c.node.frame.width === 0 && c.node.frame.height === 0) {
+        expect(c.selectorYaml).toBeUndefined();
+      }
+    }
+  });
+
   it("never suggests an element the selector already matched", () => {
     // "Which element did you MEAN instead" has no answer that is the element
     // you already named. A zero-area exact match is reported as

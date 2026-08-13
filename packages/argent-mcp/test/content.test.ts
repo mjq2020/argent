@@ -919,7 +919,7 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     );
     // Frame centre: x + width/2, y + height/2 — the coordinates gesture-tap takes.
     expect(lines).toContain(
-      '       0.90  "Check out 0"  button  id=cta-0  at 0.50, 0.23  (text-near)  → { id: cta-0 }'
+      '       0.90  "Check out 0"  button  id=cta-0  visible  at 0.50, 0.23  (text-near)  → { id: cta-0 }'
     );
     const rendered = lines.filter((l) => l.trimStart().startsWith("0."));
     expect(rendered).toHaveLength(5);
@@ -1082,7 +1082,11 @@ describe("flowRunToMcpContent failure diagnostics", () => {
         ],
       })
     ).join("\n");
-    expect(rendered).toContain('match: "Check out"  button  id=cta  at 0.50, 0.50');
+    // `hidden` is the WHOLE diagnosis for this shape, and it used to be the one
+    // marker the MCP row dropped — leaving a confident tap centre beside an
+    // element with no area. The CLI derives all three states from the frame;
+    // this row now derives them the same way.
+    expect(rendered).toContain('match: "Check out"  button  id=cta  hidden  at 0.50, 0.50');
   });
 
   it("inlines NO snapshot image when the run typed a secret", async () => {

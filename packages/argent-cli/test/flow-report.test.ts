@@ -130,6 +130,11 @@ describe("parseReporterSpec", () => {
     expect(() => parseReporterSpec("tap:out.tap")).toThrow(/unknown format "tap"/);
     expect(() => parseReporterSpec("JUnit:out.xml")).toThrow(/unknown format "JUnit"/);
     expect(() => parseReporterSpec("default:out.xml")).toThrow("does not take a path");
+    // A bare/blank trailer is still a path separator. `rest` is trimmed to ""
+    // for these two, so testing it let them through while `default::` and
+    // `default:x` correctly threw.
+    expect(() => parseReporterSpec("default:")).toThrow("does not take a path");
+    expect(() => parseReporterSpec("default:   ")).toThrow("does not take a path");
   });
 });
 
@@ -215,7 +220,9 @@ describe("buildJUnitXml", () => {
         "durationMs: 5002",
         "code: selector-not-found</system-out>",
         "    </testcase>",
-        '    <testcase classname="checkout" name="04 assert visible &quot;Order placed&quot;" time="0.000">',
+        // No `time`: this step was never measured, which is not the same
+        // claim as "took 0.000s".
+        '    <testcase classname="checkout" name="04 assert visible &quot;Order placed&quot;">',
         '      <skipped message="run stopped at the first failure"/>',
         "    </testcase>",
         '    <testcase classname="checkout" name="05 tool screenshot" time="0.012">',
@@ -344,6 +351,56 @@ describe("buildJUnitXml", () => {
     expect(testcases(suite)).toHaveLength(1);
   });
 
+  it("keeps time= a decimal for an absurd duration, and omits it when unmeasured", () => {
+    // `toFixed` switches to exponential notation at 1e21, which is not a valid
+    // `xs:decimal` — and `wireFinite` placed no magnitude bound on `durationMs`,
+    // even though `wireTimestamp` exists to bound exactly this class of value
+    // for `startedAt`.
+    const xml = buildJUnitXml(
+      mkReport({
+        durationMs: 1e25,
+        steps: [
+          { index: 0, kind: "tap", status: "pass", durationMs: 1e25 },
+          { index: 1, kind: "tap", status: "pass" },
+        ],
+      })
+    );
+    expect(xml).not.toMatch(/e\+/);
+    for (const [, value] of xml.matchAll(/time="([^"]*)"/g)) {
+      expect(value).toMatch(/^\d+\.\d{3}$/);
+    }
+    // The unmeasured step carries no `time` at all.
+    expect(xml).toContain('<testcase classname="checkout" name="02 tap"/>');
+  });
+
+  it("gives a flow the batch never ran a skipped suite instead of dropping it", () => {
+    // A stopped batch reports the remaining flows as skipped in the terminal
+    // summary. They carry no report, so they used to be filtered out of the
+    // document entirely — leaving `skipped="0"` for a run that said N skipped.
+    const xml = buildJUnitXml(
+      {
+        flow: "c-later",
+        device: "",
+        ok: false,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        errored: 0,
+        steps: [],
+      },
+      { notRunMessage: "not run — the batch stopped at an earlier flow" }
+    );
+    const suite = parseSuites(xml)[0]!;
+    expect(attrNumber(suite, "skipped")).toBe(1);
+    expect(attrNumber(suite, "errors")).toBe(0);
+    const only = testcases(suite)[0]!;
+    expect(only["skipped"]).toMatchObject({
+      "@_message": "not run — the batch stopped at an earlier flow",
+    });
+    // NOT an error: the flow did not fail, it never ran.
+    expect(xml).not.toContain("run-incomplete");
+  });
+
   it("keeps every document well-formed and structurally valid", () => {
     // Every assertion in this file was `toContain` or a regex, which passes
     // wherever in the document a fragment happens to sit — which is exactly how
@@ -388,9 +445,14 @@ describe("buildJUnitXml", () => {
         ],
       })
     );
-    // No failure object and no durationMs: type is the status, time is zero.
+    // No failure object and no durationMs: type is the status, and the `time`
+    // attribute is ABSENT rather than 0.000 — "never measured" is a different
+    // claim from "took no time", and the attribute is optional in JUnit.
     expect(xml).toContain('<failure type="fail" message="never visible">never visible</failure>');
-    expect(xml).toContain('time="0.000"');
+    expect(xml).toContain('<testcase classname="checkout" name="01 assert &quot;Done&quot;">');
+    expect(xml).not.toMatch(/<testcase[^>]*time=/);
+    // ...and the system-out reports no fabricated duration either.
+    expect(xml).not.toContain("durationMs: 0");
     // A skip with no reason and no failing sibling stays unannotated.
     const clean = buildJUnitXml(
       mkReport({ ok: true, steps: [{ index: 0, kind: "tap", status: "skip" }] })

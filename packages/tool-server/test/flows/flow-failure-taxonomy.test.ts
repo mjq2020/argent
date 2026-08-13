@@ -302,6 +302,32 @@ describe("selector codes", () => {
     expect(failure.actual?.invisibleMatches?.[0]?.identifier).toBe("ghost");
   });
 
+  it("does not tell the operator to scroll to something scrolling cannot reveal", async () => {
+    // The reason came from `offscreenHint` unconditionally — "if it is
+    // off-screen, add a scroll-to step" — while the hint printed two lines
+    // lower said the frame has zero area, which a scroll cannot change. Both
+    // rendered adjacently, so the block advised the one thing it had just
+    // explained could not work. `scrollReachedEnd` already rewrites its own
+    // prose for exactly this split.
+    currentFetch = () => ({
+      tree: screen([n({ identifier: "ghost", frame: { x: 0.5, y: 0.5, width: 0, height: 0 } })]),
+      source: "native-devtools",
+    });
+    await writeFlow("ghost-tap", {
+      executionPrerequisite: "",
+      steps: [{ kind: "tap", selector: { identifier: "ghost" } }],
+    });
+
+    const failure = singleFailure(await run("ghost-tap"));
+
+    expect(failure.code).toBe("selector-not-visible");
+    expect(failure.message).toContain("zero area");
+    expect(failure.message).not.toContain("scroll-to");
+    expect(failure.hint).toContain("zero area");
+    // A tap auto-waits the full action timeout before it can conclude the
+    // frame never appeared.
+  }, 20_000);
+
   it("target-missing: a gesture step carrying neither a selector nor x/y", async () => {
     // Unreachable through a parsed flow — `parseTap` rejects a targetless tap —
     // so the production site is driven directly. Every other code below goes
@@ -337,6 +363,17 @@ describe("assertion codes", () => {
     expect(failure.code).toBe("assert-hidden-unmet");
     expect(failure.determinacy).toBe("determinate");
     expect(failure.message).toMatch(/still visible/);
+    // The element that WAS there is the whole diagnosis, and it is the shape
+    // both renderers document their `match:` slot for. `buildObservation` only
+    // populated `actual.element` for a `text` condition, so this failure
+    // carried `{matchCount:1, visibleMatchCount:1}` and nothing else —
+    // candidates are deliberately suppressed here and bare counts render
+    // nowhere, so the block had no element evidence at all.
+    expect(failure.actual?.element).toMatchObject({ identifier: "spinner" });
+    // No `text`, though: quoting one would invent an expectation this step
+    // never had.
+    expect(failure.actual?.text).toBeUndefined();
+    expect(failure.candidates).toEqual([]);
   });
 
   it("text-mismatch: a literal text expectation that did not hold", async () => {

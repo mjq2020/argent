@@ -148,13 +148,35 @@ export function stepLabel(s: StepReport): string {
  * Negative/NaN durations (wire data) clamp to zero instead of printing junk.
  */
 export function formatDuration(ms: number): string {
-  const finite = wireFinite(ms);
-  return `(${(Math.max(0, finite ?? 0) / 1000).toFixed(1)}s)`;
+  return `(${((wireDuration(ms) ?? 0) / 1000).toFixed(1)}s)`;
 }
 
-/** JUnit's `time` attribute: seconds at 3dp. An untimed step reports 0.000. */
-function junitTime(ms: unknown): string {
-  return (Math.max(0, wireFinite(ms) ?? 0) / 1000).toFixed(3);
+/**
+ * A wire duration that `toFixed` will render as a decimal. Past 1e21 `toFixed`
+ * switches to exponential notation, which is not a valid `xs:decimal` in a
+ * JUnit `time=` attribute and reads as garbage in the terminal — the same class
+ * of wire bound `wireTimestamp` already places on `startedAt`. A day is the
+ * ceiling: anything larger is a broken measurement, not a slow step.
+ */
+const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
+function wireDuration(value: unknown): number | undefined {
+  const n = wireFinite(value);
+  if (n === undefined) return undefined;
+  return Math.min(Math.max(0, n), MAX_DURATION_MS);
+}
+
+/**
+ * JUnit's `time` attribute: seconds at 3dp, or undefined when the duration was
+ * never measured.
+ *
+ * Undefined rather than `0.000`, because the two mean different things and the
+ * attribute is optional: a `when:`/`run:` marker from a pre-timing tool-server
+ * carries no duration at all, and reporting it as "took no time" is a claim
+ * about a measurement nobody made.
+ */
+function junitTime(ms: unknown): string | undefined {
+  const finite = wireDuration(ms);
+  return finite === undefined ? undefined : (finite / 1000).toFixed(3);
 }
 
 // ── Normalized failure ───────────────────────────────────────────────────
@@ -574,7 +596,10 @@ export function parseReporterSpec(spec: string): ReporterSpec {
   const format = sep === -1 ? raw : raw.slice(0, sep);
   const rest = sep === -1 ? "" : raw.slice(sep + 1).trim();
   if (format === "default") {
-    if (rest !== "") throw new FlagParseException("--reporter default does not take a path");
+    // Tested on the SEPARATOR, not on what follows it: `rest` is trimmed to ""
+    // for `default:` and `default:   `, so those two slipped through the check
+    // while `default::` and `default:x` correctly threw.
+    if (sep !== -1) throw new FlagParseException("--reporter default does not take a path");
     return { format: "default" };
   }
   if (format === "junit") {
@@ -654,6 +679,14 @@ interface JUnitMeta {
    * an attribute.
    */
   incompleteMessage?: string;
+  /**
+   * Why this flow never ran at all — a batch that hard-stopped skipped every
+   * flow after the stop. Those are not failures and not errors; JUnit has
+   * `<skipped/>` for exactly this. Without it they vanished from the document
+   * while the terminal summary counted them, so the XML kept `skipped="0"` for
+   * a run that reported N skipped.
+   */
+  notRunMessage?: string;
 }
 
 function attrs(pairs: [string, string | undefined][]): string {
@@ -781,9 +814,13 @@ function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; tot
   const failures = counted.filter((s) => s.status === "fail").length;
   const errors = counted.filter((s) => s.status === "error").length;
   const skipped = counted.filter((s) => s.status === "skip").length;
+  // A flow the batch never ran. Distinguished from `incomplete` by the caller,
+  // because the two are indistinguishable from the report alone — both are
+  // `ok: false` with no steps — and they mean opposite things to a CI reader.
+  const notRun = wireText(meta.notRunMessage);
   // A cancelled run fails the verdict with every step pass/skip. Reporting it
   // as a clean suite would show green in the checks UI next to a red build.
-  const incomplete = report.ok === false && failures === 0 && errors === 0;
+  const incomplete = notRun === undefined && report.ok === false && failures === 0 && errors === 0;
 
   const stepSum = counted.reduce((sum, s) => sum + (wireFinite(s.durationMs) ?? 0), 0);
   const timeMs = Math.max(0, wireFinite(meta.durationMs ?? report.durationMs ?? stepSum) ?? 0);
@@ -796,10 +833,10 @@ function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; tot
     // steps — shipped `tests="0"` with zero `<testcase>` elements. Any consumer
     // that derives results from testcases, which is most of them, read that as
     // an empty, green report for a build that exited 1.
-    tests: counted.length + (incomplete ? 1 : 0),
+    tests: counted.length + (incomplete || notRun !== undefined ? 1 : 0),
     failures,
     errors: errors + (incomplete ? 1 : 0),
-    skipped,
+    skipped: skipped + (notRun !== undefined ? 1 : 0),
     timeMs,
   };
 
@@ -828,6 +865,17 @@ function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; tot
       out.push(`      <property name="${xmlEscape(name)}" value="${xmlEscape(value)}"/>`);
     }
     out.push("    </properties>");
+  }
+
+  if (notRun !== undefined) {
+    out.push(
+      `    <testcase${attrs([
+        ["classname", flow],
+        ["name", INCOMPLETE_TESTCASE_NAME],
+      ])}>`
+    );
+    out.push(`      <skipped${attrs([["message", notRun]])}/>`);
+    out.push("    </testcase>");
   }
 
   if (incomplete) {
@@ -894,7 +942,11 @@ function junitSuite(report: FlowReport, meta: JUnitMeta): { lines: string[]; tot
       ])}`;
       if (detail === "") out.push(`${head}/>`);
       else out.push(`${head}>${xmlEscape(detail)}</${tag}>`);
-      const sysout = [`status: ${s.status}`, `durationMs: ${wireFinite(s.durationMs) ?? 0}`];
+      const sysout = [`status: ${s.status}`];
+      // Only when it was measured — see junitTime. A line reading
+      // `durationMs: 0` for a step nobody timed is a fabricated reading.
+      const measured = wireDuration(s.durationMs);
+      if (measured !== undefined) sysout.push(`durationMs: ${measured}`);
       if (f) sysout.push(`code: ${f.code}`);
       out.push(`      <system-out>${xmlEscape(sysout.join("\n"))}</system-out>`);
     }
@@ -919,7 +971,7 @@ function junitCounters(t: SuiteTotals): string {
     ["failures", String(t.failures)],
     ["errors", String(t.errors)],
     ["skipped", String(t.skipped)],
-    ["time", junitTime(t.timeMs)],
+    ["time", junitTime(t.timeMs) ?? "0.000"],
   ]);
 }
 
@@ -979,4 +1031,5 @@ const SCREENSHOT_OMISSION_NOTE: Record<string, string> = {
   "secret-typed":
     "(omitted — a secret was typed onto this device, and a capture of this screen could reveal it)",
   "no-screen": "(omitted — no screen on this device belongs to this failure)",
+  "capture-failed": "(unavailable — the device did not return an image)",
 };

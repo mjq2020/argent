@@ -1813,17 +1813,30 @@ async function execSteps(state: ExecState, steps: FlowStep[], scope: StepScope):
     // The flow was resolved as needing no device, yet a step that acts on one
     // reached execution — the two decisions disagree. Report it as this step's
     // error and stop, rather than letting it fail obscurely further in.
+    //
+    // The FOURTH failure-emission site, and it goes through the same two calls
+    // as the other three. It is currently unreachable — the run-level decision
+    // and this guard share `stepRequiresDevice` — but the tool description
+    // promises that "the ONE step a run can fail on also carries `failure`", and
+    // a site that pushed `status: "error"` with no `durationMs` and no failure
+    // object would break that promise the day the two decisions diverge.
     if (!state.device && stepRequiresDevice(state.registry, step)) {
-      state.stopped = true;
-      pushReport(state, {
+      const startedAt = Date.now();
+      const ordinal = displayOrdinal(state);
+      const report: LeafOutcome = {
         index,
         kind: step.kind,
         status: "error",
         flow: scopeFlow(scope),
         target: stepTarget(step),
         ...depthOf(scope),
+        durationMs: 0,
         reason: `step needs a device but the flow was resolved as device-free — pass an explicit device`,
-      });
+        evidence: { code: "step-kind-unsupported" },
+      };
+      state.stopped = true;
+      await attachFailureDiagnostics(state, report, { startedAt, ordinal });
+      pushReport(state, report);
       if (step.kind === "when") reportBlockSkipped(state, step.steps, childScope(scope));
       continue;
     }

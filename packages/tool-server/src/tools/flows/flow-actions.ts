@@ -829,8 +829,36 @@ async function scrollToVisible(
 // whole page, mutate scroll state even when the step fails, and stretch a
 // failure to the scroll search's worst case. Off-screen targets take an
 // explicit `scroll-to` step — the failure reason points there.
-export function offscreenHint(sel: FlowSelector): string {
+function offscreenHint(sel: FlowSelector): string {
   return `no visible element matched selector ${describeSelector(sel)} — if it is off-screen, add a scroll-to step before this one`;
+}
+
+/**
+ * The reason AND the evidence for a `waitForFrame` miss, derived together so
+ * they cannot contradict each other.
+ *
+ * They did: the reason came from {@link offscreenHint} unconditionally, telling
+ * the operator to "add a scroll-to step", while the evidence beside it
+ * classified `selector-not-visible` and its hint said the frame has zero area —
+ * which a scroll cannot change. Both printed adjacently, so the block advised
+ * the one thing it had just explained could not work. `scrollReachedEnd`
+ * already rewrites its own prose for exactly this split; this is the same
+ * rewrite for the miss path.
+ */
+export function selectorMiss(
+  sel: FlowSelector,
+  sink: TreeReadSink,
+  timeoutMs: number
+): { reason: string; evidence: DirectiveEvidence } {
+  const evidence = selectorMissEvidence(sel, sink, timeoutMs);
+  return {
+    reason:
+      evidence.code === "selector-not-visible"
+        ? `${describeSelector(sel)} is in the tree but its frame has zero area, so scrolling ` +
+          `cannot reveal it`
+        : offscreenHint(sel),
+    evidence,
+  };
 }
 
 /**
@@ -917,8 +945,7 @@ async function resolveTargetPoint(
       return {
         fail: {
           ok: false,
-          reason: offscreenHint(target.selector),
-          evidence: selectorMissEvidence(target.selector, sink, DEFAULT_ACTION_TIMEOUT_MS),
+          ...selectorMiss(target.selector, sink, DEFAULT_ACTION_TIMEOUT_MS),
         },
       };
     }
@@ -1020,8 +1047,7 @@ async function runPinch(
     if (!resolved) {
       return {
         ok: false,
-        reason: offscreenHint(step.selector),
-        evidence: selectorMissEvidence(step.selector, sink, DEFAULT_ACTION_TIMEOUT_MS),
+        ...selectorMiss(step.selector, sink, DEFAULT_ACTION_TIMEOUT_MS),
       };
     }
     frame = resolved;
@@ -1110,8 +1136,7 @@ async function runRotate(
     if (!resolved) {
       return {
         ok: false,
-        reason: offscreenHint(step.selector),
-        evidence: selectorMissEvidence(step.selector, sink, DEFAULT_ACTION_TIMEOUT_MS),
+        ...selectorMiss(step.selector, sink, DEFAULT_ACTION_TIMEOUT_MS),
       };
     }
     frame = resolved;
@@ -1192,8 +1217,7 @@ async function runType(
   if (!frame) {
     return {
       ok: false,
-      reason: offscreenHint(step.into),
-      evidence: selectorMissEvidence(step.into, sink, DEFAULT_ACTION_TIMEOUT_MS),
+      ...selectorMiss(step.into, sink, DEFAULT_ACTION_TIMEOUT_MS),
     };
   }
   await invokeOnDevice(env, "gesture-tap", getDescribeTapPoint(frame));

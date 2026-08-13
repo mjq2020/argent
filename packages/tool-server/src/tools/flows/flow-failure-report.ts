@@ -373,7 +373,10 @@ function baseFailure(
     category: FLOW_FAILURE_CATEGORY[code] ?? "tool",
     determinacy: determinacyOf(code),
     message: truncateUtf8Field(scrub(report.reason ?? ""), MESSAGE_BYTE_LIMIT),
-    ...(evidence?.hint !== undefined ? { hint: scrub(evidence.hint) } : {}),
+    // Capped like every other projected string. `hint` was the one scrubbed
+    // field with no byte bound, and it is not always a literal — `evidence.hint`
+    // can be the tree adapter's own prose — so `trimToBudget` could not shed it.
+    ...(evidence?.hint !== undefined ? { hint: truncateUtf8Field(scrub(evidence.hint)) } : {}),
     step: {
       index: report.index,
       ordinal: meta.ordinal,
@@ -470,7 +473,9 @@ async function resolveScreen(
     tree: DescribeNode,
     base: Omit<AvailableScreen, "state" | "elements" | "elementCount" | "truncated">
   ): { screen: FlowFailureScreen; tree: DescribeNode; scrub: (t: string) => string } => {
-    const actionable = flattenForReport(tree).filter(isActionableNode);
+    // Filtered against the SOURCE's role set, so the count matches what a
+    // `describe` of the same tree would have listed on that platform.
+    const actionable = flattenForReport(tree).filter((node) => isActionableNode(node, base.source));
     const elements = actionable
       .slice(0, FLOW_FAILURE_ELEMENT_LIMIT)
       .map((n) => projectNode(n, scrub));
@@ -641,7 +646,9 @@ function buildObservation(
   // `matchCount: 0` reads as "the selector found nothing", a different and
   // wrong diagnosis on a failure that never had a selector.
   if (matches === undefined) {
-    return supplied === undefined ? undefined : { ...supplied };
+    return supplied === undefined
+      ? undefined
+      : (scrubDeep(supplied, scrub) as FlowFailureObservation);
   }
   const visible = matches.filter(isVisible);
   const out: FlowFailureObservation = {
@@ -668,8 +675,25 @@ function buildObservation(
       const own = nodeText(first);
       if (own && own !== assertText(first)) out.ownText = truncateUtf8Field(scrub(own));
     }
+  } else if (evidence.code === "assert-hidden-unmet") {
+    // The element that WAS there is the whole diagnosis for a `hidden`
+    // assertion that stayed visible — and it is the shape both renderers
+    // document their `match:` slot for. Candidates are deliberately suppressed
+    // here (the operator did not mean a different element) and `normalizeActual`
+    // renders nothing from bare counts, so without this the block carried no
+    // element evidence at all: just `{matchCount:1, visibleMatchCount:1}`,
+    // which reaches no surface.
+    //
+    // No `text`, though: quoting one would invent an expectation this step
+    // never had. Only the element.
+    const first = firstInReadingOrder(visible) ?? firstInReadingOrder(matches);
+    if (first !== undefined) out.element = projectNode(first, scrub);
   }
-  return { ...out, ...supplied };
+  // `supplied` is the only wire field that used to be spread raw. Every
+  // producer today supplies numbers, but the type permits `text`, `ownText` and
+  // node arrays there — the single hole in the "every string that reaches the
+  // wire is scrubbed and capped" invariant.
+  return { ...out, ...(scrubDeep(supplied, scrub) as FlowFailureObservation) };
 }
 
 /**
@@ -741,7 +765,12 @@ async function captureScreenshot(
   env: DiagnosticsEnv,
   report: LeafOutcome,
   token: CaptureToken,
-  screenless: boolean
+  screenless: boolean,
+  // Set once the device call is actually made, so the caller can tell a capture
+  // that FAILED from one that was never taken. Every guard below is a reason
+  // the report can state on its own; only a call that came back empty needs the
+  // caller to say so.
+  attempted: { value: boolean }
 ): Promise<ArtifactHandle | undefined> {
   // Whatever is foregrounded belongs to some other run, not to this failure —
   // and on chromium the read `resolveScreen` declined for its side effects is
@@ -763,6 +792,7 @@ async function captureScreenshot(
   // status bar has been restored and the chromium instance killed. Invoking
   // `screenshot` now either rejects or registers an orphan artifact.
   if (token.expired()) return undefined;
+  attempted.value = true;
   try {
     const shot = await invokeOnDevice({ ...env, device: env.device }, "screenshot", {
       scale: 1.0,
@@ -868,15 +898,23 @@ async function buildFailure(
   }
 
   const stem = `step-${String(meta.ordinal).padStart(2, "0")}`;
-  const screenshot = await captureScreenshot(env, report, token, screenless === true);
+  const attempted = { value: false };
+  const screenshot = await captureScreenshot(env, report, token, screenless === true, attempted);
   if (screenshot !== undefined) failure.screenshot = screenshot;
-  // Say WHY the slot is empty rather than leaving the renderers to guess. They
-  // guessed "the device did not return an image", which is the opposite of what
-  // happened — argent declined the capture because no screen on this device is
-  // evidence of this failure. `baseFailure` may already have stamped
-  // "secret-typed", which is the more urgent reason and keeps the slot.
-  else if (screenless === true && failure.data?.screenshotOmitted === undefined) {
-    failure.data = { ...failure.data, screenshotOmitted: "no-screen" };
+  // Say WHY the slot is empty rather than leaving the renderers to guess.
+  //
+  // They could only guess from `environmental`, so a capture that was ATTEMPTED
+  // and came back empty — the device's screenshot service down — printed no
+  // `screenshot:` line at all on every non-environmental failure. The comment
+  // on the environmental branch argues a missing image IS information; that
+  // holds here too, and it is the difference between "argent chose not to" and
+  // "the device could not".
+  //
+  // `baseFailure` may already have stamped "secret-typed", which outranks both.
+  else if (failure.data?.screenshotOmitted === undefined) {
+    const reason =
+      screenless === true ? "no-screen" : attempted.value ? "capture-failed" : undefined;
+    if (reason !== undefined) failure.data = { ...failure.data, screenshotOmitted: reason };
   }
   if (tree !== undefined) {
     const dump = await registerTreeDump(env, tree, stem, scrub, token);
@@ -917,6 +955,11 @@ async function applyByteBudget(
   if (store && !token.expired()) {
     try {
       const dir = await failureEvidenceDir();
+      // Swept here as well as in `registerTreeDump`: the failure shapes that
+      // produce ONLY a spill (any `screen: unavailable`) write into this same
+      // directory, so hanging the sweep off the tree dump alone let those
+      // accrete until some later failure happened to carry a tree.
+      sweepEvidenceDir(dir);
       const file = path.join(dir, `${stem}-failure-${randomUUID()}.json`);
       await fs.writeFile(file, JSON.stringify(failure, null, 2), "utf8");
       trimmed.overflow = {
@@ -953,6 +996,12 @@ function trimToBudget(failure: FlowStepFailure): {
   if (serialized <= FLOW_FAILURE_BYTE_LIMIT) {
     return { failure, omittedBytes: 0, overflowed: false };
   }
+  // Everything below is measured against a budget already reduced by what
+  // `applyByteBudget` bolts on AFTER this returns: `overflow.artifact` is an
+  // artifact handle with a filename and a mime type, and it landed on a payload
+  // that had just been declared to fit. Reserving for it is what makes the
+  // declaration true.
+  const budget = FLOW_FAILURE_BYTE_LIMIT - OVERFLOW_HANDLE_RESERVE_BYTES;
 
   const trimmed: FlowStepFailure = { ...failure };
   // Shed in increasing order of diagnostic value, RE-MEASURING after each step
@@ -970,14 +1019,14 @@ function trimToBudget(failure: FlowStepFailure): {
         : {}),
     };
   }
-  if (safeSize(trimmed) > FLOW_FAILURE_BYTE_LIMIT && trimmed.actual?.invisibleMatches) {
+  if (safeSize(trimmed) > budget && trimmed.actual?.invisibleMatches) {
     const { invisibleMatches: _dropped, ...rest } = trimmed.actual;
     trimmed.actual = rest;
   }
-  if (safeSize(trimmed) > FLOW_FAILURE_BYTE_LIMIT && trimmed.candidates.length > 0) {
+  if (safeSize(trimmed) > budget && trimmed.candidates.length > 0) {
     trimmed.candidates = [];
   }
-  if (safeSize(trimmed) > FLOW_FAILURE_BYTE_LIMIT && trimmed.selector !== undefined) {
+  if (safeSize(trimmed) > budget && trimmed.selector !== undefined) {
     // Keep `described` — it is what the message quotes — and drop the machine
     // projections beside it.
     trimmed.selector = { ...trimmed.selector, fields: {}, alternatives: [] };
@@ -986,6 +1035,16 @@ function trimToBudget(failure: FlowStepFailure): {
   trimmed.overflow = { omittedBytes };
   return { failure: trimmed, omittedBytes, overflowed: true };
 }
+
+/**
+ * Room held back for the `overflow` field {@link applyByteBudget} attaches
+ * after {@link trimToBudget} has taken its final measurement — the omitted-byte
+ * count plus an artifact handle (id, filename, mime type, size). Generous: the
+ * shedding loop lands far below the cap anyway, so over-reserving costs a
+ * payload nothing while under-reserving would put the whole exercise back where
+ * it started.
+ */
+const OVERFLOW_HANDLE_RESERVE_BYTES = 512;
 
 function safeSize(value: unknown): number {
   try {

@@ -208,6 +208,33 @@ describe("payload byte budget", () => {
     );
   });
 
+  it("caps `hint`, the one scrubbed field that had no byte bound", async () => {
+    // `baseFailure` capped `message`, `step.target` and `cause.message` but not
+    // `hint` — and `evidence.hint` is not always a literal: it can be the tree
+    // adapter's own prose, arriving over the registry. `trimToBudget` cannot
+    // shed it, so an unbounded one rode every NDJSON progress event.
+    // A BLIND read is the shape that carries adapter prose: an empty tree plus
+    // the source's own hint, which `degraded()` copies straight onto
+    // `evidence.hint`.
+    const huge = "z".repeat(50_000);
+    currentFetch = () => ({ tree: screen([]), source: "native-devtools", hint: huge });
+    await writeFlow("huge-hint", {
+      executionPrerequisite: "",
+      steps: [{ kind: "assert", condition: "exists", selector: { text: "Nothing Here" } }],
+    });
+
+    const failure = singleFailure(await run("huge-hint"));
+
+    expect(failure.hint).toBeDefined();
+    expect(Buffer.byteLength(failure.hint!, "utf8")).toBeLessThanOrEqual(
+      FLOW_FAILURE_FIELD_BYTE_LIMIT
+    );
+    // Whatever the shape, the whole payload still fits.
+    expect(Buffer.byteLength(JSON.stringify(failure), "utf8")).toBeLessThanOrEqual(
+      FLOW_FAILURE_BYTE_LIMIT
+    );
+  }, 20_000);
+
   it("registers the full payload as an artifact when a store is available", async () => {
     currentFetch = () => ({ tree: bulkyTree(), source: "native-devtools" });
     await missingAssert("bulky-store");
@@ -221,6 +248,12 @@ describe("payload byte budget", () => {
     // carrying the element list the wire report dropped.
     const spilled = JSON.parse(await fs.readFile(artifact!.hostPath, "utf8")) as FlowStepFailure;
     expect(available(spilled.screen).elements).toHaveLength(FLOW_FAILURE_ELEMENT_LIMIT);
+    // The handle is attached AFTER `trimToBudget` took its final measurement,
+    // so the budget has to reserve room for it — otherwise the payload declared
+    // to fit shipped a few hundred unmeasured bytes over the cap.
+    expect(Buffer.byteLength(JSON.stringify(failure), "utf8")).toBeLessThanOrEqual(
+      FLOW_FAILURE_BYTE_LIMIT
+    );
   });
 });
 
@@ -589,7 +622,11 @@ describe("secret discipline", () => {
     const other = singleFailure(
       await run("elsewhere", { artifacts: new ArtifactStore() }, CLEAN_DEVICE)
     );
-    expect(other.data?.screenshotOmitted).toBeUndefined();
+    // The harness's registry answers `screenshot` with `{ ok: true }` and no
+    // image, so the capture is ATTEMPTED and comes back empty — which is a
+    // different reason from "argent declined it", and the point is that the
+    // secret latch did not follow the run onto a device it never touched.
+    expect(other.data?.screenshotOmitted).toBe("capture-failed");
     // Three runs, two of which spend an assert grace window.
   }, 30_000);
 
@@ -649,7 +686,7 @@ describe("secret discipline", () => {
     );
   });
 
-  it("still captures a screenshot on a device nothing has typed a secret onto", async () => {
+  it("attempts the capture on a device nothing has typed a secret onto", async () => {
     await writeFlow("no-secret-shot", {
       executionPrerequisite: "",
       steps: [{ kind: "assert", condition: "exists", selector: { identifier: "checkout-cta" } }],
@@ -659,7 +696,9 @@ describe("secret discipline", () => {
       await run("no-secret-shot", { artifacts: new ArtifactStore() }, CLEAN_DEVICE)
     );
 
-    expect(failure.data?.screenshotOmitted).toBeUndefined();
+    // Attempted, not declined: the harness's `screenshot` returns `{ ok: true }`
+    // with no image, so the reason is the device's, not the guard's.
+    expect(failure.data?.screenshotOmitted).toBe("capture-failed");
     expect(failure.tree?.mimeType).toBe("text/plain");
   });
 

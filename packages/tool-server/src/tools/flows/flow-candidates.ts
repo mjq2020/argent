@@ -344,15 +344,25 @@ function suggestSelector(
  * can reach anyway, only has to be among the matches so an `exists`/`visible`
  * assertion still gets a usable spelling.
  *
+ * "Only has to be among the matches" is not "may name something else", though.
+ * Asking nothing more let a hidden duplicate sharing its label with a visible
+ * element elsewhere produce a row describing the GHOST's rectangle beside a
+ * selector that resolves to the other one — the retargeting this function
+ * exists to prevent, reached through the branch that was meant to be the
+ * lenient one. So the invisible branch also refuses a selector that lands
+ * somewhere else; it just does not REQUIRE a landing, since a zero-area node
+ * has no frame to land on.
+ *
  * This is the O(nodes) half of a suggestion, so it is paid ONLY for the rows
  * the caller is going to emit.
  */
 function resolvesToNode(tree: DescribeNode, node: DescribeNode, derived: Selector): boolean {
+  const resolved = selectorToFrame(tree, derived);
   if (isVisible(node)) {
-    const resolved = selectorToFrame(tree, derived);
     return resolved !== undefined && sameFrame(resolved, node.frame);
   }
-  return findAll(tree, derived).includes(node);
+  if (!findAll(tree, derived).includes(node)) return false;
+  return resolved === undefined || sameFrame(resolved, node.frame);
 }
 
 /** Mask every string inside a serializable selector, values not serialized text. */

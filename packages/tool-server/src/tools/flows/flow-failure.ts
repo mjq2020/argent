@@ -26,7 +26,7 @@ import {
   type SecretSourceOptions,
 } from "@argent/configuration-core";
 import type { DescribeFrame, DescribeNode, DescribeSource } from "../describe/contract";
-import { describeNodeFlags, hasContent } from "../describe/format-tree";
+import { contentRolesFor, describeNodeFlags, shouldEmit } from "../describe/format-tree";
 import type { ArtifactHandle } from "../../artifacts";
 import type { Selector, TextMatchMode, WaitCondition } from "../../utils/ui-tree-match";
 import type { FlowSelector, ScrollDirection } from "./flow-utils";
@@ -472,9 +472,15 @@ export function projectNode(
   if (label !== undefined) out.label = label;
   const identifier = field(node.identifier);
   if (identifier !== undefined) out.identifier = identifier;
-  // A password field's value is the one string that must never be projected,
-  // scrubbed or not — the scrubber only knows the secrets THIS run resolved,
-  // and a user-typed credential is not one of them.
+  // A password field's value must never be projected, scrubbed or not — the
+  // scrubber only knows the secrets THIS run resolved, and a user-typed
+  // credential is not one of them.
+  //
+  // `node.password` is set by the Android uiautomator parser and the Chromium
+  // adapter only; iOS and Vega never set it, so on those two platforms this
+  // redaction does nothing and the field's masking rests entirely on the
+  // scrubber. Closing that needs the flag at the SOURCE — in those tree
+  // adapters — not here.
   if (node.value !== undefined) {
     out.value = node.password ? "«redacted»" : field(node.value)!;
   }
@@ -495,8 +501,17 @@ export function projectNode(
  * The elements worth listing in a failure block: exactly the subset a
  * `describe` would have emitted, so the count a report states and what an
  * operator sees when they inspect the screen themselves cannot disagree.
+ *
+ * That means `shouldEmit`, not `hasContent`. `hasContent` is only half of
+ * describe's gate; the other half is the ROLE term, which is what keeps
+ * unlabeled `AXButton`/`AXStaticText`/`AXImage`/`AXTextField` nodes — the
+ * icon-only controls it exists for — on screen. Counting with `hasContent`
+ * alone made the report undercount every screen carrying one, against the
+ * `describe` it tells the operator to compare against.
  */
-export const isActionableNode = hasContent;
+export function isActionableNode(node: DescribeNode, source?: DescribeSource): boolean {
+  return shouldEmit(node, contentRolesFor(source));
+}
 
 /**
  * Devices this PROCESS has typed a `{{secret:…}}` value onto, latched and never

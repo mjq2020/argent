@@ -306,6 +306,37 @@ describe("screen provenance", () => {
     expect(failure.candidates).toEqual([]);
   });
 
+  it("counts the icon-only elements a `describe` of the same tree would list", async () => {
+    // The report tells the operator to compare its element list against a
+    // `describe`, so it has to be the SAME subset. `describe` emits a node when
+    // `hasContent(n) || CONTENT_ROLES.has(n.role)`; the report gated on
+    // `hasContent` alone, which drops exactly the unlabeled
+    // AXButton/AXStaticText/AXImage/AXTextField nodes the role term exists for.
+    // Those are the icon-only iOS controls — the common case, not an edge one.
+    currentFetch = () => ({
+      tree: screen([
+        // Carries its own identity: counted either way.
+        n({ label: "Cart total", frame: { x: 0.1, y: 0.1, width: 0.5, height: 0.05 } }),
+        // Unlabeled content roles: counted by `describe`, dropped by
+        // `hasContent`.
+        n({ role: "AXButton", frame: { x: 0.1, y: 0.3, width: 0.1, height: 0.05 } }),
+        n({ role: "AXImage", frame: { x: 0.3, y: 0.3, width: 0.1, height: 0.05 } }),
+        // A bare container with nothing of its own: counted by neither.
+        n({ role: "AXGroup", frame: { x: 0, y: 0.5, width: 1, height: 0.2 } }),
+      ]),
+      source: "native-devtools",
+    });
+    await writeFlow("icons", {
+      executionPrerequisite: "",
+      steps: [{ kind: "assert", condition: "exists", selector: { text: "Nothing Here" } }],
+    });
+
+    const shown = available(singleFailure(await run("icons")).screen);
+
+    expect(shown.elementCount).toBe(3);
+    expect(shown.elements.map((e) => e.role)).toEqual(["AXOther", "AXButton", "AXImage"]);
+  });
+
   it("marks a post-hoc read `after-failure` — the app may have moved on", async () => {
     // A `tool` step failure carries no tree of its own, so the assembler reads
     // one after the fact. That distinction is the whole reason the field exists.

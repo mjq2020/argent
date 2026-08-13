@@ -456,13 +456,49 @@ function stepDuration(durationMs: unknown): string {
  * suggestion by tapping it instead of re-deriving it from a `describe` dump.
  */
 function frameCentre(frame: unknown): string | undefined {
+  const box = wireFrame(frame);
+  if (box === undefined) return undefined;
+  return `${(box.x + box.width / 2).toFixed(2)}, ${(box.y + box.height / 2).toFixed(2)}`;
+}
+
+/**
+ * All four frame fields or nothing.
+ *
+ * Defaulting a missing width/height to 0 printed a confident tap centre for a
+ * frame the server never fully described — and the CLI requires all four before
+ * printing one, so the two surfaces disagreed about the same element.
+ */
+function wireFrame(
+  frame: unknown
+): { x: number; y: number; width: number; height: number } | undefined {
   if (!isRecord(frame)) return undefined;
   const x = wireNumber(frame.x);
   const y = wireNumber(frame.y);
-  if (x === undefined || y === undefined) return undefined;
-  const width = wireNumber(frame.width) ?? 0;
-  const height = wireNumber(frame.height) ?? 0;
-  return `${(x + width / 2).toFixed(2)}, ${(y + height / 2).toFixed(2)}`;
+  const width = wireNumber(frame.width);
+  const height = wireNumber(frame.height);
+  if (x === undefined || y === undefined || width === undefined || height === undefined) {
+    return undefined;
+  }
+  return { x, y, width, height };
+}
+
+/**
+ * "visible" | "off-screen" | "hidden", DERIVED from the frame rather than taken
+ * from the wire — the same three states the CLI derives, by the same test.
+ *
+ * A zero-area frame is the whole diagnosis for `selector-not-visible`, and
+ * `invisibleMatches[0]` is what feeds the `match:` slot — so the one shape
+ * whose entire fix is "find out why it has no size" was the shape that reached
+ * the agent with no marker at all, beside a tap centre implying it could be
+ * tapped.
+ */
+function frameVisibility(frame: unknown): string | undefined {
+  const box = wireFrame(frame);
+  if (box === undefined) return undefined;
+  if (box.width <= 0 || box.height <= 0) return "hidden";
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  return cx < 0 || cx > 1 || cy < 0 || cy > 1 ? "off-screen" : "visible";
 }
 
 /**
@@ -514,6 +550,8 @@ function nodeLine(node: unknown): string | undefined {
   if (role) parts.push(role);
   const identifier = wireText(node.identifier, 60);
   if (identifier) parts.push(`id=${identifier}`);
+  const visibility = frameVisibility(node.frame);
+  if (visibility) parts.push(visibility);
   const centre = frameCentre(node.frame);
   if (centre) parts.push(`at ${centre}`);
   return parts.length === 0 ? undefined : parts.join("  ");
@@ -531,6 +569,8 @@ function candidateLine(candidate: unknown): string | undefined {
   if (role) parts.push(role);
   const identifier = wireText(node.identifier, 60);
   if (identifier) parts.push(`id=${identifier}`);
+  const visibility = frameVisibility(node.frame);
+  if (visibility) parts.push(visibility);
   const centre = frameCentre(node.frame);
   if (centre) parts.push(`at ${centre}`);
   const meta = [wireText(candidate.basis, 40), wireText(candidate.note, 60)]
