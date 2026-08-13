@@ -928,11 +928,13 @@ describe("parseFlow", () => {
 
 // ── block directives ─────────────────────────────────────────────────
 
-// A flow per key in BLOCK_DIRECTIVE_KEYS, with the children its block authors.
-// Deliberately not derived from the key: a fixture that agreed with the parser
-// by construction would test nothing.
-const BLOCK_DIRECTIVE_FLOWS: Partial<
-  Record<(typeof BLOCK_DIRECTIVE_KEYS)[number], { yaml: string; children: FlowFile["steps"] }>
+// A flow per block directive, with the children its block authors. Its key type
+// derives from the registry, so registering a directive without a fixture here
+// is a compile error. The fixture itself is deliberately not derived from the
+// key: one that agreed with the parser by construction would test nothing.
+const BLOCK_DIRECTIVE_FLOWS: Record<
+  (typeof BLOCK_DIRECTIVE_KEYS)[number],
+  { yaml: string; children: FlowFile["steps"] }
 > = {
   when: {
     yaml:
@@ -974,11 +976,10 @@ const BLOCK_DIRECTIVE_SIBLING_REJECTIONS: Record<
 // every skip expansion and from the upload preflight, silently.
 describe("block directives", () => {
   it.each(BLOCK_DIRECTIVE_KEYS)("%s parses to its own kind and yields its children", (key) => {
-    const fixture = BLOCK_DIRECTIVE_FLOWS[key];
-    expect(fixture, `no flow fixture for block directive \`${key}\``).toBeDefined();
-    const step = parseFlow(fixture!.yaml).steps[0]!;
+    const { yaml, children } = BLOCK_DIRECTIVE_FLOWS[key];
+    const step = parseFlow(yaml).steps[0]!;
     expect(step.kind).toBe(key);
-    expect(blockSteps(step)).toEqual(fixture!.children);
+    expect(blockSteps(step)).toEqual(children);
   });
 
   it.each(BLOCK_DIRECTIVE_KEYS)("%s rejects an unknown sibling key with its own message", (key) => {
