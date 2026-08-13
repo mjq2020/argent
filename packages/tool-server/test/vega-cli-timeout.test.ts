@@ -31,15 +31,16 @@ import { runVega, __resetVegaBinaryCacheForTests } from "../src/utils/vega-cli";
 // sentinels against the command line of every process on the machine. A second
 // concurrent run of this file — two agents running the suite at once, or the suite
 // alongside a single-file run — would otherwise share one sentinel namespace, and each
-// run's afterEach sweep would SIGKILL the other run's live workers: the `hang`
+// run's afterEach sweep would kill the other run's live workers: the `hang`
 // launcher's blocking `sleep` returns, the launcher exits 0, and runVega resolves
 // cleanly at ~100ms instead of timing out, so both `hang` tests fail. The tag is the
-// pid (unique among live processes) plus three random digits, so a worker leaked by an
-// earlier run whose pid has since been recycled is never mistaken for one of ours.
+// pid (unique among live processes, so two concurrent runs can never share one) plus
+// three random digits, so a worker leaked by an earlier run is mistaken for one of
+// ours only if its pid has since been recycled AND the random digits collide (1/900).
 //
 // It rides in the FRACTION of the sleep duration rather than being the duration: the
 // workers only need to outlive the assertions (a few seconds), but a run killed before
-// afterAll leaves them behind, so the whole-second part caps that leak at ten minutes.
+// afterAll leaves them behind, so the whole-second part caps that leak at ~ten minutes.
 const RUN_TAG = `${process.pid}${Math.floor(Math.random() * 900 + 100)}`;
 const WORKER_LIFETIME_SECONDS = 600;
 const SENTINEL_PREFIX = `${WORKER_LIFETIME_SECONDS}.${RUN_TAG}`;
