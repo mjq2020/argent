@@ -1950,7 +1950,12 @@ async function execWhenStep(
   } else {
     const probe = await probeWhenCondition(deviceEnv(state), step.condition);
     if (probe.aborted) {
-      pushReport(state, { ...marker, status: "skip", reason: "run aborted" });
+      pushReport(state, {
+        ...marker,
+        status: "skip",
+        reason: "run aborted",
+        durationMs: Date.now() - guardStartedAt,
+      });
       reportBlockSkipped(state, step.steps, inner, "run aborted");
       return;
     }
@@ -1981,6 +1986,7 @@ async function execWhenStep(
       ...marker,
       status: "skip",
       reason: `condition not met (${label}) — block skipped (${n} step${n === 1 ? "" : "s"})`,
+      durationMs: Date.now() - guardStartedAt,
     });
     reportBlockSkipped(state, step.steps, inner, "when block skipped");
     return;
@@ -1988,7 +1994,21 @@ async function execWhenStep(
 
   // Marker for the block, then the guarded steps inline — same fragment
   // attribution, one level deeper, failures hard-stop as anywhere else.
-  pushReport(state, { ...marker, status: "pass", reason: `condition met (${label})` });
+  //
+  // The marker is TIMED, like the two skip paths above and the guard-error path
+  // below. A UI guard probes with the assert grace, and an unmet one spends the
+  // whole of it — over a second on the common case — so leaving the marker
+  // untimed attributed that wall clock to nothing at all: it was missing from
+  // the step list, from `--json` and from JUnit, while the run total still
+  // counted it. Optional interstitials are the documented primary use of
+  // `when:`, so a suite full of guarded blocks hid most of its runtime from the
+  // feature whose stated point is showing where time goes.
+  pushReport(state, {
+    ...marker,
+    status: "pass",
+    reason: `condition met (${label})`,
+    durationMs: Date.now() - guardStartedAt,
+  });
   await execSteps(state, step.steps, inner);
 }
 
@@ -2204,6 +2224,12 @@ async function execRunStep(
     flow: display,
     target,
     ...depthOf(scope),
+    // The marker's OWN cost: canonicalizing the target, the case check, the
+    // read and the parse. The expanded steps below carry their own durations,
+    // and the marker is pushed before them so it cannot carry theirs — but an
+    // untimed marker reported `time="0.000"` in JUnit, which reads as "measured
+    // at zero" rather than "never measured".
+    durationMs: Date.now() - startedAt,
   });
   await execSteps(
     state,
