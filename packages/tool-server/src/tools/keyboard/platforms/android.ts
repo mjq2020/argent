@@ -9,6 +9,7 @@ import {
   injectAndroidText,
   resolveAndroidNamedKeycode,
 } from "../../../utils/android-input";
+import { deviceChainKey, serializePerDevice } from "../device-chain";
 import type { KeyboardParams, KeyboardResult } from "../types";
 import { typeTv } from "./tv";
 
@@ -80,7 +81,29 @@ function devtoolsHierarchyReader(
 // used to report success while typing nothing — issue #449. `adb input` lands
 // regardless of `hw.keyboard`, on emulators (any config) and physical devices,
 // and surfaces a non-zero exit as a throw. `device.id` is the adb serial.
-async function typeAndroidPhone(
+function typeAndroidPhone(
+  registry: Registry,
+  device: DeviceInfo,
+  params: KeyboardParams,
+  signal?: AbortSignal
+): Promise<KeyboardResult> {
+  // Serialized per device, because the clear holds a SELECTION across awaits:
+  // the modern path issues `input keycombination` and `input keyevent` as two
+  // separate adb invocations, so between them the field is fully selected, and
+  // the text that follows is a third. A concurrent call landing anywhere in
+  // there types over that selection. See `serializePerDevice`, where the
+  // measurements are — 4 of 4 corrupt on API 36 with both calls reporting 200.
+  return serializePerDevice(deviceChainKey(device.id), () => {
+    // Checked HERE, as this call's turn comes round, so a request the client has
+    // already abandoned does not spend the device's keyboard — it leaves the
+    // chain immediately and the next waiter starts. `adb shell input` itself is
+    // not cancellable, so this is the only point a hang-up is honoured.
+    signal?.throwIfAborted();
+    return runAndroidPhoneType(registry, device, params);
+  });
+}
+
+async function runAndroidPhoneType(
   registry: Registry,
   device: DeviceInfo,
   params: KeyboardParams
@@ -141,9 +164,13 @@ export function makeAndroidImpl(
     // from deeper in the probe. Matches the android branch of `describe` and
     // `tv-remote`.
     requires: ["adb"],
-    handler: async (_services, params, device) =>
+    // `options` is forwarded, not dropped: it carries the framework abort
+    // signal, and the phone path holds a per-device queue (see
+    // `typeAndroidPhone`). The TV path stays outside the queue — it cannot
+    // `clear`, so it holds no selection across awaits.
+    handler: async (_services, params, device, options) =>
       (await isAndroidTv(device.id))
         ? typeTv(registry, device, params)
-        : typeAndroidPhone(registry, device, params),
+        : typeAndroidPhone(registry, device, params, options?.signal),
   };
 }

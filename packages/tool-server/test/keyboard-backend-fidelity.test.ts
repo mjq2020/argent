@@ -286,6 +286,83 @@ describe("keyboard backends — emit exactly the action they were given", () => 
   // the character that needs it", which on android has no modifier to observe and
   // shows up only as the literal command line.
 
+  // Every backend that holds state across awaits queues per device, so two
+  // overlapping calls cannot land inside each other. iOS holds a modifier down
+  // across its chord; android leaves the field SELECTED between the select-all
+  // and the delete; chromium spreads the clear, the settle and one dispatch per
+  // character over many CDP round trips. The android half is pinned in
+  // keyboard-android.test.ts, against the adb command stream.
+  describe("one run per device, chained", () => {
+    it("does not interleave two overlapping chromium runs", async () => {
+      // Measured on this branch before the chain covered chromium: two
+      // `{ clear, text }` calls of `AAAA` and `BBBB` fired 0ms apart left
+      // `ABABABAB` in the field, with BOTH returning 200, `cleared: true` and
+      // their own four characters as `typed`. The mid-typing split check cannot
+      // see it — the text did reach the targeted element, just not only that
+      // call's text.
+      const { events, api } = cdpRecorder();
+      const impl = makeChromiumImpl(registryWith(api));
+
+      await Promise.all([
+        impl.handler({}, { udid: CHROMIUM.id, text: "HH", delayMs: 0 }, CHROMIUM),
+        impl.handler({}, { udid: CHROMIUM.id, text: "ii", delayMs: 0 }, CHROMIUM),
+      ]);
+
+      // Unchained, the two typing loops suspend on alternate `sleep(delayMs)`
+      // calls and this comes back H, i, H, i.
+      expect(events.filter((e) => e.type === "char").map((e) => e.text)).toEqual([
+        "H",
+        "H",
+        "i",
+        "i",
+      ]);
+    });
+
+    it("chains a run on ONE device without holding up another", async () => {
+      // The queue is per device, not global: a slow run at one target must not
+      // stall a second one elsewhere. Nothing releases the first call until the
+      // test does, so the second can only finish if it took a different chain.
+      const other: DeviceInfo = { id: "chromium-cdp-9333", platform: "chromium", kind: "app" };
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      const slow = makeChromiumImpl(registryWith({ dispatchKeyEvent: async () => held })).handler(
+        {},
+        { udid: CHROMIUM.id, text: "H", delayMs: 0 },
+        CHROMIUM
+      );
+      const { events, api } = cdpRecorder();
+
+      await makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: other.id, text: "i", delayMs: 0 },
+        other
+      );
+      expect(events.filter((e) => e.type === "char")).toHaveLength(1);
+
+      release();
+      await slow;
+    });
+
+    it("leaves the chain immediately for a chromium call whose client has hung up", async () => {
+      // Without this a queue of abandoned calls still types every one of them
+      // out in full, at a page nobody is reading any more.
+      const { events, api } = cdpRecorder();
+
+      await expect(
+        makeChromiumImpl(registryWith(api)).handler(
+          {},
+          { udid: CHROMIUM.id, text: "H", delayMs: 0 },
+          CHROMIUM,
+          { signal: AbortSignal.abort() }
+        )
+      ).rejects.toThrow();
+      expect(events).toEqual([]);
+    });
+  });
+
   describe("vega", () => {
     it("injects the text it was given, and nothing else", async () => {
       // "Hi" for the same reason as the chromium fixture: an all-lowercase

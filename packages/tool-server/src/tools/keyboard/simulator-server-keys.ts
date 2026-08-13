@@ -10,48 +10,10 @@ import {
 } from "./key-codes";
 import { InvalidToolInputError } from "../../utils/capability";
 import { sleepOrAbort } from "../../utils/timing";
+import { deviceChainKey, serializePerDevice } from "./device-chain";
 import type { KeyboardParams, KeyboardResult } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/**
- * One in-flight typing run per device, chained.
- *
- * Modifier state lives in the GUEST, and this backend holds a modifier down
- * across awaits so the guest sees a real chord (see `pressKeyCode`). Nothing
- * else serializes tool calls against a device — the registry hands concurrent
- * calls the same session and the transport writes immediately — so a second
- * `keyboard` call arriving inside that window has its keystroke delivered as
- * part of the chord: with Left GUI held, `{ text: "w" }` reaches the guest as
- * Cmd+W (an app `UIKeyCommand` or a system shortcut) and the character is never
- * typed, while the call still reports it as typed. Shift had the same window
- * before `clear` existed, where the worst outcome was a mis-cased character;
- * Command is the modifier that makes it destructive.
- *
- * Chaining, not rejecting: overlapping calls are a legitimate thing for a caller
- * to do, they just cannot interleave. Each device's chain is dropped once it
- * drains, so this holds no state for an idle device.
- */
-const typeChains = new Map<string, Promise<void>>();
-
-function serializePerDevice<T>(deviceId: string, run: () => Promise<T>): Promise<T> {
-  const previous = typeChains.get(deviceId) ?? Promise.resolve();
-  const result = previous.then(run);
-  // What gets STORED is a tail that never rejects, so a call that threw neither
-  // blocks the queue behind it nor leaves an unhandled rejection on a promise
-  // nobody awaits. The caller still gets `result`, rejection and all.
-  const tail = result.then(
-    () => undefined,
-    () => undefined
-  );
-  typeChains.set(deviceId, tail);
-  void tail.then(() => {
-    // Only drop the slot when nothing queued behind this call, so a waiter is
-    // never handed a drained chain and allowed to overtake the run in flight.
-    if (typeChains.get(deviceId) === tail) typeChains.delete(deviceId);
-  });
-  return result;
-}
 
 // Type text / press named keys over the simulator-server (iOS simulator) using
 // the HID keycode maps in key-codes.ts (with shift). Only the iOS keyboard
@@ -64,16 +26,7 @@ export function typeSimulatorServer(
   params: KeyboardParams,
   signal?: AbortSignal
 ): Promise<KeyboardResult> {
-  // Case-folded, because `device.id` is the caller's own string verbatim
-  // (`resolveDevice` classifies an iOS UDID by shape and never canonicalises
-  // it), while the modifier state this serializes lives in the GUEST and is
-  // shared by every spelling. Measured on an iPhone 17 Pro simulator, 7/7: a
-  // `{ text: "w" }` addressed in lowercase ran INSIDE the Left GUI hold of a
-  // `{ clear: true }` addressed in uppercase, and the `w` never reached the
-  // field while the call reported it as typed — the exact corruption this chain
-  // exists to prevent. No two distinct devices can collide under case-folding:
-  // an adb serial and a chromium id are already lower-case, and a UDID is hex.
-  return serializePerDevice(device.id.toLowerCase(), () => {
+  return serializePerDevice(deviceChainKey(device.id), () => {
     // Checked HERE, as this call's turn comes round, so a request the client has
     // already abandoned does not spend the device's keyboard — it leaves the
     // chain immediately and the next waiter starts. Without it a queue of

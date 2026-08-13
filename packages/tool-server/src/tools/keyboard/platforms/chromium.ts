@@ -4,6 +4,7 @@ import type { PlatformImpl } from "../../../utils/cross-platform-tool";
 import { InvalidToolInputError } from "../../../utils/capability";
 import { clearChromiumField, newTargetHandle, releaseParkedTarget } from "../chromium-clear";
 import { CHROMIUM_NAMED_KEYS, charToChromiumKey } from "../chromium-keys";
+import { deviceChainKey, serializePerDevice } from "../device-chain";
 import type { KeyboardParams, KeyboardResult } from "../types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -348,10 +349,25 @@ export function makeChromiumImpl(
   registry: Registry
 ): PlatformImpl<Record<string, unknown>, KeyboardParams, KeyboardResult> {
   return {
-    handler: async (_services, params, device) => {
+    handler: async (_services, params, device, options) => {
       const ref = chromiumCdpRef(device);
       const chromium = await registry.resolveService<ChromiumCdpApi>(ref.urn, ref.options);
-      return runChromium(chromium, params);
+      // Serialized per device, because a run holds the parked element and the
+      // emptied field across many CDP round trips — the clear, the settle, the
+      // read-back, then one dispatch per character. A concurrent run types into
+      // that window and both calls report a clean replacement: measured on this
+      // branch, two `{ clear, text }` calls of `AAAA` and `BBBB` at 0ms left
+      // `ABABABAB` in the field with both returning `cleared: true` and their
+      // own four characters as `typed`. See `serializePerDevice`.
+      //
+      // The service is resolved BEFORE the queue, so a device whose CDP session
+      // has to be established does not hold the chain while it connects.
+      return serializePerDevice(deviceChainKey(device.id), () => {
+        // Checked HERE, as this call's turn comes round, so a request the client
+        // has already abandoned does not spend the device's keyboard.
+        options?.signal?.throwIfAborted();
+        return runChromium(chromium, params);
+      });
     },
   };
 }
