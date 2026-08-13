@@ -533,6 +533,22 @@ async function resolveScreen(
   if (env.signal?.aborted || token.cancelled) {
     return { screen: { state: "unavailable", reason: "aborted" }, scrub, screenless: true };
   }
+  // No device, so no screen — and nothing missing from the report: a
+  // device-free flow only ever fails on composition, which its code and reason
+  // already account for in full. Checked BEFORE the screenless codes below,
+  // which would otherwise claim the step "never reached the device" about a run
+  // that never had one — true, but the less precise of the two answers.
+  if (!env.device) {
+    return {
+      screen: {
+        state: "unavailable",
+        reason: "no-device",
+        hint: "this flow ran without a device, so there was no screen to read",
+      },
+      scrub,
+      screenless: true,
+    };
+  }
   // A launch that failed has no app screen to read: the app never started. The
   // read is not merely uninformative, it has side effects — on chromium it
   // attaches to the very instance the launch just declined to attach to, which
@@ -551,20 +567,6 @@ async function resolveScreen(
           evidence?.code === "launch-failed"
             ? "the app never started, so there was no screen to read"
             : "this step failed before it reached the device, so no screen belongs to it",
-      },
-      scrub,
-      screenless: true,
-    };
-  }
-  // No device, so no screen — and nothing missing from the report: a
-  // device-free flow only ever fails on composition, which its code and reason
-  // already account for in full.
-  if (!env.device) {
-    return {
-      screen: {
-        state: "unavailable",
-        reason: "no-device",
-        hint: "this flow ran without a device, so there was no screen to read",
       },
       scrub,
       screenless: true,
