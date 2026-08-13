@@ -37,6 +37,8 @@ import {
 } from "../../src/tools/flows/flow-failure";
 
 const DEVICE = "00000000-0000-0000-0000-0000000000ab"; // iOS UDID shape
+/** A second device, for the cases that must NOT inherit {@link DEVICE}'s secret latch. */
+const CLEAN_DEVICE = "00000000-0000-0000-0000-0000000000cd";
 const SECRET_ENV = "ARGENT_SECRET_TESTPW";
 const SECRET_VALUE = "hunter2-correct-horse-battery-staple";
 let tmpDir: string;
@@ -66,11 +68,18 @@ async function writeFlow(name: string, flow: Parameters<typeof serializeFlow>[0]
   await fs.writeFile(path.join(dir, `${name}.yaml`), serializeFlow(flow), "utf8");
 }
 
-async function run(name: string, ctx?: Partial<ToolContext>): Promise<FlowRunResult> {
+async function run(
+  name: string,
+  ctx?: Partial<ToolContext>,
+  // The secret-screenshot guard latches on the DEVICE and is never cleared, so
+  // a test that must run un-guarded needs a device nothing has typed onto —
+  // which is the production rule, not a test workaround.
+  device: string = DEVICE
+): Promise<FlowRunResult> {
   const tool = createRunFlowTool(mockRegistry());
   const result = await tool.execute(
     {},
-    { name, project_root: tmpDir, device: DEVICE },
+    { name, project_root: tmpDir, device },
     ctx as ToolContext | undefined
   );
   if (!("steps" in result)) throw new Error(`expected a run result, got notice: ${result.notice}`);
@@ -538,6 +547,52 @@ describe("secret discipline", () => {
     expect(failure.tree?.mimeType).toBe("text/plain");
   });
 
+  it("declines the screenshot for a LATER run that typed nothing, on the same device", async () => {
+    // The guard's scope has to match the screen's. A credential one flow typed
+    // is still rendered when the next flow runs against that device — and a
+    // flow with no leading `launch:` runs against whatever is on screen by
+    // design, which is exactly what a directory run does, flow after flow, on
+    // one device. Scoped to a single `flow-execute` invocation, the guard
+    // closed the leak only for the run that caused it: the very next run
+    // captured the same screen and `--output` exported it.
+    process.env[SECRET_ENV] = SECRET_VALUE;
+    currentFetch = () => ({
+      tree: screen([n({ identifier: "pw", frame: { x: 0.1, y: 0.1, width: 0.8, height: 0.05 } })]),
+      source: "native-devtools",
+    });
+    await writeFlow("types-it", {
+      executionPrerequisite: "",
+      steps: [
+        { kind: "type", into: { identifier: "pw" }, text: "{{secret:TESTPW}}", submit: false },
+      ],
+    });
+    await writeFlow("types-nothing", {
+      executionPrerequisite: "",
+      steps: [{ kind: "assert", condition: "exists", selector: { identifier: "checkout-cta" } }],
+    });
+    // A THIRD device id, so this pair is independent of every other test here.
+    const shared = "00000000-0000-0000-0000-0000000000ef";
+
+    await run("types-it", { artifacts: new ArtifactStore() }, shared);
+    const later = singleFailure(
+      await run("types-nothing", { artifacts: new ArtifactStore() }, shared)
+    );
+
+    expect(later.screenshot).toBeUndefined();
+    expect(later.data?.screenshotOmitted).toBe("secret-typed");
+    // A DIFFERENT device is untouched by the latch — the guard is scoped to the
+    // screen that carries the credential, not to the whole process.
+    await writeFlow("elsewhere", {
+      executionPrerequisite: "",
+      steps: [{ kind: "assert", condition: "exists", selector: { identifier: "checkout-cta" } }],
+    });
+    const other = singleFailure(
+      await run("elsewhere", { artifacts: new ArtifactStore() }, CLEAN_DEVICE)
+    );
+    expect(other.data?.screenshotOmitted).toBeUndefined();
+    // Three runs, two of which spend an assert grace window.
+  }, 30_000);
+
   it("marks the secret omission on EVERY payload, including a degraded one", async () => {
     // `data.screenshotOmitted` is the only signal a renderer has that the run
     // typed a secret — `typedSecret` is run state and never reaches the wire.
@@ -594,13 +649,15 @@ describe("secret discipline", () => {
     );
   });
 
-  it("still captures a screenshot for a run that typed no secret", async () => {
+  it("still captures a screenshot on a device nothing has typed a secret onto", async () => {
     await writeFlow("no-secret-shot", {
       executionPrerequisite: "",
       steps: [{ kind: "assert", condition: "exists", selector: { identifier: "checkout-cta" } }],
     });
 
-    const failure = singleFailure(await run("no-secret-shot", { artifacts: new ArtifactStore() }));
+    const failure = singleFailure(
+      await run("no-secret-shot", { artifacts: new ArtifactStore() }, CLEAN_DEVICE)
+    );
 
     expect(failure.data?.screenshotOmitted).toBeUndefined();
     expect(failure.tree?.mimeType).toBe("text/plain");

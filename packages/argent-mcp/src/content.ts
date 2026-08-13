@@ -709,13 +709,16 @@ async function failureBlocks(
       screenshotPath = artifactPath(failure.screenshot);
     }
     if (screenshotPath) lines.push(`     screenshot: ${screenshotPath}`);
-    // No image because the run typed a credential — pixels are the one
-    // projection the report's scrubber cannot reach. Said explicitly, and with
-    // the instruction attached: an agent that just sees a missing screenshot
-    // calls `screenshot` itself, which is the leak the omission prevents.
+    // No image because a credential was typed onto this device — pixels are the
+    // one projection the report's scrubber cannot reach. Said explicitly, and
+    // with the instruction attached: an agent that just sees a missing
+    // screenshot calls `screenshot` itself, which is the leak the omission
+    // prevents. "onto this device", not "by this run": the producer's guard is
+    // device-scoped, because the credential an earlier flow typed is still on
+    // screen when a later one fails.
     else if (isRecord(failure.data) && failure.data.screenshotOmitted === "secret-typed") {
       lines.push(
-        "     screenshot: omitted — this run typed a {{secret:…}} value and a capture of this screen could reveal it. Do NOT call `screenshot` here; read the `tree` file below, whose text is masked."
+        "     screenshot: omitted — a {{secret:…}} value was typed onto this device and a capture of this screen could reveal it. Do NOT call `screenshot` here; read the `tree` file below, whose text is masked."
       );
     }
 

@@ -27,6 +27,7 @@ import { describeSelector, type FlowSelector } from "./flow-utils";
 import {
   createSecretScrubber,
   determinacyOf,
+  deviceTypedSecret,
   flattenForReport,
   isActionableNode,
   isTreeSourceError,
@@ -69,11 +70,26 @@ export type LeafOutcome = StepReport & { evidence?: DirectiveEvidence };
 interface DiagnosticsEnv extends Omit<ActionEnv, "device"> {
   device: ActionEnv["device"] | null;
   /**
-   * Whether a step that already ran carried a `{{secret:…}}` placeholder. Set
-   by the runner, read only by {@link captureScreenshot} — pixels are the one
-   * projection no scrubber can reach.
+   * Whether a step of THIS run carried a `{{secret:…}}` placeholder. Set by
+   * the runner; always read through {@link typedSecret}, which folds in the
+   * device-scoped latch beside it — pixels are the one projection no scrubber
+   * can reach, and the screen they capture belongs to the device, not the run.
    */
   typedSecret?: boolean;
+}
+
+/**
+ * Whether a capture of this screen could reveal a credential.
+ *
+ * Two latches, ORed, because the leak has two scopes. `env.typedSecret` covers
+ * the run that typed it. The device latch covers everything else that shares
+ * the screen: the next flow of a directory run, a fragment executed through
+ * `tool: flow-execute` (a separate invocation with its own run state), and any
+ * flow with no leading `launch:`, which runs against whatever is on screen by
+ * design. Only the second is scoped like the thing it protects.
+ */
+function typedSecret(env: DiagnosticsEnv): boolean {
+  return env.typedSecret === true || deviceTypedSecret(env.device?.id);
 }
 
 /**
@@ -301,7 +317,7 @@ export async function attachFailureDiagnostics(
               meta,
               evidence,
               { state: "unavailable", reason: "capture-timeout" },
-              env.typedSecret === true
+              typedSecret(env)
             )
     );
   } catch {
@@ -317,7 +333,7 @@ export async function attachFailureDiagnostics(
           reason: "read-failed",
           ...(evidence?.treeError !== undefined ? { detail: evidence.treeError } : {}),
         },
-        env.typedSecret === true
+        typedSecret(env)
       );
     } catch {
       /* diagnostics must never change a verdict */
@@ -688,7 +704,7 @@ async function captureScreenshot(
   // before the device and budget guards below: reusing a handle costs nothing
   // and needs neither. It is NOT checked before the secret guard: that image
   // is a capture of the same screen and leaks exactly as a fresh one would.
-  if (env.typedSecret === true) return undefined;
+  if (typedSecret(env)) return undefined;
   if (report.artifacts?.current !== undefined) return report.artifacts.current;
   // Only the fresh capture below needs a device — a device-free run has none.
   if (!env.device) return undefined;
@@ -717,7 +733,7 @@ async function buildFailure(
   partial: { failure?: FlowStepFailure }
 ): Promise<FlowStepFailure> {
   const { screen, tree, scrub } = await resolveScreen(env, evidence, token);
-  const failure = baseFailure(report, meta, evidence, screen, env.typedSecret === true);
+  const failure = baseFailure(report, meta, evidence, screen, typedSecret(env));
   // Published before the first enrichment and mutated IN PLACE from here on,
   // so every slot filled below is visible to the timeout fallback the instant
   // it lands. See the `partial` note in attachFailureDiagnostics.

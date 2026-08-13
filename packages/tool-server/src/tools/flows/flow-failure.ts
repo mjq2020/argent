@@ -499,6 +499,40 @@ export function projectNode(
 export const isActionableNode = hasContent;
 
 /**
+ * Devices this PROCESS has typed a `{{secret:…}}` value onto, latched and never
+ * cleared.
+ *
+ * The guard it feeds has to outlive the run that set it, because the thing it
+ * protects does: a credential typed by one flow is still rendered on the device
+ * when the next flow runs against it. A run-scoped latch therefore closed the
+ * leak only for the flow that caused it — the very next `argent flow run` (and
+ * every flow after it in a directory run, the invocation the docs call the
+ * canonical CI one) captured and exported the same screen with the credential
+ * legible. Keying on the DEVICE is what covers that, and it closes the
+ * `tool: flow-execute` composition holes in both directions for free: a nested
+ * run is a separate invocation with its own run state, but it drives the same
+ * device.
+ *
+ * Never cleared, for the same reason the run-scoped latch was never cleared:
+ * the runner cannot know when the app stops rendering the value back. That is
+ * the same doctrine {@link createSecretScrubber} already applies to text —
+ * mask whether or not THIS run typed it — applied to the one projection no
+ * scrubber can reach. Growth is bounded by the number of devices the process
+ * ever drove.
+ */
+const secretTypedDevices = new Set<string>();
+
+/** Latch a device as having had a credential typed onto its screen. */
+export function markDeviceTypedSecret(deviceId: string): void {
+  secretTypedDevices.add(deviceId);
+}
+
+/** Whether anything this process ran has typed a credential onto `deviceId`. */
+export function deviceTypedSecret(deviceId: string | undefined): boolean {
+  return deviceId !== undefined && secretTypedDevices.has(deviceId);
+}
+
+/**
  * A scrubber that masks every exposed secret VALUE wherever it appears in
  * report text.
  *

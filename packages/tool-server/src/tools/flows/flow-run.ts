@@ -75,7 +75,12 @@ import { parseChromiumCdpPort, resolveDevice } from "../../utils/device-info";
 import { runSnapshot, DEFAULT_MAX_MISMATCH, type SnapshotArtifacts } from "./flow-visual";
 import { describeVega } from "../describe/platforms/vega";
 import { pinStatusBar, restoreStatusBar } from "../../utils/status-bar";
-import { isTreeSourceError, type FlowFailureCode, type FlowStepFailure } from "./flow-failure";
+import {
+  isTreeSourceError,
+  markDeviceTypedSecret,
+  type FlowFailureCode,
+  type FlowStepFailure,
+} from "./flow-failure";
 import {
   attachFailureDiagnostics,
   causeOf,
@@ -2226,8 +2231,13 @@ async function execLeafStep(
   // the failure screenshot is a full-resolution capture nothing scrubs. Same
   // rule and same reason as the MCP layer's auto-screenshot skip, spelled the
   // same way — a serialized containment probe over the step's own payload.
+  //
+  // Latched on the DEVICE as well, because the screen the guard protects is
+  // the device's, not the run's: the credential is still rendered when the
+  // next flow runs. See {@link markDeviceTypedSecret}.
   if (!state.typedSecret && JSON.stringify(step)?.includes(SECRET_PLACEHOLDER_MARKER)) {
     state.typedSecret = true;
+    if (state.device) markDeviceTypedSecret(state.device.id);
   }
   const { registry, ctx, device, signal } = state;
 

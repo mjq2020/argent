@@ -866,10 +866,13 @@ describe("renderFailures", () => {
     expect(out).toContain("— scrolled out of its container");
   });
 
-  it("says WHY there is no screenshot when the run typed a secret", () => {
+  it("says WHY there is no screenshot when a secret was typed onto the device", () => {
     // Pixels are the one projection the report's scrubber cannot reach, so the
     // capture is declined outright. A silently missing line reads as a broken
-    // capture and invites the reader to take the shot themselves.
+    // capture and invites the reader to take the shot themselves. The wording
+    // says "onto this device" rather than "by this run": the producer's guard
+    // is device-scoped, so the run reading this note need not be the one that
+    // typed the value.
     const out = renderFailures(
       failingReport({
         code: "selector-not-found",
@@ -890,7 +893,7 @@ describe("renderFailures", () => {
       })
     ).join("\n");
     expect(out).toContain(
-      "     screenshot: (omitted — this run typed a secret, and a capture of this screen could reveal it)"
+      "     screenshot: (omitted — a secret was typed onto this device, and a capture of this screen could reveal it)"
     );
   });
 

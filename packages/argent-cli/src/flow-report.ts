@@ -890,9 +890,13 @@ export const INDETERMINATE_HINT =
   "not a failed assertion — argent could not read the screen; re-run or fix the device/tree source rather than editing the flow";
 
 /**
- * Stands in for the `screenshot:` path when the run typed a `{{secret:…}}`
- * value. Pixels are never scrubbed, so the capture is declined outright — and
- * saying so is what stops a reader (or an agent) from taking the shot itself.
+ * Stands in for the `screenshot:` path when a `{{secret:…}}` value was typed
+ * onto this device. Pixels are never scrubbed, so the capture is declined
+ * outright — and saying so is what stops a reader (or an agent) from taking the
+ * shot itself.
+ *
+ * "onto this device", not "by this run": the guard is device-scoped, because a
+ * credential an earlier flow typed is still on screen when a later one fails.
  */
 const SECRET_SCREENSHOT_NOTE =
-  "(omitted — this run typed a secret, and a capture of this screen could reveal it)";
+  "(omitted — a secret was typed onto this device, and a capture of this screen could reveal it)";

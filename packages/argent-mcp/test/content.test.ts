@@ -1151,11 +1151,13 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     expect(rendered.match(/home-current\.png/g)).toHaveLength(1);
   });
 
-  it("tells the agent NOT to screenshot a screen the run typed a secret onto", async () => {
+  it("tells the agent NOT to screenshot a screen a secret was typed onto", async () => {
     // The producer declines the capture because pixels are never scrubbed. An
     // agent that just saw a missing image would call `screenshot` itself and
     // pull the credential into its own context — so the omission has to carry
-    // its instruction with it.
+    // its instruction with it. The wording says "onto this device", not "by
+    // this run": the producer's guard is device-scoped, so the run being
+    // rendered need not be the one that typed the value.
     const input: FlowExecuteResult = {
       flow: "login",
       ok: false,
@@ -1177,7 +1179,9 @@ describe("flowRunToMcpContent failure diagnostics", () => {
 
     const rendered = texts(await flowRunToMcpContent(input)).join("\n");
 
-    expect(rendered).toContain("screenshot: omitted — this run typed a {{secret:…}} value");
+    expect(rendered).toContain(
+      "screenshot: omitted — a {{secret:…}} value was typed onto this device"
+    );
     expect(rendered).toContain("Do NOT call `screenshot` here");
   });
 
