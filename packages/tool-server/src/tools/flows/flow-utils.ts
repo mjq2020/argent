@@ -2064,10 +2064,11 @@ const _everyChildBearingKindIsRegistered: [UnregisteredBlockKind] extends [never
   : UnregisteredBlockKind = true;
 
 /**
- * Is this directive key a block directive? The parser and runner's only read of
- * {@link BLOCK_DIRECTIVE_KEYS}; the widening is the lookup itself — the const
- * tuple's own `includes` accepts only keys already known to be block kinds,
- * which is the question being asked.
+ * Is this directive key a block directive? The parser and runner's only
+ * CLASSIFYING read of {@link BLOCK_DIRECTIVE_KEYS} ({@link assertBlockDepth}
+ * reads it to NAME the keys in its message); the widening is the lookup
+ * itself — the const tuple's own `includes` accepts only keys already known to
+ * be block kinds, which is the question being asked.
  */
 function isBlockDirectiveKey(key: string): key is BlockDirectiveKind {
   return (BLOCK_DIRECTIVE_KEYS as readonly string[]).includes(key);
