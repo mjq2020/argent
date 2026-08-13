@@ -2421,7 +2421,9 @@ function assertBlockDepth(raw: unknown, depth: number): void {
  * Asserts the depth cap here too, on the one path every block directive must go
  * through to recurse, so no directive can opt out of the cap by forgetting the
  * early {@link assertBlockDepth} call. `depth` is unchanged between the two
- * calls, so for a directive that made the early one this is a no-op.
+ * calls, so for a directive that made the early one this is a no-op. While
+ * every registered directive makes that call, no input can make THIS assert the
+ * one that fires, so nothing pins it until one skips the early call.
  */
 function parseBlockSteps(
   raw: Record<string, unknown>,
