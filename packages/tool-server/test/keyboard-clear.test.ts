@@ -1003,7 +1003,7 @@ describe("keyboard clear — Android (adb input)", () => {
 
     it("does not let a wedged helper spend the delete run's reserve", async () => {
       // The helper's own `getHierarchy` RPC timeout is 15s — longer than the
-      // whole read share of the clear's 20s budget — so an unbounded await here
+      // whole read share of the clear's 26s budget — so an unbounded await here
       // would eat the 11s the delete run is guaranteed.
       seedLegacyLevel();
       seedDump(dumpWith("abcde"));
@@ -1130,7 +1130,8 @@ describe("keyboard clear — Android (adb input)", () => {
       // something else holds the UiAutomation connection. The read legs then
       // have to fund a dump, the backoff and a second dump out of what the
       // preferred read left — which is what the budget's own comments claim,
-      // and what a flat 20s budget could not actually do: the retry guard
+      // and what a flat 20s budget could not actually do, which is why the
+      // budget derives from the two constants instead: the retry guard
       // declined, leaving one attempt and the blind count.
       //
       // Real timers, because both the 5s race budget and the 2.5s backoff are
@@ -1553,7 +1554,7 @@ describe("keyboard clear — tool schema", () => {
   });
 
   it("declares itself long-running, since one call budgets a clear and two injections", () => {
-    // The clear is capped at 20s on Android and the `text` / `key` injections
+    // The clear is capped at 26s on Android and the `text` / `key` injections
     // that follow it keep their own 15s caps, so a `{ clear, text, key }` worst
     // case sums past the MCP adapter's 30s per-request fetch timeout — which
     // abandons the request while adb is still typing on the device.
