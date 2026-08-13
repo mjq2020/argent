@@ -70,6 +70,43 @@ describe("describeAndroid — a dump that did not happen is a capture failure", 
     expect(err.message).toMatch(/\(no output\)/);
   });
 
+  it("asks for the serial it was given", async () => {
+    // The dump is stubbed by module, so nothing else here would notice this
+    // function dumping a DIFFERENT device — it would answer every describe with
+    // whatever screen the other device happened to show.
+    dumpAndroidUiXml.mockImplementationOnce(async () => VALID_DUMP);
+    await describeAndroid(undefined, "emulator-5560");
+    expect(dumpAndroidUiXml).toHaveBeenCalledWith("emulator-5560");
+  });
+
+  it("caps the device output it quotes back", async () => {
+    // The failing dump's own bytes are interpolated into an agent-facing message.
+    // Uncapped, a screen the device refuses can put an unbounded amount of
+    // page-controlled text into the model's context — the chromium clear caps its
+    // element label for exactly this reason, and the TV blueprint caps this same
+    // dump output.
+    const err = await capture(`ERROR: ${"x".repeat(4000)}`);
+    expect(err.message.length).toBeLessThan(1000);
+  });
+
+  it("parses a dump whose ERROR: line arrived AHEAD of a usable hierarchy", async () => {
+    // A `waitForIdle` timeout prints `ERROR: …` and still dumps: `adb exec-out`
+    // folds it in ahead of the XML. The old condition was anchored on that
+    // wording (`/^ERROR:/i`) and threw, discarding a hierarchy the device did
+    // produce; testing for the hierarchy instead accepts it. That is a real
+    // change of verdict on a real device output, in the opposite direction to the
+    // `Killed` case above, and it was unpinned — the existing noise fixture uses
+    // `WARNING:`, which the old condition also let through.
+    dumpAndroidUiXml.mockImplementationOnce(
+      async () => `ERROR: could not get idle state.\n${VALID_DUMP}`
+    );
+
+    const result = await describeAndroid(undefined, "emulator-5554");
+
+    expect(result.source).toBe("uiautomator");
+    expect(JSON.stringify(result.tree)).toContain("hello");
+  });
+
   it("still parses a real dump, including one with noise prepended", async () => {
     // `adb exec-out` folds the device's stderr into stdout, so a warning can
     // arrive ahead of the XML — a substring test survives that, an anchored one

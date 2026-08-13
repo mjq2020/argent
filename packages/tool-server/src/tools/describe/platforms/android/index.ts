@@ -88,7 +88,10 @@ export async function describeAndroid(
   // far less actionable "failed to parse" for what is really "try again".
   if (!trimmed.includes("<hierarchy")) {
     throw new FailureError(
-      `uiautomator could not capture the screen: ${trimmed || "(no output)"}. ` +
+      // Capped: the device's own bytes are interpolated into an agent-facing
+      // message, and a refused screen's output is neither bounded nor ours. Same
+      // 200 the TV blueprint applies to this same dump.
+      `uiautomator could not capture the screen: ${trimmed.slice(0, 200) || "(no output)"}. ` +
         `Common causes: device locked / keyguard, DRM or secure overlay, Play Integrity screen, ` +
         `or another uiautomator dump holding the device. ` +
         `Retry once — a lost race clears once the holder finishes — then unlock the device or ` +
