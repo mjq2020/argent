@@ -1388,6 +1388,52 @@ describe("argent flow run", () => {
     expect(errs.join("\n")).toContain('"checkout" did not produce a run report');
   });
 
+  it("still writes the reporter file when the single flow is rejected", async () => {
+    // The rejection returns through `exitAfterFlush` BEFORE the only
+    // `writeReporterFiles` call, so the process exited 1 having written
+    // nothing — and in CI the publisher then picks up whichever junit.xml sits
+    // at that path, which is the previous run's. A red build reported the last
+    // green build's results. The directory path already synthesises a suite
+    // for exactly this; the two paths disagreed.
+    const dir = await fsp.mkdtemp(path.join(tmpdir(), "flow-reject-junit-"));
+    try {
+      const dest = path.join(dir, "junit.xml");
+      await fsp.writeFile(dest, "STALE-FROM-PREVIOUS-RUN", "utf8");
+      toolsClientMock.callTool.mockRejectedValue(
+        new Error('checkout.yaml: unknown step kind "tapp"')
+      );
+
+      await expect(
+        flow(["run", checkoutPath, "--reporter", `junit:${dest}`], opts)
+      ).rejects.toThrow("process.exit:1");
+
+      const xml = await fsp.readFile(dest, "utf8");
+      expect(xml).not.toContain("STALE-FROM-PREVIOUS-RUN");
+      expect(xml).toContain('<testsuite name="checkout"');
+      expect(xml).toContain('errors="1"');
+      // The real rejection reason, not "the run failed with no failing step".
+      expect(xml).toContain("unknown step kind");
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still writes the reporter file when the result is not a run report", async () => {
+    const dir = await fsp.mkdtemp(path.join(tmpdir(), "flow-noreport-junit-"));
+    try {
+      const dest = path.join(dir, "junit.xml");
+      toolsClientMock.callTool.mockResolvedValue({ data: { flow: "checkout", notice: "nope" } });
+
+      await expect(
+        flow(["run", checkoutPath, "--reporter", `junit:${dest}`], opts)
+      ).rejects.toThrow("process.exit:2");
+
+      expect(await fsp.readFile(dest, "utf8")).toContain("did not produce a run report");
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("renders the live-tail branch a streaming tool-server actually takes", async () => {
     // `callTool` never invoked `onProgress` anywhere in this file, so `liveSteps`
     // was always 0 and the buffered renderer owned every assertion — the branch
