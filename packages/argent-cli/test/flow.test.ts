@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { XMLValidator } from "fast-xml-parser";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1529,7 +1530,14 @@ describe("argent flow run", () => {
       // The failure block reaches the terminal too, above the verdict.
       const out = logs.join("\n");
       expect(out).toContain("     selector-not-found: no visible element matched selector");
-      expect(out.indexOf("Failures:")).toBeLessThan(out.indexOf("FAIL —"));
+      // Presence FIRST, then order. `indexOf(a) < indexOf(b)` is satisfied by
+      // `a` being absent entirely (-1 < N), so on its own it did not test what
+      // it read as testing.
+      const blockAt = out.indexOf("\nFailures:");
+      const verdictAt = out.indexOf("FAIL —");
+      expect(blockAt).toBeGreaterThanOrEqual(0);
+      expect(verdictAt).toBeGreaterThanOrEqual(0);
+      expect(blockAt).toBeLessThan(verdictAt);
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
     }
@@ -1756,6 +1764,11 @@ describe("argent flow run <dir>", () => {
       );
 
       const xml = await fsp.readFile(dest, "utf8");
+      // Parsed, not just grepped: a fragment `toContain` finds is satisfied
+      // wherever it sits, which is how an element in a position no schema
+      // allows survived this suite.
+      expect(XMLValidator.validate(xml)).toBe(true);
+      expect(xml).not.toMatch(/<\/properties>\s*<error/);
       // The document's counters agree with the exit code — two testcases, the
       // passing flow's one step and the rejected flow's synthetic `run`.
       expect(xml).toContain('<testsuites name="argent flow" tests="2" failures="0" errors="1"');

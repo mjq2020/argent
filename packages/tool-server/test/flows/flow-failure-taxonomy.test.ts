@@ -35,6 +35,10 @@ import {
   type ActionEnv,
   type DirectiveStep,
 } from "../../src/tools/flows/flow-actions";
+import {
+  attachFailureDiagnostics,
+  type LeafOutcome,
+} from "../../src/tools/flows/flow-failure-report";
 import { serializeFlow } from "../../src/tools/flows/flow-utils";
 import {
   determinacyOf,
@@ -823,29 +827,40 @@ describe("codes the assembler derives rather than a directive reporting them", (
     expect(failure.category).toBe("indeterminate");
   });
 
-  it("unclassified: a failure whose directive recorded no code", async () => {
-    // The catch-all is a real wire value, not a type-system placeholder: a
-    // `when:` guard whose block fails carries the block's own outcome, and any
-    // site that forgets an evidence code lands here rather than on a blank.
-    await writeFlow("bare", {
-      executionPrerequisite: "",
-      steps: [{ kind: "tool", name: "button", args: { button: "back" } }],
-    });
-    const registry = mockRegistry((id) => {
-      // A tool that REPORTS a UI-wait miss with no signal of its own.
-      if (id === "button") return { ok: false };
-      return undefined;
+  it("unclassified: a failure the assembler received with no evidence code", async () => {
+    // The catch-all is a real wire value, not a type-system placeholder — and
+    // it was asserted NOWHERE in the repo. Both its production sites are an
+    // absent code (`baseFailure`'s `evidence?.code ?? "unclassified"`) and an
+    // assertion arm no parsed condition reaches, so it is driven at the
+    // assembler, which is the site that decides it.
+    //
+    // This replaces a test that asserted nothing. Its body was
+    // `if (failure) { expect(ALL_CODES).toContain(code) }` — vacuous when the
+    // failure is absent, satisfied by any of the thirty codes, and its second
+    // line compared production's own lookup against itself. Its fixture (a
+    // `button` tool answering `{ ok: false }`) produces a PASSING step, so the
+    // guard never opened at all, and `tool-ui-wait-unmet` — what it would have
+    // yielded with a real await-ui-element — is already pinned below.
+    const report: LeafOutcome = {
+      index: 0,
+      kind: "assert",
+      status: "fail",
+      flow: "bare",
+      reason: "something went wrong",
+    };
+
+    await attachFailureDiagnostics({ registry: mockRegistry(), device: null }, report, {
+      startedAt: Date.now(),
+      ordinal: 1,
     });
 
-    const result = await run("bare", { registry });
-    const failure = result.steps.find((s) => s.failure !== undefined)?.failure;
-
-    // Whatever the runner decides, the code is always a member of the union
-    // and always carries a category — never undefined, never a blank line.
-    if (failure) {
-      expect(ALL_CODES).toContain(failure.code);
-      expect(failure.category).toBe(FLOW_FAILURE_CATEGORY[failure.code]);
-    }
+    expect(report.failure?.code).toBe("unclassified");
+    // A code with no category would render under no heading at all.
+    expect(report.failure?.category).toBe("tool");
+    expect(report.failure?.determinacy).toBe("determinate");
+    // The message still mirrors the reason, which is the whole wire-compat
+    // guarantee — a renderer that ignores `failure` prints what it always did.
+    expect(report.failure?.message).toBe("something went wrong");
   });
 });
 

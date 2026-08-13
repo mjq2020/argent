@@ -306,6 +306,36 @@ describe("screen provenance", () => {
     expect(failure.candidates).toEqual([]);
   });
 
+  it("does not report a tree-source error that a later read recovered from", async () => {
+    // `sink.error = undefined` on a successful read is the only stale-error
+    // clear in the file, and nothing exercised recovery: a blip mid-navigation
+    // set the error, the next read succeeded, and without the clear the failure
+    // would have rendered `screen.readError` — telling the operator the tree
+    // source was broken when it had recovered before the step even failed.
+    let reads = 0;
+    currentFetch = () => {
+      reads++;
+      // First read throws, every read after it succeeds.
+      if (reads === 1) throw new Error("native devtools blipped");
+      return { tree: screen([label("Home")]), source: "native-devtools" };
+    };
+    await writeFlow("recovers", {
+      executionPrerequisite: "",
+      // A `tap` drives `waitForFrame`, which owns the sink this clears.
+      steps: [{ kind: "tap", selector: { text: "Nothing Here", loose: true } }],
+    });
+
+    const failure = singleFailure(await run("recovers"));
+
+    expect(reads).toBeGreaterThan(1);
+    // A determinate selector miss against a screen that WAS read — not an
+    // environment failure.
+    expect(failure.code).toBe("selector-not-found");
+    expect(failure.determinacy).toBe("determinate");
+    const shown = available(failure.screen);
+    expect(shown.readError).toBeUndefined();
+  }, 20_000);
+
   it("counts the icon-only elements a `describe` of the same tree would list", async () => {
     // The report tells the operator to compare its element list against a
     // `describe`, so it has to be the SAME subset. `describe` emits a node when

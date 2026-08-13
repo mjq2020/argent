@@ -401,6 +401,111 @@ describe("buildJUnitXml", () => {
     expect(xml).not.toContain("run-incomplete");
   });
 
+  it("survives a startedAt no Date can represent, and still writes the file", () => {
+    // `new Date(n).toISOString()` throws a RangeError past ±8.64e15, and the
+    // reporter's own try/catch swallowed it into a warning — so one bad number
+    // cost CI its ENTIRE JUnit file rather than one attribute. Load-bearing and
+    // untested: removing `wireTimestamp` makes this throw.
+    const xml = buildJUnitXml(mkReport({ startedAt: 1e18 }));
+    expect(xml).toContain("<testsuite ");
+    expect(xml).not.toContain("timestamp=");
+    // A representable one still renders.
+    expect(buildJUnitXml(mkReport())).toContain('timestamp="2026-07-28T10:15:00.000Z"');
+  });
+
+  it("reports the RESOLVED platform when no --platform was pinned", () => {
+    // `--platform` only narrows auto-detection, so it is absent on the common
+    // run and the property would disappear exactly when a CI reader most wants
+    // it — on a failing run nobody pinned a platform for. It rides in on the
+    // failure's `data.platform` instead. Dead to the suite until now.
+    const xml = buildJUnitXml(
+      mkReport({
+        steps: [
+          {
+            index: 0,
+            kind: "tap",
+            status: "fail",
+            reason: "no match",
+            failure: { ...FAILURE, data: { platform: "android" } },
+          },
+        ],
+      })
+    );
+    expect(xml).toContain('<property name="argent.platform" value="android"/>');
+    // An explicit flag still wins: it is a choice, the other is a fallback.
+    expect(buildJUnitXml(mkReport(), { platform: "ios" })).toContain(
+      '<property name="argent.platform" value="ios"/>'
+    );
+  });
+
+  it("renders the expected/actual/match/reads/device slots in the failure body", () => {
+    // The sole verbatim JUnit pin uses a determinate, non-environmental fixture
+    // with no `expected`/`actual`, so five slots of the body never rendered at
+    // all. An indeterminate tree-source failure fills the other four.
+    const xml = buildJUnitXml(
+      mkReport({
+        steps: [
+          {
+            index: 0,
+            kind: "assert",
+            status: "fail",
+            reason: "still visible",
+            failure: {
+              code: "assert-hidden-unmet",
+              category: "assertion",
+              determinacy: "determinate",
+              message: "still visible",
+              step: { index: 0, ordinal: 1, kind: "assert", flow: "checkout" },
+              selector: { described: 'id="spinner"' },
+              expected: { kind: "condition", condition: "hidden", timeoutMs: 5000 },
+              actual: {
+                element: {
+                  role: "progressbar",
+                  label: "Loading…",
+                  identifier: "spinner",
+                  frame: { x: 0.4, y: 0.4, width: 0.2, height: 0.2 },
+                },
+              },
+              screen: { state: "unavailable", reason: "read-failed" },
+              candidates: [],
+              candidateCount: 0,
+              timing: { startedAt: 1, durationMs: 5000 },
+            },
+          },
+        ],
+      })
+    );
+    expect(xml).toContain("expected: hidden");
+    expect(xml).toContain("match: &quot;Loading…&quot;  progressbar  id=spinner  visible");
+
+    const environmental = buildJUnitXml(
+      mkReport({
+        steps: [
+          {
+            index: 0,
+            kind: "assert",
+            status: "error",
+            reason: "the UI tree source failed",
+            failure: {
+              code: "tree-source-unavailable",
+              category: "environment",
+              determinacy: "indeterminate",
+              message: "the UI tree source failed",
+              step: { index: 0, ordinal: 1, kind: "assert", flow: "checkout" },
+              screen: { state: "unavailable", reason: "never-readable" },
+              candidates: [],
+              candidateCount: 0,
+              data: { platform: "ios" },
+              timing: { startedAt: 1, durationMs: 5000, attempts: 21, trustedAttempts: 14 },
+            },
+          },
+        ],
+      })
+    );
+    expect(environmental).toContain("reads: 21 attempted, 14 trusted");
+    expect(environmental).toContain("device: SIM-1 (ios)");
+  });
+
   it("keeps every document well-formed and structurally valid", () => {
     // Every assertion in this file was `toContain` or a regex, which passes
     // wherever in the document a fragment happens to sit — which is exactly how

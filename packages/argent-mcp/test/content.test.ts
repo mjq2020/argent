@@ -1165,6 +1165,107 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     expect(rendered.match(/home-current\.png/g)).toHaveLength(1);
   });
 
+  it("inlines `current` when the snapshot shape produced no diff", async () => {
+    // `inlineRole` is the headline change to this renderer and nothing reached
+    // it: the two near-miss tests set `secretTyped` (which kills the `failed`
+    // flag it is gated behind) and pass no ctx respectively, so deleting the
+    // line left the suite green.
+    //
+    // Three snapshot shapes produce no `diff` at all — baseline-missing,
+    // dimension-mismatch, crop-empty — and `current` is then the only picture
+    // of what failed. Beside its own path, which is what lets the failure block
+    // stop re-rendering the same image under a second, materialized one.
+    const fetchImpl = vi.fn(fetchReturning([...PNG_SIGNATURE, 0x42]));
+    const input: FlowExecuteResult = {
+      flow: "visual",
+      ok: false,
+      failed: 1,
+      steps: [
+        {
+          index: 0,
+          kind: "snapshot",
+          status: "fail",
+          target: '"home"',
+          reason: "no baseline for home",
+          artifacts: {
+            baseline: artifactHandle("base3", "home-baseline.png", "image/png"),
+            current: artifactHandle("cur3", "home-current.png", "image/png"),
+          },
+        },
+      ],
+    };
+
+    const blocks = await flowRunToMcpContent(input, {
+      toolsUrl: "http://remote:3001",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(blocks.filter((b) => b.type === "image")).toHaveLength(1);
+    // `current`, and ONLY current: `baseline` is a full-res PNG nobody renders,
+    // so its handle prints as a path without pulling the bytes.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain("/artifacts/cur3");
+  });
+
+  it("prefers the annotated diff over `current` when both are present", async () => {
+    // The other side of `inlineRole`: the diff boxes the changed pixels, so it
+    // is strictly the more informative of the two.
+    const fetchImpl = vi.fn(fetchReturning([...PNG_SIGNATURE, 0x43]));
+    const input: FlowExecuteResult = {
+      flow: "visual",
+      ok: false,
+      failed: 1,
+      steps: [
+        {
+          index: 0,
+          kind: "snapshot",
+          status: "fail",
+          target: '"home"',
+          reason: "diff 3.10% > 0.5%",
+          artifacts: {
+            current: artifactHandle("cur4", "home-current.png", "image/png"),
+            diff: artifactHandle("dif4", "home-diff.png", "image/png"),
+          },
+        },
+      ],
+    };
+
+    const blocks = await flowRunToMcpContent(input, {
+      toolsUrl: "http://remote:3001",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(blocks.filter((b) => b.type === "image")).toHaveLength(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain("/artifacts/dif4");
+  });
+
+  it("truncates at MAX_RENDER_FAILURES and says how many were dropped", async () => {
+    // The largest fixture here had two failures, so the cap was never reached.
+    // An honest server sends exactly one (the runner hard-stops at the first
+    // non-passing leaf), so this only bites a buggy or hostile one — where an
+    // unbounded loop over budget-respecting blocks is a half-gigabyte result.
+    const input: FlowExecuteResult = {
+      flow: "hostile",
+      ok: false,
+      steps: Array.from({ length: 12 }, (_, i) => ({
+        index: i,
+        kind: "tap",
+        status: "fail" as const,
+        target: `"btn-${i}"`,
+        failure: wireFailure({ code: "selector-not-found", message: `miss ${i}` }),
+      })),
+    };
+
+    const rendered = texts(await flowRunToMcpContent(input)).join("\n");
+
+    // Blocks stop well before the twelfth...
+    expect(rendered).toContain("miss 0");
+    expect(rendered).not.toContain("miss 11");
+    // ...and the trailing count covers every failure not rendered.
+    expect(rendered).toContain("more failures");
+  });
+
   it("tells the agent NOT to screenshot a screen a secret was typed onto", async () => {
     // The producer declines the capture because pixels are never scrubbed. An
     // agent that just saw a missing image would call `screenshot` itself and
@@ -1311,6 +1412,78 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     expect(block).not.toContain("screenshot:");
     expect(block).not.toContain("tree:");
     expect(block).not.toContain("screen:");
+  });
+
+  it("pins the whole failure block, line for line", async () => {
+    // Every other assertion in this section is `toContain`, so an injected
+    // extra line — or a slot silently dropped — survives the suite. One
+    // verbatim pin is what makes the block a contract rather than a bag of
+    // substrings; the CLI's own renderer has had one from the start.
+    const input: FlowExecuteResult = {
+      flow: "checkout",
+      device: "SIM-1",
+      ok: false,
+      passed: 1,
+      failed: 1,
+      steps: [
+        { index: 0, kind: "launch", status: "pass", target: "com.acme.shop", durationMs: 3100 },
+        {
+          index: 1,
+          kind: "tap",
+          status: "fail",
+          target: '"Checkout"',
+          durationMs: 5002,
+          reason: 'no visible element matched selector text="Checkout"',
+          failure: wireFailure({
+            code: "selector-not-found",
+            message: 'no visible element matched selector text="Checkout"',
+            determinacy: "determinate",
+            hint: "the closest match differs only by a space",
+            step: { index: 1, ordinal: 2, kind: "tap", flow: "checkout" },
+            expected: { kind: "condition", condition: "visible", timeoutMs: 5000 },
+            screen: {
+              state: "available",
+              source: "native-devtools",
+              capturedAt: "at-failure",
+              elementCount: 47,
+              size: { width: 390, height: 844 },
+            },
+            candidates: [
+              {
+                score: 0.86,
+                basis: "text-near",
+                selectorYaml: "{ id: checkout-cta }",
+                node: {
+                  role: "button",
+                  label: "Check out",
+                  identifier: "checkout-cta",
+                  frame: { x: 0.4, y: 0.84, width: 0.2, height: 0.04 },
+                },
+              },
+            ],
+            candidateCount: 1,
+            cause: { code: "NATIVE_DEVTOOLS_NOT_CONNECTED", message: "socket closed" },
+            tree: "/srv/step-02-tree.txt",
+          }),
+        },
+      ],
+    };
+
+    const blocks = texts(await flowRunToMcpContent(input));
+
+    expect(blocks[blocks.length - 1]).toBe(
+      [
+        '  2) tap "Checkout" (5.0s)',
+        '     selector-not-found: no visible element matched selector text="Checkout"',
+        "     expected: visible",
+        '     candidates (1, ranked; "at" is the normalized tap centre — verify by tapping it):',
+        '       0.86  "Check out"  button  id=checkout-cta  visible  at 0.50, 0.86  (text-near)  → { id: checkout-cta }',
+        "     screen: 47 elements, 390x844, captured at the failure, via native-devtools",
+        "     hint: the closest match differs only by a space",
+        "     cause: NATIVE_DEVTOOLS_NOT_CONNECTED: socket closed",
+        "     tree: /srv/step-02-tree.txt (read this file for the full element list)",
+      ].join("\n")
+    );
   });
 
   it("numbers the failure block the way every other surface numbers it", async () => {
