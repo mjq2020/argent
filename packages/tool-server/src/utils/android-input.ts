@@ -595,6 +595,22 @@ const MIN_USEFUL_DUMP_MS = 2_500;
 const PREFERRED_READ_BUDGET_MS = 5_000;
 
 /**
+ * A reply worth measuring: it carries the hierarchy tag AND at least one node.
+ *
+ * The tag alone is the right test for a DUMP, which announces a failed capture
+ * in-band (`ERROR:` for a refused screen, `Killed` for a lost race, neither
+ * carrying the tag). It is not enough for the {@link AndroidClearOptions.readHierarchy}
+ * helper, whose `captureXml` writes the `<hierarchy rotation="…">` wrapper
+ * unconditionally — including when the walk it wraps dropped the subtree holding
+ * the focused `EditText`. An empty wrapper passed, both dump attempts were
+ * skipped, and the clear silently became the blind delete count that truncates a
+ * long field. (`platforms/android.ts` refuses the two cases it can see from the
+ * typed result; this covers the reply that claims windows and still carries no
+ * tree.)
+ */
+const hasNodes = (xml: string) => xml.includes("<hierarchy") && xml.includes("<node");
+
+/**
  * One `uiautomator dump`, retried once after a backoff when the device returns
  * no hierarchy.
  *
@@ -646,7 +662,7 @@ async function readHierarchy(
           timer = setTimeout(() => resolve(undefined), preferredBudgetMs);
         }),
       ]);
-      if (xml && xml.includes("<hierarchy")) return xml;
+      if (xml && hasNodes(xml)) return xml;
     } catch {
       // The helper is not usable — same fallthrough.
     } finally {
@@ -679,7 +695,7 @@ async function readHierarchy(
     // adb exits 0 even when the dump did not happen — a refused screen reports
     // an in-band `ERROR:` line, a lost race reports `Killed`. Neither carries a
     // hierarchy, which is the one test that covers both.
-    if (xml.includes("<hierarchy")) return xml;
+    if (hasNodes(xml)) return xml;
   }
   return undefined;
 }

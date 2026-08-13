@@ -43,7 +43,20 @@ function devtoolsHierarchyReader(
     const devtools = await registry.resolveService<AndroidDevtoolsApi>(ref.urn, ref.options);
     // The helper caches accessibility nodes and can serve stale text after the
     // inspected app changed it, which is precisely what this reads.
-    const { xml } = await devtools.getHierarchy({ clearCache: true });
+    const { xml, windowCount, truncated } = await devtools.getHierarchy({ clearCache: true });
+    // A dump ANNOUNCES a failed capture — a refused screen prints `ERROR:`, a
+    // lost race prints `Killed`, neither carrying the `<hierarchy` tag the caller
+    // tests for. The helper does not: `captureXml` writes its `<hierarchy
+    // rotation="…">` wrapper unconditionally, including when it saw no windows
+    // at all and when the walk stopped early — so a content-free reply PASSES
+    // that test, both dump attempts are skipped, and the clear silently becomes
+    // the blind delete count that truncates a long field.
+    //
+    // These are the two signals that tell those replies apart, and this is the
+    // only layer that can see them (`readHierarchy` is handed a string). Both
+    // mean "ask the dump instead", which is exactly what ran before the helper
+    // was consulted at all.
+    if (windowCount === 0 || truncated) return undefined;
     return xml;
   };
 }

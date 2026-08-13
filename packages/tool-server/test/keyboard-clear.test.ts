@@ -842,12 +842,24 @@ describe("keyboard clear — Android (adb input)", () => {
     // to the assertions below — a zero-parameter stub makes it invisible, and
     // `toHaveBeenCalledTimes` alone would hold nothing.
     const registryWithDevtools = (
-      getHierarchy: (options?: { clearCache?: boolean }) => Promise<{ xml: string }>,
+      getHierarchy: (options?: { clearCache?: boolean }) => Promise<{
+        xml: string;
+        // The two signals that tell a content-free helper reply from a real one.
+        // Defaulted by the stub below, since most cases here are about the xml.
+        windowCount?: number;
+        truncated?: boolean;
+      }>,
       live = true
     ) =>
       ({
         getServiceState: () => (live ? ServiceState.RUNNING : ServiceState.IDLE),
-        resolveService: vi.fn(async () => ({ getHierarchy })),
+        resolveService: vi.fn(async () => ({
+          getHierarchy: async (options?: { clearCache?: boolean }) => ({
+            windowCount: 1,
+            truncated: false,
+            ...(await getHierarchy(options)),
+          }),
+        })),
       }) as never;
 
     it("measures from the helper, without racing it for a dump", async () => {
@@ -962,6 +974,38 @@ describe("keyboard clear — Android (adb input)", () => {
 
       expect(getHierarchy).toHaveBeenCalledTimes(1);
       // The DUMP's four characters, not the blind count.
+      expect(deleteRun(inputCmds()[1]!)).toHaveLength(4 + 8);
+    });
+
+    it.each([
+      // `captureXml` writes its `<hierarchy rotation="…">` wrapper
+      // unconditionally, so unlike a dump the helper does NOT announce a failed
+      // capture: it answers successfully with an empty tree when it saw no
+      // windows, and with a partial one when the walk truncated or a node refused
+      // to refresh — dropping exactly the subtree the focused `EditText` is in.
+      // Every such reply passed the "carries a hierarchy" test, both dumps were
+      // skipped, and the clear became the blind count that truncates a long field
+      // while reporting `cleared: true`.
+      ["saw no windows", { xml: `<hierarchy rotation="0" />`, windowCount: 0, truncated: false }],
+      ["truncated its walk", { xml: dumpWith("ab"), windowCount: 1, truncated: true }],
+      [
+        "answered with no nodes at all",
+        { xml: `<hierarchy rotation="0"></hierarchy>`, windowCount: 1, truncated: false },
+      ],
+    ])("falls back to the dump when the helper %s", async (_label, reply) => {
+      seedLegacyLevel();
+      seedDump(dumpWith("abcd"));
+      const getHierarchy = vi.fn(async () => reply);
+
+      await makeAndroidImpl(registryWithDevtools(getHierarchy)).handler(
+        {},
+        { udid: ANDROID.id, clear: true },
+        ANDROID
+      );
+
+      expect(getHierarchy).toHaveBeenCalledTimes(1);
+      // The DUMP's four characters, not the blind count — and not the two the
+      // truncated reply happened to carry.
       expect(deleteRun(inputCmds()[1]!)).toHaveLength(4 + 8);
     });
 
