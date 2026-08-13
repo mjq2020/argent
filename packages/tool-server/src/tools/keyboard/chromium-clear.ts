@@ -78,8 +78,16 @@ export function newTargetHandle(): string {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Page-side helper, inlined into both probes: how much content the element
- * holds that `textContent` cannot see.
+ * The per-call property each embedded element found BEFORE the clear is stamped
+ * with, so the re-read can recognise THAT element rather than count its
+ * replacement. Derived from the target handle, so it is unique per call for the
+ * same reasons — see `newTargetHandle`.
+ */
+const embedMark = (handle: string) => `${handle}_embed`;
+
+/**
+ * Page-side helpers, inlined into both probes: the content the element holds
+ * that `textContent` cannot see, identified rather than merely counted.
  *
  * A non-form target is measured by its text, so anything carrying no text
  * node — an `<img>`, a `<video>`/`<canvas>`/`<svg>`, an `<hr>`, an
@@ -96,18 +104,37 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Quill, Lexical and TinyMCE, and counting it would fail every clear that
  * actually worked.
  *
- * The count alone is still not a verdict — see `clearChromiumField`, which fails
- * only when the same embedded content was present BEFORE the clear and survived
- * it. An editor that re-inserts a placeholder node once empty (measured 5/5)
- * would otherwise have its successful clear reported as a failure.
+ * Residue is decided by IDENTITY, not by comparing a count across the clear.
+ * Counting cannot tell the two states apart when both halves are ordinary:
+ * an editor holding one atomic embed (a mention pill) that inserts its own
+ * placeholder ELEMENT once it becomes empty — Slate renders its placeholder as a
+ * `contenteditable="false"` span inside the editable, ProseMirror's widget
+ * decorations are `contenteditable="false"` by default — goes 1 → 1 across a
+ * clear that worked perfectly, and the count then reads as "the same content
+ * survived". Measured on Chrome 151, 3/3: the pill and the text were gone, the
+ * placeholder was in their place, and the clear was reported as a permanent hard
+ * failure with the requested `text` never typed — permanent, because the
+ * placeholder comes back on every retry.
+ *
+ * So the BEFORE pass stamps every embed it finds and the re-read counts only the
+ * stamped ones still inside the field. A replacement the page inserted carries no
+ * stamp; an `<img>` whose delete the page cancelled carries one and is still
+ * found. The stamp is dropped again when the target handle is released, so a
+ * field cleared repeatedly does not accumulate one property per call.
+ *
+ * The one shape this cannot see: an embed whose own object refuses the stamp
+ * (a frozen element). It then re-reads as unstamped and counts as gone, which
+ * errs toward a silent success — the same direction as everything else this
+ * measurement cannot catch.
  */
-const COUNT_EMBEDS_FN = `
+const countEmbedsFns = (mark: string) => `
+  const EMBED_MARK = ${JSON.stringify(mark)};
   const EMBED_TAGS = "img,video,audio,canvas,svg,embed,object,iframe,hr,input,select," +
     "textarea,button,picture,math,table";
-  const countEmbeds = (node, isFormControl) => {
+  const embedsIn = (node, isFormControl) => {
     // A <textarea>'s child nodes are its DEFAULT value and never track \`value\`,
     // so counting them would report a cleared field as still full.
-    if (isFormControl || !node || !node.querySelectorAll) return 0;
+    if (isFormControl || !node || !node.querySelectorAll) return [];
     try {
       // \`i\` — the Selectors 4 case-insensitivity flag. An attribute selector's
       // VALUE match is case-sensitive by default, and \`contenteditable\` is an
@@ -118,11 +145,31 @@ const COUNT_EMBEDS_FN = `
       // verification, so a page that cancelled the edit reported \`cleared: true\`
       // with the pill untouched (measured on Chrome 148, against a matched
       // lowercase control that was correctly refused).
-      const seen = node.querySelectorAll(EMBED_TAGS + ",[contenteditable=false i]");
-      return seen.length;
+      return node.querySelectorAll(EMBED_TAGS + ",[contenteditable=false i]");
     } catch (e) {
-      return 0;
+      return [];
     }
+  };
+  // BEFORE: stamp each embed, so the re-read can tell it from a replacement.
+  const stampEmbeds = (node, isFormControl) => {
+    const seen = embedsIn(node, isFormControl);
+    for (let i = 0; i < seen.length; i++) {
+      try { seen[i][EMBED_MARK] = true; } catch (e) {}
+    }
+    return seen.length;
+  };
+  // AFTER: how many of the STAMPED embeds are still inside the field. Querying
+  // within the element is itself the containment test — an embed the delete
+  // removed is not found at all, wherever it went.
+  const countStampedEmbeds = (node, isFormControl, unstamp) => {
+    const seen = embedsIn(node, isFormControl);
+    let held = 0;
+    for (let i = 0; i < seen.length; i++) {
+      if (seen[i][EMBED_MARK] !== true) continue;
+      held++;
+      if (unstamp) { try { delete seen[i][EMBED_MARK]; } catch (e) {} }
+    }
+    return held;
   };`;
 
 /**
@@ -243,7 +290,7 @@ const EDITABLE_TEXT_FN = `
 // returns and every verdict it computes would otherwise rest on a manual
 // browser session alone.
 export const focusedEditableProbe = (handle: string) => `(() => {
-  ${COUNT_EMBEDS_FN}
+  ${countEmbedsFns(embedMark(handle))}
   // What a user pressing "select all" on THIS machine would send, so the page
   // sees the real chord. Read from the renderer, not the tool-server host — CDP
   // reaches remote renderers through a forwarded local port. Resolved OUTSIDE
@@ -368,9 +415,10 @@ export const focusedEditableProbe = (handle: string) => `(() => {
       window[${JSON.stringify(handle)}] = el;
       return JSON.stringify({
         verdict: "editable", label, mac, parked: window[${JSON.stringify(handle)}] === el,
-        // The BEFORE count, so the verdict can tell content that SURVIVED the
-        // clear from an empty-state placeholder the page inserts once emptied.
-        nodes: countEmbeds(el, false),
+        // Stamps every embed it finds, so the verdict can tell content that
+        // SURVIVED the clear from an empty-state placeholder the page inserts
+        // once emptied — by identity, not by comparing counts.
+        nodes: stampEmbeds(el, false),
       });
     }
     // Anything else is refused, INCLUDING a custom element whose shadow root is
@@ -435,23 +483,26 @@ export const focusedEditableProbe = (handle: string) => `(() => {
  * name="host">` makes the top-level document look like a shadow root and does
  * the same. Reading one of the three raw is enough to break the other two.
  *
- * `nodes` counts residue a text measurement cannot see. On a non-form target the
- * value read is the element's text (see `editableText`), so content carrying no
- * text node — an `<img>`, a
+ * `residue` counts the content a text measurement cannot see that was there
+ * BEFORE and did not go away — the embeds the first probe stamped, still inside
+ * the field. On a non-form target the value read is the element's text (see
+ * `editableText`), so content carrying no text node — an `<img>`, a
  * `<video>`/`<canvas>`/`<svg>`, an `<hr>` — measures 0 and a clear that emptied
  * nothing reports success. Measured on Chrome 150: two contenteditables on one
  * page cancelling the same `beforeinput`, the one holding text refused (7/7) and
  * the one holding a single `<img>` returned `cleared: true` with the image
  * untouched. The tag list is embedded/replaced content only — never a structural
  * leftover like the `<br>`, `<div>` or `<p>` Blink and every rich-text editor
- * leave behind in a genuinely empty field.
+ * leave behind in a genuinely empty field — and a node the page inserted after
+ * the clear carries no stamp, so it is not residue however many there are (see
+ * `countEmbedsFns`).
  *
  * `keep: true` leaves the element parked so the caller can ask again after it
  * has typed — the reason `releaseTargetProbe` exists.
  */
 // Exported for test/keyboard-clear-probe.test.ts — see focusedEditableProbe.
 export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
-  ${COUNT_EMBEDS_FN}
+  ${countEmbedsFns(embedMark(handle))}
   ${EDITABLE_TEXT_FN}
   try {
     const el = window[${JSON.stringify(handle)}];
@@ -536,11 +587,13 @@ export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
     // of its own to discount — see \`editableText\` for why the other branch
     // cannot use its raw text.
     const value = form ? (el.value || "") : userText(editableText(el));
-    const nodes = countEmbeds(el, form);
+    // Un-stamp on the release pass only, so the stamps outlive the verdict read
+    // exactly as long as the parked element itself does.
+    const residue = countStampedEmbeds(el, form, ${keep ? "false" : "true"});
     return JSON.stringify({
       tracked: true,
       focused,
-      nodes,
+      residue,
       secret: (el.type || "") === "password",
       length: bad ? Math.max(1, value.length) : value.length,
     });
@@ -557,7 +610,7 @@ export interface FocusedEditable {
   secret?: boolean;
   /** False when the page refused the slot assignment — then nothing was parked. */
   parked?: boolean;
-  /** Embedded content held BEFORE the clear — see `countEmbeds`. */
+  /** Embedded content held BEFORE the clear, now stamped — see `countEmbedsFns`. */
   nodes?: number;
 }
 
@@ -567,8 +620,12 @@ export interface ClearedTarget {
   focused?: boolean;
   secret?: boolean;
   length?: number;
-  /** Embedded content (an image, a video, an `<hr>`) `textContent` cannot see. */
-  nodes?: number;
+  /**
+   * Embedded content (an image, a video, an `<hr>`) `textContent` cannot see
+   * that was already there BEFORE the clear and is still in the field — the
+   * stamped ones, not a fresh count. See `countEmbedsFns`.
+   */
+  residue?: number;
 }
 
 /**
@@ -779,17 +836,14 @@ export async function clearChromiumField(
   // second is exactly what an app cancelling the chord produces.
   if (!after?.tracked) return { label: before.label };
   const remaining = after.length ?? 0;
-  // Embedded content counts as residue only when it was ALREADY there and
-  // survived. An editor that re-inserts a placeholder node once it becomes empty
-  // — an icon-only `<span contenteditable="false">`, the common composer
-  // pattern — goes from 0 embeds to 1 across a clear that worked perfectly, and
-  // measured 5/5 as a hard failure telling the caller the field "was NOT
-  // emptied". Requiring the count to have been non-zero BEFORE, and not to have
-  // fallen, keeps the case this check exists for (an `<img>`-only editor whose
-  // delete the page cancelled: 1 before, 1 after) while letting the empty-state
-  // placeholder through.
-  const embedsBefore = before.nodes ?? 0;
-  const residualNodes = embedsBefore > 0 && (after.nodes ?? 0) >= embedsBefore ? after.nodes! : 0;
+  // Embedded content counts as residue only when it is the SAME content that was
+  // there before — the probe stamps each embed and this counts the stamps still
+  // in the field, so an editor that swaps in a placeholder node once it becomes
+  // empty (an icon-only `<span contenteditable="false">`, the common composer
+  // pattern) is not mistaken for the `<img>` whose delete the page cancelled.
+  // Comparing counts cannot separate those two: both go 1 → 1. See
+  // `countEmbedsFns`.
+  const residualNodes = after.residue ?? 0;
   if (remaining === 0 && residualNodes === 0) {
     return { keptFocus: after.focused === true, label: before.label };
   }

@@ -270,21 +270,26 @@ describe("chromium clear — focused-element probe", () => {
     }
   );
 
-  it("records the BEFORE embed count, which the survival rule is decided on", () => {
-    // `FakeEl` has no `querySelectorAll`, so `countEmbeds` short-circuits to 0
+  it("finds and STAMPS the embeds the survival rule is decided on", () => {
+    // `FakeEl` has no `querySelectorAll`, so the embed pass short-circuits to 0
     // in every other focused-probe fixture and this field is silently absent —
-    // deleting it from the probe kept the suite green. It is the sole input to
-    // the "was it there BEFORE, and did it survive?" rule, which is the only
-    // detector for the `<img>`-only editor whose delete the page cancelled.
+    // deleting it from the probe kept the suite green. The stamp it leaves is
+    // what lets the re-read tell the `<img>` whose delete the page cancelled
+    // from a placeholder the page inserted in its place; see the residue block
+    // below for the pair of verdicts that rests on it.
+    const embeds = [{ tagName: "IMG" }, { tagName: "HR" }];
     const el = {
       tagName: "DIV",
       id: "composer",
       isContentEditable: true,
-      querySelectorAll: (sel: string) =>
-        sel.includes("img") ? [{ tagName: "IMG" }, { tagName: "HR" }] : [],
+      querySelectorAll: (sel: string) => (sel.includes("img") ? embeds : []),
     } as unknown as FakeEl;
 
     expect(focused(el).result).toMatchObject({ verdict: "editable", nodes: 2 });
+    // Every embed carries exactly one per-call mark, and nothing else.
+    for (const embed of embeds) {
+      expect(Object.keys(embed).filter((key) => key.startsWith(HANDLE))).toHaveLength(1);
+    }
   });
 
   it("never asks a form control for its embed count", () => {
@@ -904,27 +909,89 @@ describe("chromium clear — release probe", () => {
       if (held === undefined) return false;
       return insensitive ? held.toLowerCase() === value.toLowerCase() : held === value;
     };
-    const withChildren = (children: (string | Child)[]) => {
+    /** An editable holding `children`, whose selector match is the real one. */
+    const editableWith = (children: (string | Child)[]) => {
       const nodes = children.map((child) => (typeof child === "string" ? { tag: child } : child));
-      const el = {
-        tagName: "DIV",
-        textContent: "",
-        isConnected: true,
-        querySelectorAll: (sel: string) => {
-          const parts = sel.split(",").map((s) => s.trim());
-          return nodes.filter((node) => parts.some((part) => matchesSelector(node, part)));
+      return {
+        el: {
+          tagName: "DIV",
+          isContentEditable: true,
+          textContent: "",
+          isConnected: true,
+          querySelectorAll: (sel: string) => {
+            const parts = sel.split(",").map((s) => s.trim());
+            return nodes.filter((node) => parts.some((part) => matchesSelector(node, part)));
+          },
         },
+        nodes,
       };
+    };
+
+    /**
+     * The BEFORE pass, run for real rather than simulated.
+     *
+     * Residue is decided by identity: the first probe stamps every embed it
+     * finds and this one counts the stamps still in the field. So the two probes
+     * have to agree on the stamp, and seeding a parked element without stamping
+     * it first would report every one of these fixtures as clean — which is
+     * precisely the drift this pins.
+     */
+    const stamp = (el: unknown) =>
+      runProbe(focusedEditableProbe(HANDLE), makeDoc(el as FakeEl)).result;
+
+    const withChildren = (children: (string | Child)[]) => {
+      const { el } = editableWith(children);
+      stamp(el);
       return release({ [HANDLE]: el }).result;
     };
 
     it("counts embedded content left behind", () => {
-      expect(withChildren(["img"])).toMatchObject({ tracked: true, length: 0, nodes: 1 });
-      expect(withChildren(["video", "hr", "svg"])).toMatchObject({ tracked: true, nodes: 3 });
+      expect(withChildren(["img"])).toMatchObject({ tracked: true, length: 0, residue: 1 });
+      expect(withChildren(["video", "hr", "svg"])).toMatchObject({ tracked: true, residue: 3 });
     });
 
     it("counts nothing for an editor that really is empty", () => {
-      expect(withChildren([])).toMatchObject({ tracked: true, length: 0, nodes: 0 });
+      expect(withChildren([])).toMatchObject({ tracked: true, length: 0, residue: 0 });
+    });
+
+    it("counts a node the page inserted AFTER the clear as gone, not as residue", () => {
+      // The count-only rule's blind spot, and an ordinary page: a composer
+      // holding one mention pill that inserts its own placeholder element once
+      // it becomes empty is 1 embed before and 1 after, so a count reads "the
+      // same content survived" and reports a clear that worked as a permanent
+      // hard failure (Chrome 151, 3/3 — the pill and the text were gone).
+      const { el, nodes } = editableWith([{ tag: "span", attrs: { contenteditable: "false" } }]);
+      stamp(el);
+      // The delete removed the pill; the page put its placeholder there instead.
+      nodes.length = 0;
+      nodes.push({ tag: "span", attrs: { contenteditable: "false" } });
+
+      expect(release({ [HANDLE]: el }).result).toMatchObject({ tracked: true, residue: 0 });
+    });
+
+    it("counts the stamped survivors of a PARTIAL delete", () => {
+      // The converse of the same identity rule: two of three pills went, one did
+      // not. A count that merely FELL reads as success, but a following `text`
+      // would land beside the survivor.
+      const { el, nodes } = editableWith(["img", "hr", "video"]);
+      stamp(el);
+      nodes.splice(1, 2);
+
+      expect(release({ [HANDLE]: el }).result).toMatchObject({ tracked: true, residue: 1 });
+    });
+
+    it("keeps its stamps for the verdict read and drops them on release", () => {
+      // The verdict read happens with the element still parked (the caller asks
+      // it about focus again after typing), so it must not disturb the stamp.
+      // The release pass is the one that cleans up, which is what stops a field
+      // cleared repeatedly accumulating one property per call.
+      const { el } = editableWith(["img"]);
+      stamp(el);
+      const keep = runProbe(clearedTargetProbe(HANDLE, true), makeDoc(null), { [HANDLE]: el });
+
+      expect(keep.result).toMatchObject({ residue: 1 });
+      expect(release({ [HANDLE]: el }).result).toMatchObject({ residue: 1 });
+      expect(release({ [HANDLE]: el }).result).toMatchObject({ residue: 0 });
     });
 
     it.each(["false", "FALSE", "False"])(
@@ -940,7 +1007,7 @@ describe("chromium clear — release probe", () => {
         // reported a clean replacement with the pill still in the DOM.
         expect(withChildren([{ tag: "span", attrs: { contenteditable: value } }])).toMatchObject({
           tracked: true,
-          nodes: 1,
+          residue: 1,
         });
       }
     );
@@ -954,7 +1021,7 @@ describe("chromium clear — release probe", () => {
           { tag: "div", attrs: { contenteditable: "true" } },
           { tag: "div", attrs: { contenteditable: "" } },
         ])
-      ).toMatchObject({ tracked: true, nodes: 0 });
+      ).toMatchObject({ tracked: true, residue: 0 });
     });
 
     it("never counts the structural leftovers an emptied editor keeps", () => {
@@ -964,7 +1031,7 @@ describe("chromium clear — release probe", () => {
       expect(withChildren(["br", "div", "p", "span", "font"])).toMatchObject({
         tracked: true,
         length: 0,
-        nodes: 0,
+        residue: 0,
       });
     });
 
@@ -982,7 +1049,7 @@ describe("chromium clear — release probe", () => {
       expect(release({ [HANDLE]: el }).result).toMatchObject({
         tracked: true,
         length: 0,
-        nodes: 0,
+        residue: 0,
       });
     });
   });

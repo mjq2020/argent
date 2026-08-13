@@ -1709,10 +1709,10 @@ describe("keyboard clear — Chromium (CDP)", () => {
     // an <hr>, an attachment chip) survives a cancelled delete at length 0.
     // Measured on Chrome 150: `cleared: true` with the image untouched, 7/7.
     const { api, events } = recordingApi(
-      // The image was there BEFORE the clear...
+      // The image was there BEFORE the clear, so the probe stamped it...
       { verdict: "editable", label: "DIV#body", mac: true, parked: true, nodes: 1 },
-      // ...and survived it.
-      { tracked: true, length: 0, nodes: 1, focused: true }
+      // ...and the re-read still finds that same stamped element in the field.
+      { tracked: true, length: 0, residue: 1, focused: true }
     );
 
     await expect(
@@ -1728,15 +1728,15 @@ describe("keyboard clear — Chromium (CDP)", () => {
   });
 
   it("accepts an empty-state placeholder the page inserts once the field empties", async () => {
-    // The other half of the same count. A composer that re-inserts an icon-only
-    // `<span contenteditable="false">` whenever its editable becomes empty goes
-    // from 0 embeds to 1 across a clear that worked perfectly — measured on
+    // The other half of the same rule. A composer that inserts an icon-only
+    // `<span contenteditable="false">` whenever its editable becomes empty holds
+    // one embedded element after a clear that worked perfectly — measured on
     // Chrome 150 as a hard 500 telling the caller the field "was NOT emptied",
     // 5/5, which is the opposite of the truth. Residue means content that was
-    // there BEFORE and did not go away.
+    // there BEFORE and did not go away, so an unstamped newcomer is not residue.
     const { api } = recordingApi(
       { verdict: "editable", label: "DIV#ph", mac: true, parked: true, nodes: 0 },
-      { tracked: true, length: 0, nodes: 1, focused: true }
+      { tracked: true, length: 0, residue: 0, focused: true }
     );
 
     const result = await makeChromiumImpl(registryWith(api)).handler(
@@ -1748,24 +1748,44 @@ describe("keyboard clear — Chromium (CDP)", () => {
     expect(result.cleared).toBe(true);
   });
 
-  it("does not call a FALLEN embed count residue", async () => {
-    // The third state of the same rule, and the one neither fixture covered:
-    // the count went DOWN. Three embeds before and one after means the delete
-    // reached the content, so what is left is not what survived — changing
-    // `>= embedsBefore` to a bare `> 0` kept both existing fixtures green while
-    // failing this clear.
+  it("accepts a clear whose embed count is UNCHANGED but whose embed is not", async () => {
+    // The state a count cannot reach, and the one that made this a permanent
+    // failure on an ordinary page (Chrome 151, 3/3): a composer holding one
+    // mention pill that swaps in its own placeholder element once empty goes
+    // 1 → 1 across a clear that removed everything. Nothing about the numbers
+    // separates it from the surviving-`<img>` case above — only the identity of
+    // what the re-read finds, which is why the probe stamps.
     const { api } = recordingApi(
-      { verdict: "editable", label: "DIV#composer", mac: true, parked: true, nodes: 3 },
-      { tracked: true, length: 0, nodes: 1, focused: true }
+      { verdict: "editable", label: "DIV#composer", mac: true, parked: true, nodes: 1 },
+      { tracked: true, length: 0, residue: 0, focused: true }
     );
 
     const result = await makeChromiumImpl(registryWith(api)).handler(
       {},
-      { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+      { udid: CHROMIUM.id, clear: true, text: "hi", delayMs: 0 },
       CHROMIUM
     );
 
-    expect(result.cleared).toBe(true);
+    expect(result).toMatchObject({ typed: "hi", keys: 2, cleared: true });
+  });
+
+  it("fails a clear that left SOME of the embeds it was asked to delete", async () => {
+    // Three embeds before and one stamped survivor after. The count FELL, which
+    // the old count rule read as "the delete reached the content" and reported as
+    // a clean success — but a pill the delete did not remove is residue whatever
+    // happened to its siblings, and a following `text` would land beside it.
+    const { api } = recordingApi(
+      { verdict: "editable", label: "DIV#composer", mac: true, parked: true, nodes: 3 },
+      { tracked: true, length: 0, residue: 1, focused: true }
+    );
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/still holds 1 embedded element\(s\)/);
   });
 
   it("settles for its own window, not the caller's typing cadence", async () => {
