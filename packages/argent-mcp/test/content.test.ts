@@ -295,14 +295,17 @@ describe("flowRunToMcpContent", () => {
     });
   });
 
-  it("renders echo steps as text", async () => {
+  it("renders echo steps as unnumbered narration", async () => {
+    // Narration is not a step: numbering it would push every real step's index
+    // one past the number the CLI, the export filenames and
+    // `failure.step.ordinal` all use. The `›` marker is the CLI's spelling.
     const input: FlowExecuteResult = {
       flow: "f",
       steps: [{ kind: "echo", message: "Hello" }],
     };
     const blocks = await flowRunToMcpContent(input);
 
-    expect(blocks[1]).toEqual({ type: "text", text: "[1] Hello" });
+    expect(blocks[1]).toEqual({ type: "text", text: "› Hello" });
   });
 
   it("renders run steps by their as-written path, with a stem fallback for legacy servers", async () => {
@@ -364,12 +367,13 @@ describe("flowRunToMcpContent", () => {
 
     expect(texts).toContain('[1] ✓ when visible "Promo"');
     expect(texts).toContain('[2] ✓   tap "Dismiss"');
-    expect(texts).toContain("[3] ✓     deep note");
-    expect(texts).toContain('[4] ✓ tap "A"');
+    // Narration keeps its indent but takes no number.
+    expect(texts).toContain("› ✓     deep note");
+    expect(texts).toContain('[3] ✓ tap "A"');
     const cap = "  ".repeat(20);
-    expect(texts).toContain(`[5] ✓ ${cap}tap "B"`);
-    expect(texts).toContain(`[6] ✓ ${cap}tap "C"`);
-    expect(texts).toContain(`[7] ✓ ${cap}tap "D"`);
+    expect(texts).toContain(`[4] ✓ ${cap}tap "B"`);
+    expect(texts).toContain(`[5] ✓ ${cap}tap "C"`);
+    expect(texts).toContain(`[6] ✓ ${cap}tap "D"`);
   });
 
   it("shifts snapshot artifact lines with the step's depth, matching the CLI renderer", async () => {
@@ -421,7 +425,7 @@ describe("flowRunToMcpContent", () => {
     expect(texts[1]).toBe("[1] ✓ tap");
     expect(texts[2]).toBe("[2] ✓ assert");
     expect(texts[3]).toBe("[3] ✗ snapshot — diff 3.10% > 0.5% (home)");
-    expect(texts[4]).toBe("[4] · done");
+    expect(texts[4]).toBe("› · done");
     expect(texts[texts.length - 1]).toBe("FAIL — 2 passed, 1 failed, 0 errored, 1 skipped");
     // No invalid (text: undefined) blocks even though directive steps carry no result.
     expect(blocks.every((b) => b.type !== "text" || typeof b.text === "string")).toBe(true);
@@ -686,27 +690,33 @@ describe("flowRunToMcpContent", () => {
       .map((b) => b.text);
 
     expect(texts[0]).toContain("Running flow");
-    expect(texts[1]).toBe("[1] Start");
-    expect(texts[2]).toBe("[2] gesture-tap");
-    // [3] is JSON result
-    expect(texts[4]).toBe("[3] End");
+    expect(texts[1]).toBe("› Start");
+    // The tool step is the only NUMBERED one — the narration around it is not.
+    expect(texts[2]).toBe("[1] gesture-tap");
+    // texts[3] is the tool's JSON result
+    expect(texts[4]).toBe("› End");
     expect(texts[5]).toContain("complete");
   });
 
-  it("numbers steps sequentially", async () => {
+  it("numbers real steps sequentially, skipping the narration between them", async () => {
+    // The number is the step's DISPLAY ordinal, which every other surface
+    // derives the same way — the server's `failure.step.ordinal`, the CLI's
+    // step list and failure block, and the `step-NN-*` export filenames.
     const input: FlowExecuteResult = {
       flow: "num",
       steps: [
         { kind: "echo", message: "A" },
+        { kind: "tap", status: "pass", target: '"one"' },
         { kind: "echo", message: "B" },
-        { kind: "echo", message: "C" },
+        { kind: "tap", status: "pass", target: '"two"' },
       ],
     };
     const blocks = await flowRunToMcpContent(input);
 
-    expect(blocks[1]).toEqual({ type: "text", text: "[1] A" });
-    expect(blocks[2]).toEqual({ type: "text", text: "[2] B" });
-    expect(blocks[3]).toEqual({ type: "text", text: "[3] C" });
+    expect(blocks[1]).toEqual({ type: "text", text: "› A" });
+    expect(blocks[2]).toEqual({ type: "text", text: '[1] ✓ tap "one"' });
+    expect(blocks[3]).toEqual({ type: "text", text: "› B" });
+    expect(blocks[4]).toEqual({ type: "text", text: '[2] ✓ tap "two"' });
   });
 });
 
@@ -1299,6 +1309,43 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     expect(block).not.toContain("screen:");
   });
 
+  it("numbers the failure block the way every other surface numbers it", async () => {
+    // The block heading used to be the raw array position, so any flow with an
+    // `echo:` before the failing step disagreed with the CLI, with the
+    // `step-NN-*` export filenames, and with the `failure.step.ordinal` the
+    // server puts on the wire — and a leading echo is the idiom the skill docs
+    // prescribe, so this was the common case.
+    const input: FlowExecuteResult = {
+      flow: "echofail",
+      ok: false,
+      steps: [
+        { index: 0, kind: "launch", status: "pass", target: "com.acme.shop" },
+        { index: 1, kind: "echo", status: "pass", message: "now looking for the button" },
+        {
+          index: 2,
+          kind: "tap",
+          status: "fail",
+          target: "id=Dictat",
+          failure: wireFailure({
+            code: "selector-not-found",
+            message: 'no visible element matched selector id="Dictat"',
+            // The wire's own ordinal: the number the CLI and the export agree on.
+            step: { index: 2, ordinal: 2, kind: "tap", flow: "echofail" },
+            screen: { state: "unavailable", reason: "read-failed" },
+          }),
+        },
+      ],
+    };
+
+    const rendered = texts(await flowRunToMcpContent(input)).join("\n");
+
+    // The step list and the block heading, in lockstep and both at 2.
+    expect(rendered).toContain("[2] ✗ tap id=Dictat");
+    expect(rendered).toContain("  2) tap id=Dictat");
+    expect(rendered).not.toContain("[3]");
+    expect(rendered).not.toContain("  3)");
+  });
+
   it("renders a report with no failure exactly as it does today", async () => {
     const input: FlowExecuteResult = {
       flow: "legacy",
@@ -1324,14 +1371,19 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     };
 
     // Pinned verbatim: an old tool-server sends no `failure`/`durationMs`, and
-    // its output must not shift by a single byte.
+    // every slot of its output is fixed here.
+    //
+    // The numbers changed with the echo fix, and this fixture is why the defect
+    // survived: it PINNED the wrong ones. The snapshot is step 2 of this run —
+    // that is what `summarize` counts, what `failure.step.ordinal` carries,
+    // what the CLI prints, and what the `step-NN-*` export filenames say.
     expect(await flowRunToMcpContent(input)).toEqual([
       { type: "text", text: 'Running flow "legacy" on SIM (4 steps)' },
-      { type: "text", text: "[1] ✓ Opening the cart" },
-      { type: "text", text: '[2] ✓ tap "Cart"' },
-      { type: "text", text: '[3] ✗ snapshot "home" — diff 3.10% > 0.5% (home)' },
+      { type: "text", text: "› ✓ Opening the cart" },
+      { type: "text", text: '[1] ✓ tap "Cart"' },
+      { type: "text", text: '[2] ✗ snapshot "home" — diff 3.10% > 0.5% (home)' },
       { type: "text", text: "  baseline: /srv/b.png" },
-      { type: "text", text: '[4] · assert "Order placed"' },
+      { type: "text", text: '[3] · assert "Order placed"' },
       { type: "text", text: "FAIL — 1 passed, 1 failed, 0 errored, 1 skipped" },
     ]);
   });

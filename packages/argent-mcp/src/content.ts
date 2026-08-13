@@ -806,9 +806,24 @@ export async function flowRunToMcpContent(
     text: `Running flow "${result.flow}"${result.device ? ` on ${result.device}` : ""} (${result.steps.length} steps)`,
   });
 
+  // Echo narration is not numbered, so the step number counts only real steps.
+  //
+  // It used to be the raw array position (`step.index + 1`), which disagreed
+  // with every other surface the moment a flow carried an `echo:` — the
+  // server's own `displayOrdinal` and the `failure.step.ordinal` it puts on the
+  // wire, the CLI's step list and failure block, and the `step-NN-*` filenames
+  // the export writes all skip echo. A leading echo is the idiom the skill docs
+  // prescribe, so the disagreement was the common case, not an edge one.
+  //
+  // Derived here rather than read off `failure.step.ordinal` so the heading and
+  // the step list above it stay in lockstep BY CONSTRUCTION: a heading saying
+  // "3)" over a list showing the failure at 4 would be worse than no heading.
+  let ordinal = 0;
   for (let i = 0; i < result.steps.length; i++) {
     const step = result.steps[i]!;
-    const num = step.index !== undefined ? step.index + 1 : i + 1;
+    const isEcho = step.kind === "echo";
+    if (!isEcho) ordinal++;
+    const num = ordinal;
     // Glyph only when a status is present (the new report). Legacy status-less
     // results render without one.
     const glyph = step.status ? `${STATUS_GLYPH[step.status] ?? "•"} ` : "";
@@ -816,9 +831,12 @@ export async function flowRunToMcpContent(
     const reason = step.reason ?? step.error;
     const suffix = reason ? ` — ${reason}` : "";
     const warning = step.warning ? ` ⚠ ${step.warning}` : "";
+    // Narration carries the `›` marker instead of an index — the same spelling
+    // the CLI uses — so an unnumbered line still reads as belonging to the run.
+    const head = isEcho ? "› " : `[${num}] `;
     blocks.push({
       type: "text",
-      text: `[${num}] ${glyph}${stepIndent(step.depth)}${stepLabel(step)}${suffix}${warning}`,
+      text: `${head}${glyph}${stepIndent(step.depth)}${stepLabel(step)}${suffix}${warning}`,
     });
 
     // Surface a step's own content (e.g. a screenshot) only when it actually
