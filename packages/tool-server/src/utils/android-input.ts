@@ -521,9 +521,18 @@ async function clearByDeleting(
     // caller reads a transport fault and retries against a field it believes is
     // untouched. The cause is deliberately not quoted: it carries no
     // information this message does not, and all of its length.
+    // `keys` is the field's measured length plus the public DELETE_MARGIN, so on
+    // a `{{secret:…}}` request it publishes a credential's exact length — the
+    // same number, for the same reason, that the over-length refusal above
+    // withholds. `redactSecretsFromError` substitutes the value string and cannot
+    // redact a count. Withheld whenever `secretText` is set, matching that
+    // sibling rather than reasoning separately about a blind count.
+    const sent = options.secretText
+      ? `as many backspaces as the field's length needed were sent`
+      : `${keys} backspaces were sent`;
     throw new FailureError(
       `keyboard clear: the delete run did not finish on this device, so the focused field is ` +
-        `PARTLY emptied — ${keys} backspaces were sent and an unknown number of them landed. ` +
+        `PARTLY emptied — ${sent} and an unknown number of them landed. ` +
         `Nothing was typed. Read the field's actual contents before continuing; do not treat ` +
         `it as unchanged, and do not send a replacement that assumes it is empty.`,
       {

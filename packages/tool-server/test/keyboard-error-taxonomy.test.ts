@@ -428,5 +428,45 @@ describe("keyboard backends — input rejection is a 400 with a uniform telemetr
     expect(getFailureSignal(err)?.error_kind).toBe("timeout");
     expect(err.message).toMatch(/PARTLY emptied/);
     expect(err.message).not.toMatch(/input keyevent/);
+    // The count is the field's measured length plus the public margin.
+    expect(err.message).toMatch(/\b12 backspaces were sent\b/);
+  });
+
+  it("android: an interrupted delete run says nothing about a SECRET field's length", async () => {
+    // Same number, same reason as the over-length refusal above, which withholds
+    // it: on a `{{secret:…}}` request the count is a credential's exact length,
+    // and `redactSecretsFromError` substitutes the value string and cannot redact
+    // a number.
+    adbShell.mockReset();
+    adbExecOutBinary.mockReset();
+    adbShell.mockImplementationOnce(async () => "Usage: input …");
+    adbExecOutBinary.mockImplementationOnce(async () =>
+      Buffer.from(
+        `<hierarchy><node text="${"x".repeat(31)}" class="android.widget.EditText" ` +
+          `password="false" focused="true" /></hierarchy>`
+      )
+    );
+    adbShell.mockImplementationOnce(async () => {
+      throw new FailureError("adb … input keyevent 123 67 67 … failed", {
+        error_code: FAILURE_CODES.ANDROID_ADB_COMMAND_FAILED,
+        failure_stage: "android_adb_command",
+        failure_area: "tool_server",
+        error_kind: "timeout",
+      });
+    });
+
+    const err = await injectAndroidClear("emulator-5554", { secretText: true }).then(
+      () => {
+        throw new Error("expected the call to reject, but it resolved");
+      },
+      (e: unknown) => e as Error
+    );
+
+    expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.KEYBOARD_CLEAR_INTERRUPTED);
+    // Still says the field is part-emptied — that is the actionable half.
+    expect(err.message).toMatch(/PARTLY emptied/);
+    // 31 + DELETE_MARGIN, the number a plain request would have quoted.
+    expect(err.message).not.toMatch(/\b39\b/);
+    expect(err.message).not.toMatch(/\b31\b/);
   });
 });
