@@ -424,12 +424,46 @@ function baseFailure(
  *    later read that happens to succeed would render as a perfectly healthy
  *    `available` screen, and an operator would conclude the tree source was
  *    fine when the step failed precisely because it wasn't.
+ *
+ * Several branches also report `screenless`, meaning "no screen on this device
+ * belongs to this failure". That verdict is the SCREENSHOT's too — see
+ * {@link ScreenResolution.screenless}.
  */
+interface ScreenResolution {
+  screen: FlowFailureScreen;
+  tree?: DescribeNode;
+  scrub: (t: string) => string;
+  /**
+   * Whether the device's current screen is unrelated to this failure — an
+   * aborted run, a launch that never started the app, a device-free run, or a
+   * composition error (a cyclic `run:`, an unloadable fragment) decided from
+   * the YAML alone.
+   *
+   * `resolveScreen` already declined to READ the tree in each of those cases,
+   * and every reason it declined applies just as much to a full-resolution
+   * capture: a `run-cyclic` failure used to attach a picture of whatever app
+   * happened to be foregrounded, and `--output` exported it as this failure's
+   * evidence. Beyond the wasted round-trip, the block was actively misleading —
+   * it presented an unrelated app's screen as evidence of a YAML authoring
+   * error.
+   */
+  screenless?: true;
+}
+
+/** Codes whose step never reached the device, so the screen in front of it is not evidence. */
+function isScreenless(code: FlowFailureCode | undefined): boolean {
+  if (code === undefined) return false;
+  // A launch that failed has no app screen to read: the app never started.
+  // Composition failures (cyclic `run:`, depth exceeded, an unloadable
+  // fragment) are decided from the flow files alone, before any step ran.
+  return code === "launch-failed" || FLOW_FAILURE_CATEGORY[code] === "composition";
+}
+
 async function resolveScreen(
   env: DiagnosticsEnv,
   evidence: DirectiveEvidence | undefined,
   token: CaptureToken
-): Promise<{ screen: FlowFailureScreen; tree?: DescribeNode; scrub: (t: string) => string }> {
+): Promise<ScreenResolution> {
   const scrub = createSecretScrubber();
   type AvailableScreen = Extract<FlowFailureScreen, { state: "available" }>;
   const project = (
@@ -492,20 +526,29 @@ async function resolveScreen(
     };
   }
   if (env.signal?.aborted || token.cancelled) {
-    return { screen: { state: "unavailable", reason: "aborted" }, scrub };
+    return { screen: { state: "unavailable", reason: "aborted" }, scrub, screenless: true };
   }
   // A launch that failed has no app screen to read: the app never started. The
   // read is not merely uninformative, it has side effects — on chromium it
   // attaches to the very instance the launch just declined to attach to, which
   // is exactly what the failure was about.
-  if (evidence?.code === "launch-failed") {
+  //
+  // A composition failure is the same shape reached from the other end: a
+  // cyclic `run:`, an exceeded depth or an unloadable fragment is decided from
+  // the flow files, so the step never touched the device and whatever is
+  // foregrounded is some other run's screen.
+  if (isScreenless(evidence?.code)) {
     return {
       screen: {
         state: "unavailable",
         reason: "never-readable",
-        hint: "the app never started, so there was no screen to read",
+        hint:
+          evidence?.code === "launch-failed"
+            ? "the app never started, so there was no screen to read"
+            : "this step failed before it reached the device, so no screen belongs to it",
       },
       scrub,
+      screenless: true,
     };
   }
   // No device, so no screen — and nothing missing from the report: a
@@ -519,6 +562,7 @@ async function resolveScreen(
         hint: "this flow ran without a device, so there was no screen to read",
       },
       scrub,
+      screenless: true,
     };
   }
   try {
@@ -676,12 +720,14 @@ async function registerTreeDump(
  * Full-resolution capture at the moment of failure — the exact call
  * `flow-visual.ts` already makes for a snapshot baseline.
  *
- * Skipped in five cases, each for its own reason: an aborted run (a post-abort
- * invoke would reject, and a cancelled run says nothing about the app), a
- * missing artifact store (the unit-test path), a step that already carries
- * `artifacts.current` — a snapshot failure, where a second capture would show a
- * DIFFERENT screen than the one that was diffed — an expired capture budget,
- * and a run that has typed a secret.
+ * Skipped in six cases, each for its own reason: a screen that does not belong
+ * to this failure ({@link ScreenResolution.screenless} — the same verdict
+ * `resolveScreen` reached about the tree read, applied to the image), an
+ * aborted run (a post-abort invoke would reject, and a cancelled run says
+ * nothing about the app), a missing artifact store (the unit-test path), a step
+ * that already carries `artifacts.current` — a snapshot failure, where a second
+ * capture would show a DIFFERENT screen than the one that was diffed — an
+ * expired capture budget, and a device a secret has been typed onto.
  *
  * That last one is INDEPENDENT of the text scrubber: an image is the one
  * projection no mask can reach, so a credential the app rendered back into a
@@ -694,8 +740,13 @@ async function registerTreeDump(
 async function captureScreenshot(
   env: DiagnosticsEnv,
   report: LeafOutcome,
-  token: CaptureToken
+  token: CaptureToken,
+  screenless: boolean
 ): Promise<ArtifactHandle | undefined> {
+  // Whatever is foregrounded belongs to some other run, not to this failure —
+  // and on chromium the read `resolveScreen` declined for its side effects is
+  // the same connection this capture would use.
+  if (screenless) return undefined;
   if (env.signal?.aborted) return undefined;
   if (!env.ctx?.artifacts) return undefined;
   // A snapshot failure already holds the exact image that was compared.
@@ -732,7 +783,7 @@ async function buildFailure(
   token: CaptureToken,
   partial: { failure?: FlowStepFailure }
 ): Promise<FlowStepFailure> {
-  const { screen, tree, scrub } = await resolveScreen(env, evidence, token);
+  const { screen, tree, scrub, screenless } = await resolveScreen(env, evidence, token);
   const failure = baseFailure(report, meta, evidence, screen, typedSecret(env));
   // Published before the first enrichment and mutated IN PLACE from here on,
   // so every slot filled below is visible to the timeout fallback the instant
@@ -817,8 +868,16 @@ async function buildFailure(
   }
 
   const stem = `step-${String(meta.ordinal).padStart(2, "0")}`;
-  const screenshot = await captureScreenshot(env, report, token);
+  const screenshot = await captureScreenshot(env, report, token, screenless === true);
   if (screenshot !== undefined) failure.screenshot = screenshot;
+  // Say WHY the slot is empty rather than leaving the renderers to guess. They
+  // guessed "the device did not return an image", which is the opposite of what
+  // happened — argent declined the capture because no screen on this device is
+  // evidence of this failure. `baseFailure` may already have stamped
+  // "secret-typed", which is the more urgent reason and keeps the slot.
+  else if (screenless === true && failure.data?.screenshotOmitted === undefined) {
+    failure.data = { ...failure.data, screenshotOmitted: "no-screen" };
+  }
   if (tree !== undefined) {
     const dump = await registerTreeDump(env, tree, stem, scrub, token);
     if (dump !== undefined) failure.tree = dump;

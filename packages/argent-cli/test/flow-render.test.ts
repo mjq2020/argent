@@ -897,6 +897,61 @@ describe("renderFailures", () => {
     );
   });
 
+  it("says the screen was never this failure's to begin with", () => {
+    // A composition error (or a launch that never started the app) is decided
+    // before any step touched the device, so the producer declines the capture
+    // — and the reader must not read that as a broken one. `environmental`'s
+    // fallback line said "the device did not return an image", which is the
+    // opposite of what happened.
+    const out = renderFailures(
+      failingReport({
+        code: "run-cyclic",
+        category: "composition",
+        determinacy: "determinate",
+        message: "cyclic flow reference: a → b → a",
+        step: { kind: "run", flow: "a" },
+        screen: {
+          state: "unavailable",
+          reason: "never-readable",
+          hint: "this step failed before it reached the device, so no screen belongs to it",
+        },
+        candidates: [],
+        candidateCount: 0,
+        data: { screenshotOmitted: "no-screen" },
+        timing: { startedAt: 1, durationMs: 2 },
+      })
+    ).join("\n");
+    expect(out).toContain(
+      "     screenshot: (omitted — no screen on this device belongs to this failure)"
+    );
+    expect(out).not.toContain("the device did not return an image");
+  });
+
+  it("renders no screenshot line for an omission reason it has never heard of", () => {
+    // Wire data from a possibly-newer server: an unknown reason degrades to
+    // silence, never to a sentence the CLI invented.
+    const out = renderFailures(
+      failingReport({
+        code: "selector-not-found",
+        category: "selector",
+        determinacy: "determinate",
+        message: "no element matched",
+        step: { kind: "assert", flow: "checkout" },
+        screen: {
+          state: "available",
+          source: "chromium",
+          capturedAt: "at-failure",
+          elementCount: 1,
+        },
+        candidates: [],
+        candidateCount: 0,
+        data: { screenshotOmitted: "some-future-reason" },
+        timing: { startedAt: 1, durationMs: 2 },
+      })
+    ).join("\n");
+    expect(out).not.toContain("screenshot:");
+  });
+
   it("marks an indeterminate failure as unreadable, not as a failed assertion", () => {
     const out = renderFailures(
       failingReport({

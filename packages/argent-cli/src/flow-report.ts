@@ -454,11 +454,18 @@ export function normalizeFailure(
 
   const screenshot = artifactPath(f.screenshot);
   if (screenshot !== undefined) out.screenshot = screenshot;
-  // No image because the run typed a credential: a full-resolution capture is
-  // the one projection no scrubber reaches. Said in words, since a silently
-  // absent screenshot reads as a broken capture.
-  else if ((f.data as Record<string, unknown> | undefined)?.screenshotOmitted === "secret-typed") {
-    out.screenshot = SECRET_SCREENSHOT_NOTE;
+  // No image, and the producer said why. Rendered in words, since a silently
+  // absent screenshot reads as a broken capture — and the two reasons call for
+  // opposite reader behaviour: "do not take one yourself" vs "there was never
+  // one to take".
+  else {
+    const omitted = wireText(
+      (f.data as Record<string, unknown> | undefined)?.screenshotOmitted,
+      32
+    );
+    if (omitted !== undefined && omitted in SCREENSHOT_OMISSION_NOTE) {
+      out.screenshot = SCREENSHOT_OMISSION_NOTE[omitted]!;
+    }
   }
 
   const source = (step.source ?? {}) as Record<string, unknown>;
@@ -890,13 +897,16 @@ export const INDETERMINATE_HINT =
   "not a failed assertion — argent could not read the screen; re-run or fix the device/tree source rather than editing the flow";
 
 /**
- * Stands in for the `screenshot:` path when a `{{secret:…}}` value was typed
- * onto this device. Pixels are never scrubbed, so the capture is declined
- * outright — and saying so is what stops a reader (or an agent) from taking the
- * shot itself.
+ * Stands in for the `screenshot:` path, keyed by the producer's
+ * `data.screenshotOmitted`. An unknown key renders no line at all, so a newer
+ * server's vocabulary degrades to silence rather than to a wrong sentence.
  *
- * "onto this device", not "by this run": the guard is device-scoped, because a
- * credential an earlier flow typed is still on screen when a later one fails.
+ * `secret-typed` says "onto this device", not "by this run": the guard is
+ * device-scoped, because a credential an earlier flow typed is still on screen
+ * when a later one fails.
  */
-const SECRET_SCREENSHOT_NOTE =
-  "(omitted — a secret was typed onto this device, and a capture of this screen could reveal it)";
+const SCREENSHOT_OMISSION_NOTE: Record<string, string> = {
+  "secret-typed":
+    "(omitted — a secret was typed onto this device, and a capture of this screen could reveal it)",
+  "no-screen": "(omitted — no screen on this device belongs to this failure)",
+};

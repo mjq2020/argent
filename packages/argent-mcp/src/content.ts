@@ -553,6 +553,19 @@ type ImageBudget = { used: boolean };
 type PendingFailure = { num: number; step: FlowStepResult; failure: FlowStepFailure };
 
 /**
+ * What goes in the `screenshot:` slot when the producer declined the capture,
+ * keyed by its `data.screenshotOmitted`. Each ends with what the agent should
+ * do INSTEAD — the failure mode this replaces is an agent reading a missing
+ * image as an oversight and calling `screenshot` itself.
+ */
+const SCREENSHOT_OMISSION_NOTE: Record<string, string> = {
+  "secret-typed":
+    "omitted — a {{secret:…}} value was typed onto this device and a capture of this screen could reveal it. Do NOT call `screenshot` here; read the `tree` file below, whose text is masked.",
+  "no-screen":
+    "omitted — this step failed before it reached the device (a launch that never started, or a flow-composition error), so no screen belongs to it. A `screenshot` here would show an unrelated app; fix the flow file instead.",
+};
+
+/**
  * The `Failures:` section: the structured diagnosis for every step that carried
  * one, rendered under three context-economy rules.
  *
@@ -709,17 +722,17 @@ async function failureBlocks(
       screenshotPath = artifactPath(failure.screenshot);
     }
     if (screenshotPath) lines.push(`     screenshot: ${screenshotPath}`);
-    // No image because a credential was typed onto this device — pixels are the
-    // one projection the report's scrubber cannot reach. Said explicitly, and
-    // with the instruction attached: an agent that just sees a missing
-    // screenshot calls `screenshot` itself, which is the leak the omission
-    // prevents. "onto this device", not "by this run": the producer's guard is
-    // device-scoped, because the credential an earlier flow typed is still on
-    // screen when a later one fails.
-    else if (isRecord(failure.data) && failure.data.screenshotOmitted === "secret-typed") {
-      lines.push(
-        "     screenshot: omitted — a {{secret:…}} value was typed onto this device and a capture of this screen could reveal it. Do NOT call `screenshot` here; read the `tree` file below, whose text is masked."
-      );
+    // No image, and the producer said why. Both reasons carry an instruction,
+    // because an agent that just sees a missing screenshot calls `screenshot`
+    // itself — which is the leak the first omission prevents, and a picture of
+    // an unrelated app in the second. An unknown reason renders no line, so a
+    // newer server's vocabulary degrades to silence rather than a wrong claim.
+    else {
+      const omitted = isRecord(failure.data)
+        ? wireText(failure.data.screenshotOmitted, 32)
+        : undefined;
+      const note = omitted === undefined ? undefined : SCREENSHOT_OMISSION_NOTE[omitted];
+      if (note) lines.push(`     screenshot: ${note}`);
     }
 
     const treePath = artifactPath(failure.tree);

@@ -1185,6 +1185,61 @@ describe("flowRunToMcpContent failure diagnostics", () => {
     expect(rendered).toContain("Do NOT call `screenshot` here");
   });
 
+  it("tells the agent a composition failure has no screen of its own", async () => {
+    // A cyclic `run:` is decided from the flow files, so nothing on the device
+    // is evidence. Without the note the agent sees a missing image and takes
+    // one itself — of an unrelated app, which it then reasons about.
+    const input: FlowExecuteResult = {
+      flow: "a",
+      ok: false,
+      steps: [
+        {
+          index: 0,
+          kind: "run",
+          status: "error",
+          target: "./b.yaml",
+          failure: wireFailure({
+            code: "run-cyclic",
+            message: "cyclic flow reference: a → b → a",
+            screen: { state: "unavailable", reason: "never-readable" },
+            data: { screenshotOmitted: "no-screen" },
+          }),
+        },
+      ],
+    };
+
+    const rendered = texts(await flowRunToMcpContent(input)).join("\n");
+
+    expect(rendered).toContain(
+      "screenshot: omitted — this step failed before it reached the device"
+    );
+    expect(rendered).toContain("fix the flow file instead");
+  });
+
+  it("renders no screenshot line for an omission reason it has never heard of", async () => {
+    const input: FlowExecuteResult = {
+      flow: "a",
+      ok: false,
+      steps: [
+        {
+          index: 0,
+          kind: "assert",
+          status: "fail",
+          failure: wireFailure({
+            code: "selector-not-found",
+            message: "no element matched",
+            screen: { state: "unavailable", reason: "never-readable" },
+            data: { screenshotOmitted: "some-future-reason" },
+          }),
+        },
+      ],
+    };
+
+    const rendered = texts(await flowRunToMcpContent(input)).join("\n");
+
+    expect(rendered).not.toContain("screenshot:");
+  });
+
   it("clamps hostile wire data instead of throwing or blowing up the block", async () => {
     const huge = "x".repeat(1_000_000);
     const input: FlowExecuteResult = {

@@ -434,6 +434,69 @@ describe("screenshot capture", () => {
     expectVerdict(result, FAILING_VERDICT);
   });
 
+  it("neither reads nor captures for a failure the device had no part in", async () => {
+    // A cyclic `run:` is decided from the flow files alone — the step never
+    // touched the device. `resolveScreen` already declines the post-hoc read
+    // for the shapes with no screen of their own; the capture used to ignore
+    // that reasoning entirely and attach a full-resolution picture of whatever
+    // app happened to be foregrounded, which `--output` then exported as this
+    // failure's evidence.
+    let reads = 0;
+    currentFetch = () => {
+      reads++;
+      return HOME;
+    };
+    let screenshots = 0;
+    const registry = mockRegistry((id) => {
+      if (id === "screenshot") screenshots++;
+      return undefined;
+    });
+    await writeFlow("cyc-a", {
+      executionPrerequisite: "",
+      steps: [{ kind: "run", flow: "cyc-b" }],
+    });
+    await writeFlow("cyc-b", {
+      executionPrerequisite: "",
+      steps: [{ kind: "run", flow: "cyc-a" }],
+    });
+
+    const result = await run("cyc-a", { registry, ctx: { artifacts: new ArtifactStore() } });
+    const failure = singleFailure(result);
+
+    expect(failure.code).toBe("run-cyclic");
+    expect(reads).toBe(0);
+    expect(screenshots).toBe(0);
+    expect(failure.screenshot).toBeUndefined();
+    // Said in words: a silently empty slot reads as a broken capture, and the
+    // renderers' only other guess was "the device did not return an image".
+    expect(failure.data?.screenshotOmitted).toBe("no-screen");
+    expect(failure.screen).toMatchObject({ state: "unavailable", reason: "never-readable" });
+  });
+
+  it("declines the capture on a launch that never started the app", async () => {
+    // Same rule from the other end, and the read here is not merely
+    // uninformative: on chromium it attaches to the very instance the launch
+    // just declined to attach to.
+    let screenshots = 0;
+    const registry = mockRegistry((id) => {
+      if (id === "screenshot") screenshots++;
+      if (id === "restart-app") throw new Error("no such app");
+      return undefined;
+    });
+    await writeFlow("launch-nope", {
+      executionPrerequisite: "",
+      steps: [{ kind: "launch", app: "com.example.nope" }],
+    });
+
+    const failure = singleFailure(
+      await run("launch-nope", { registry, ctx: { artifacts: new ArtifactStore() } })
+    );
+
+    expect(failure.code).toBe("launch-failed");
+    expect(screenshots).toBe(0);
+    expect(failure.data?.screenshotOmitted).toBe("no-screen");
+  });
+
   it("reuses a snapshot's `current` artifact instead of capturing a second time", async () => {
     // A second capture would show a DIFFERENT screen than the one that was
     // diffed — the single most misleading thing a snapshot failure could carry.
