@@ -20,12 +20,14 @@ import * as path from "node:path";
 /**
  * CDP port for the boots below that must never reach a live endpoint.
  *
- * Every test that drives a spawn-error / early-exit / no-pid path needs
- * `waitForCdpReady` to keep failing, so the readiness probe cannot win
- * `bootElectronApp`'s `Promise.race`. When it does win, the boot resolves and
- * detaches the child's boot listeners — the synthetic `'error'` emit that
- * follows then hits an EventEmitter with no `'error'` listener and throws
- * instead of rejecting, failing the test.
+ * The spawn-error and early-exit tests need `waitForCdpReady` to keep failing,
+ * so the readiness probe cannot win `bootElectronApp`'s `Promise.race`. When it
+ * does win, the boot resolves and detaches the child's boot listeners — the
+ * synthetic `'error'` / `'exit'` emit that follows then hits an EventEmitter
+ * with no listener and throws instead of rejecting, failing the test. The
+ * no-pid tests don't depend on this: their throw is synchronous in the impl,
+ * before the readiness race is ever constructed, but they keep the constant so
+ * every boot here is host-independent.
  *
  * Port 1 is privileged, so no unprivileged process on the host can bind it.
  * A port in the unprivileged range is bindable by anything: argent's own
