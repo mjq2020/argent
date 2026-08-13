@@ -938,6 +938,25 @@ describe("keyboard clear — Android (adb input)", () => {
     // Typed WITH the options argument so the call site's `clearCache` is visible
     // to the assertions below — a zero-parameter stub makes it invisible, and
     // `toHaveBeenCalledTimes` alone would hold nothing.
+    // RUNNING and IDLE are not the whole vocabulary: `isLiveServiceState` also
+    // admits STARTING, and the gate is what decides whether a clear consults the
+    // helper at all. Modelled as a third state rather than a second boolean so a
+    // gate narrowed to `=== RUNNING` shows up here.
+    const registryInState = (
+      state: ServiceState,
+      getHierarchy: (options?: { clearCache?: boolean }) => Promise<{ xml: string }>
+    ) =>
+      ({
+        getServiceState: () => state,
+        resolveService: vi.fn(async () => ({
+          getHierarchy: async (options?: { clearCache?: boolean }) => ({
+            windowCount: 1,
+            truncated: false,
+            ...(await getHierarchy(options)),
+          }),
+        })),
+      }) as never;
+
     const registryWithDevtools = (
       getHierarchy: (options?: { clearCache?: boolean }) => Promise<{
         xml: string;
@@ -981,6 +1000,25 @@ describe("keyboard clear — Android (adb input)", () => {
       // under-deletes a field whose value moved on, which is the truncation the
       // measurement exists to prevent.
       expect(getHierarchy).toHaveBeenCalledWith({ clearCache: true });
+      expect(adbExecOutBinary).not.toHaveBeenCalled();
+    });
+
+    it("reads from a helper that is still STARTING, which is also live", async () => {
+      // A helper mid-start already holds (or is about to hold) the UiAutomation
+      // connection, so a dump raced against it loses exactly as it does against a
+      // RUNNING one — and `isLiveServiceState` admits both.
+      seedLegacyLevel();
+      const getHierarchy = vi.fn(async () => ({ xml: dumpWith("y".repeat(200)) }));
+
+      await expect(
+        makeAndroidImpl(registryInState(ServiceState.STARTING, getHierarchy)).handler(
+          {},
+          { udid: ANDROID.id, clear: true },
+          ANDROID
+        )
+      ).rejects.toThrow(/reports 200 characters/);
+
+      expect(getHierarchy).toHaveBeenCalledTimes(1);
       expect(adbExecOutBinary).not.toHaveBeenCalled();
     });
 
@@ -1943,6 +1981,26 @@ describe("keyboard clear — Chromium (CDP)", () => {
       // The counts are what make the message actionable — "focus moved" alone
       // does not distinguish this from the successful case above.
     ).rejects.toThrow(/only 1 of the 3 character\(s\)/);
+  });
+
+  it("files the during-typing split under FOCUS_LOST, not INEFFECTIVE", async () => {
+    // Mutation showed this code unpinned — swapping it for INEFFECTIVE changed
+    // nothing — which matters because the two must stay distinguishable on the
+    // wire: INEFFECTIVE means "re-clear required", this one means "the clear
+    // worked, the characters went elsewhere", and `failure_stage` (the only other
+    // thing separating them) is not serialized.
+    const { api } = splitApi({ tracked: true, length: 1, focused: false });
+
+    const err = await makeChromiumImpl(registryWith(api))
+      .handler({}, { udid: CHROMIUM.id, clear: true, text: "abc", delayMs: 0 }, CHROMIUM)
+      .then(
+        () => {
+          throw new Error("expected the call to reject, but it resolved");
+        },
+        (e: unknown) => e as Error
+      );
+
+    expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.KEYBOARD_CLEAR_FOCUS_LOST);
   });
 
   it("reports a split that focus was BACK from by the time it was sampled", async () => {
