@@ -57,6 +57,35 @@ describe("typeTv — the TV keyboard backend", () => {
     expect(resolveTvApi).not.toHaveBeenCalled();
   });
 
+  describe("the clear refusal's advice", () => {
+    // The refusal's closing sentence has to hold for the request it is answering.
+    // "Typing works: send the same call without `clear`" produced a SECOND 400
+    // for `{ clear: true, key: "enter" }` — a TV target refuses `key` too, and
+    // that shape is the one the clear-before-key ordering was built for (verified
+    // live on tvOS 26.5: the advice returned
+    // TOOL_CAPABILITY_UNSUPPORTED_OPERATION).
+    it("sends a combined clear+key to tv-remote, not back to `keyboard`", async () => {
+      await expect(
+        typeTv(registry, APPLE_TV, { udid: APPLE_TV.id, clear: true, key: "enter" })
+      ).rejects.toThrow(/also carries `key`.*`tv-remote`/s);
+      await expect(
+        typeTv(registry, APPLE_TV, { udid: APPLE_TV.id, clear: true, key: "enter" })
+      ).rejects.not.toThrow(/send the same call without/);
+    });
+
+    it("keeps the re-send advice for a clear+text call, where it works", async () => {
+      await expect(
+        typeTv(registry, ANDROID_TV, { udid: ANDROID_TV.id, clear: true, text: "abc" })
+      ).rejects.toThrow(/Typing works: send the same call without `clear`/);
+    });
+
+    it("promises no re-send for a clear-ONLY call, which has nothing to re-send", async () => {
+      await expect(
+        typeTv(registry, ANDROID_TV, { udid: ANDROID_TV.id, clear: true })
+      ).rejects.toThrow(/Nothing else in this request needs re-sending/);
+    });
+  });
+
   it("types text alone through the TV service (positive control)", async () => {
     // Without this the rejection tests above could pass against a backend that
     // does nothing at all.

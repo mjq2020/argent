@@ -31,10 +31,22 @@ export async function typeTv(
     // "ios simulator"), and hard-codes TOOL_CAPABILITY_UNSUPPORTED_OPERATION as
     // its signal, which files a refused `clear` under the same code as a tool
     // that cannot run here at all.
+    // What to do next depends on what ELSE the request carries, because a TV
+    // target does not accept `key` either: "send the same call without `clear`"
+    // sent `{ clear: true, key: "enter" }` — the very shape the clear-before-key
+    // ordering below was built for — straight into a second 400 from the `key`
+    // refusal (verified live on tvOS 26.5). A clear-only call has nothing to
+    // re-send at all.
+    const next = params.key
+      ? "This request also carries `key`, which a TV target does not accept either — press it " +
+        "with `tv-remote` (select/up/down/left/right) instead."
+      : params.text !== undefined
+        ? "Typing works: send the same call without `clear`."
+        : "Nothing else in this request needs re-sending.";
     throw new InvalidToolInputError(
       "keyboard clear: `clear` is not supported on a TV target — delete the existing value " +
         "with repeated backspaces on the on-screen keyboard, or use the field's own clear " +
-        "affordance. Typing works: send the same call without `clear`.",
+        `affordance. ${next}`,
       {
         error_code: FAILURE_CODES.KEYBOARD_CLEAR_UNSUPPORTED_TARGET,
         failure_stage: "keyboard_clear_tv",
