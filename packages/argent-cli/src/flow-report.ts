@@ -202,6 +202,18 @@ export interface NormalizedFailure {
   reads?: string;
   device?: string;
   screenshot?: string;
+  /**
+   * Set when {@link screenshot} holds an OMISSION NOTE rather than a path — the
+   * producer's `data.screenshotOmitted` reason, verbatim.
+   *
+   * Both renderers suppress the `screenshot:` line on a snapshot step, because
+   * the step's own `current` names the same image and one picture must not be
+   * listed under two paths. That suppression cannot apply to prose: a snapshot
+   * step that failed after a secret was typed printed neither the path nor the
+   * note, so the surface most likely to be uploaded to CI said nothing at all
+   * about a withheld capture.
+   */
+  screenshotOmitted?: string;
   tree?: string;
   /** `.argent/flows/<flow>.yaml`, for the block header. */
   sourceFile?: string;
@@ -465,6 +477,7 @@ export function normalizeFailure(
     );
     if (omitted !== undefined && omitted in SCREENSHOT_OMISSION_NOTE) {
       out.screenshot = SCREENSHOT_OMISSION_NOTE[omitted]!;
+      out.screenshotOmitted = omitted;
     }
   }
 
@@ -685,10 +698,42 @@ function junitDetailLines(s: StepReport, f: NormalizedFailure | undefined): stri
   // A snapshot failure's `current` IS the screenshot at the moment of failure,
   // so the three roles above already name it. The terminal block draws the same
   // suppression; without it here the body listed four paths for three images.
+  // It bounds PATHS only — an omission note is prose about a capture that was
+  // never taken, and suppressing it left the `<failure>` body of a secret-typed
+  // snapshot with no mention of the withheld screen at all.
   const isSnapshotShot = artifactPath(s.artifacts?.current) !== undefined;
-  if (f.screenshot && !isSnapshotShot) lines.push(`screenshot: ${f.screenshot}`);
+  if (f.screenshot && (f.screenshotOmitted !== undefined || !isSnapshotShot)) {
+    lines.push(`screenshot: ${f.screenshot}`);
+  }
+  const warning = secretArtifactWarning(s, f);
+  if (warning) lines.push(warning);
   if (f.tree) lines.push(`tree: ${f.tree}`);
   return lines;
+}
+
+/**
+ * The line that keeps the omission note from over-promising.
+ *
+ * A snapshot registers `current` (and `baseline`/`diff`) itself, independently
+ * of the failure diagnostics, and `--output` copies every role. So on a
+ * snapshot step the producer's declined capture removes a POINTER while the
+ * same screen is still listed — and on a diff it is the annotated one, where
+ * the changed pixels are boxed in red. Saying "a capture of this screen could
+ * reveal it" beside those paths, with nothing else, reads as a protection that
+ * was not applied.
+ */
+export function secretArtifactWarning(s: StepReport, f: NormalizedFailure): string | undefined {
+  if (f.screenshotOmitted !== "secret-typed") return undefined;
+  const roles = Object.entries(s.artifacts ?? {})
+    .filter(([, value]) => artifactPath(value) !== undefined)
+    .map(([role]) => wireText(role, 64))
+    .filter((role): role is string => role !== undefined);
+  if (roles.length === 0) return undefined;
+  const one = roles.length === 1;
+  return (
+    `warning: the ${roles.join("/")} image${one ? "" : "s"} above ${one ? "is" : "are"} of that ` +
+    `same screen — review ${one ? "it" : "them"} before publishing as a CI artifact`
+  );
 }
 
 /** One flow's contribution to the document's `<testsuites>` counters. */

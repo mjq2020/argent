@@ -623,6 +623,66 @@ describe("renderFailures", () => {
     expect(out).not.toContain("screenshot:");
   });
 
+  it("still says the capture was withheld on a snapshot step, and flags its images", () => {
+    // The crossing the suite never made. `isSnapshotShot` suppresses the
+    // `screenshot:` line so one image is not listed under two paths — but it
+    // suppressed the OMISSION NOTE too, so a snapshot that failed after a
+    // secret was typed printed neither, on the one surface CI uploads.
+    //
+    // And the note alone would over-promise: a snapshot registers `current`
+    // (and on a diff the annotated `diff`, where the changed pixels are boxed
+    // in red) independently of the diagnostics, and `--output` copies every
+    // role. Saying "a capture of this screen could reveal it" beside those
+    // paths reads as a protection that was not applied.
+    const out = renderFailures(
+      failingReport(
+        {
+          code: "snapshot-diff",
+          category: "snapshot",
+          determinacy: "determinate",
+          message: "diff 2.10% > 1%",
+          step: { kind: "snapshot", flow: "checkout" },
+          screen: { state: "available", capturedAt: "at-failure", elementCount: 4, elements: [] },
+          candidates: [],
+          candidateCount: 0,
+          data: { screenshotOmitted: "secret-typed" },
+        },
+        {
+          kind: "snapshot",
+          artifacts: {
+            baseline: "out/checkout/home-baseline.png",
+            current: "out/checkout/home-current.png",
+            diff: "out/checkout/home-diff.png",
+          },
+        }
+      )
+    ).join("\n");
+    expect(out).toContain(
+      "     screenshot: (omitted — a secret was typed onto this device, and a capture of this screen could reveal it)"
+    );
+    expect(out).toContain(
+      "     warning: the baseline/current/diff images above are of that same screen — review them before publishing as a CI artifact"
+    );
+  });
+
+  it("does not flag artifacts on a step that carries none", () => {
+    const out = renderFailures(
+      failingReport({
+        code: "selector-not-found",
+        category: "selector",
+        determinacy: "determinate",
+        message: "no element matched",
+        step: { kind: "assert", flow: "checkout" },
+        screen: { state: "available", capturedAt: "at-failure", elementCount: 1, elements: [] },
+        candidates: [],
+        candidateCount: 0,
+        data: { screenshotOmitted: "secret-typed" },
+      })
+    ).join("\n");
+    expect(out).toContain("     screenshot: (omitted —");
+    expect(out).not.toContain("warning: the");
+  });
+
   it("replaces screen/tree with the device on a launch failure, and says the shot is missing", () => {
     const out = renderFailures(
       failingReport({

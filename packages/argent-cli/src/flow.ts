@@ -24,6 +24,7 @@ import {
   nodeRow,
   normalizeFailure,
   parseReporterSpec,
+  secretArtifactWarning,
   stepLabel,
   wireText,
   type JUnitRun,
@@ -613,13 +614,19 @@ function renderFailureBlock(
   // A snapshot failure's `current` IS the screenshot at the moment of failure —
   // a second capture would show a different screen than the one that was
   // diffed — so the three roles above stand in for the `screenshot:` line.
+  // That stands in for a PATH only: an omission note is prose about a capture
+  // that was never taken, and a snapshot step swallowed it entirely, so the one
+  // shape where the screen still leaves the machine said nothing about it.
   const isSnapshotShot = artifactPath(s.artifacts?.current) !== undefined;
-  if (f.screenshot && !isSnapshotShot) slot(`screenshot: ${f.screenshot}`);
-  else if (!f.screenshot && f.environmental) {
+  if (f.screenshot && (f.screenshotOmitted !== undefined || !isSnapshotShot)) {
+    slot(`screenshot: ${f.screenshot}`);
+  } else if (!f.screenshot && f.environmental) {
     // Say it explicitly rather than silently omitting the line: on a launch
     // failure the missing screenshot IS information.
     slot("screenshot: (unavailable — the device did not return an image)");
   }
+  const secretWarning = secretArtifactWarning(s, f);
+  if (secretWarning) slot(secretWarning);
   if (f.tree) slot(`tree: ${f.tree}`);
   return lines;
 }

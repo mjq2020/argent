@@ -218,6 +218,43 @@ describe("buildJUnitXml", () => {
     expect(xml).toContain("<system-out>Opening the cart");
   });
 
+  it("keeps the withheld-capture note in the body of a snapshot failure", () => {
+    // The `<failure>` body suppresses `screenshot:` on a snapshot step, because
+    // `current` names the same image. That must bound PATHS only: a snapshot
+    // that failed after a secret was typed had the omission note suppressed
+    // too, so the JUnit file — the artifact CI actually publishes — said
+    // nothing about a withheld capture while listing the screen it protects.
+    const xml = buildJUnitXml(
+      mkReport({
+        steps: [
+          {
+            index: 0,
+            kind: "snapshot",
+            status: "fail",
+            target: '"home"',
+            durationMs: 600,
+            reason: "diff 2.10% > 1%",
+            artifacts: { current: "out/checkout/home-current.png" },
+            failure: {
+              code: "snapshot-diff",
+              category: "snapshot",
+              determinacy: "determinate",
+              message: "diff 2.10% > 1%",
+              step: { index: 0, ordinal: 1, kind: "snapshot", flow: "checkout" },
+              screen: { state: "unavailable", reason: "read-failed" },
+              candidates: [],
+              candidateCount: 0,
+              data: { screenshotOmitted: "secret-typed" },
+              timing: { startedAt: 1, durationMs: 600 },
+            },
+          },
+        ],
+      })
+    );
+    expect(xml).toContain("screenshot: (omitted — a secret was typed onto this device");
+    expect(xml).toContain("warning: the current image above is of that same screen");
+  });
+
   it("uses <failure> for a failed assertion and <error> for broken machinery", () => {
     const xml = buildJUnitXml(mkReport());
     expect(xml).toContain('<failure type="selector-not-found"');
