@@ -2041,6 +2041,49 @@ describe("keyboard clear — Chromium (CDP)", () => {
     }
   );
 
+  it("still holds the field to the characters BEFORE an Enter inside `text`", async () => {
+    // The exclusion above tested the whole string and skipped every character,
+    // so one newline switched the guarantee off for a value of any length — and
+    // a `\n` in a `<textarea>` is ordinary content that moves nothing. Measured
+    // on Chrome 151 against an exact control pair differing only by that one
+    // character, in a textarea whose 4th `input` moves focus to a neighbour:
+    // `{ clear, text: "aaaabbbb" }` correctly reported the split while
+    // `{ clear, text: "aaaa\nbbbb" }` returned `cleared: true`, and both left
+    // the same `["aaa", "abbbb"]` behind.
+    //
+    // 3 delivered of the 4 before the Enter, so the prefix is short and the
+    // field holds less than it: the same two signals the check always needs,
+    // counted against what was actually promised.
+    const { api } = splitApi({ tracked: true, length: 3, focused: true, delivered: 3 });
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: "aaaa\nbbbb", delayMs: 0 },
+        CHROMIUM
+      )
+      // Counted against the prefix, and it says so — quoting the request's own
+      // 9 would name characters this never had an opinion about.
+    ).rejects.toThrow(/only 3 of the 4 character\(s\) before the first Enter\/Tab of the 9 sent/);
+  });
+
+  it("does not hold it to characters sent AFTER the Enter", async () => {
+    // The other side of the prefix rule: everything before the Enter arrived,
+    // so nothing is reported — whatever the page then did with the rest is the
+    // focus move the request asked for. This is the Enter-to-send composer
+    // (a `<textarea>` whose page swallows the Enter, empties the field and
+    // blurs it), verified on Chrome 151 as a clean pass.
+    const { api } = splitApi({ tracked: true, length: 0, focused: false, delivered: 4 });
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, text: "aaaa\nbbbb", delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(result).toMatchObject({ typed: "aaaa\nbbbb", cleared: true });
+  });
+
   it("reads the field back BEFORE the named key, so the key's own effect is not a split", async () => {
     // `{ clear, text, key: "enter" }` is the combination the tool advertises,
     // and the standard Enter handler — a search box, a chat composer, a tag

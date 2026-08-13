@@ -48,18 +48,40 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
   const descs = params.text
     ? [...params.text].map((char) => ({ char, desc: charToChromiumKey(char) }))
     : [];
-  // `\n`, `\r` and `\t` are not characters on this backend: `charToChromiumKey`
-  // maps them to the Enter and Tab descriptors, so they are dispatched inside
-  // the typing loop as the physical keys they are. They therefore deliver no
-  // character to the field and move focus BY DEFINITION — the two reasons the
-  // split check below excludes a named `key` — so a `text` carrying one is
-  // excluded on the same grounds. Without this the SAME Enter succeeded spelled
-  // as `key: "enter"` and failed spelled as `\n`: measured on Chrome 151 against
-  // a search box that submits, empties and blurs (the shape the check's own
-  // comment cites), `{ clear, text: "query\n" }` raised a 500 naming a split
-  // 3/3 while the page had done exactly what was asked, and the control with the
-  // named key passed.
-  const textMovesFocus = descs.some(({ char }) => char === "\n" || char === "\r" || char === "\t");
+  // How many characters the split check below can hold the field to: the ones
+  // before the first `\n`, `\r` or `\t`, or all of them when `text` carries
+  // none.
+  //
+  // Those three are not characters on this backend: `charToChromiumKey` maps
+  // them to the Enter and Tab descriptors, so they are dispatched inside the
+  // typing loop as the physical keys they are, and they can move focus BY
+  // DEFINITION — the reason the split check also excludes a named `key`.
+  // Anything sent AFTER one of them may therefore land in a different field
+  // because the request asked for exactly that, which is why the guarantee stops
+  // there. Without that stop the SAME Enter succeeded spelled as `key: "enter"`
+  // and failed spelled as `\n`: measured on Chrome 151 against a search box that
+  // submits, empties and blurs (the shape the check's own comment cites),
+  // `{ clear, text: "query\n" }` raised a 500 naming a split 3/3 while the page
+  // had done exactly what was asked, and the control with the named key passed.
+  //
+  // What it no longer does is drop the check for the WHOLE call. `descs.some`
+  // tested the whole string and skipped every character, so one newline in a
+  // `<textarea>` — where a newline is ordinary content that moves nothing —
+  // switched the guarantee off for a value of any length. Measured on Chrome 151
+  // against an exact control pair differing only by one `\n`, in a textarea
+  // whose 4th `input` moves focus to a neighbour: `{ clear, text: "aaaabbbb" }`
+  // correctly reported the split, `{ clear, text: "aaaa\nbbbb" }` returned
+  // `cleared: true`, and both left the same `["aaa", "abbbb"]` behind.
+  //
+  // Counting the PREFIX keeps both: the search box delivers all 5 of `query`
+  // before its Enter and still passes, while the textarea delivers 3 of the
+  // first 4 and fails. It cannot see a split that happens after the Enter, which
+  // is the part no evidence here can separate from the focus move the caller
+  // asked for.
+  const firstMovesFocus = descs.findIndex(
+    ({ char }) => char === "\n" || char === "\r" || char === "\t"
+  );
+  const guaranteed = firstMovesFocus < 0 ? descs.length : firstMovesFocus;
   for (const { char, desc } of descs) {
     if (!desc) {
       // A character with no CDP descriptor can't be typed — caller input error
@@ -186,9 +208,10 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     // So the check is narrowed on both axes. A named `key` never reaches it: the
     // sample is taken HERE, between the last character and the key, because one
     // key event cannot be split across two fields while for `tab`/`enter` the
-    // focus move IS the requested effect. `text` carrying `\n`/`\r`/`\t` is
-    // excluded for exactly that second reason — see `textMovesFocus`, which is
-    // the same physical key arriving by a different spelling. Sampling after the
+    // focus move IS the requested effect. `text` carrying `\n`/`\r`/`\t` ends the
+    // guarantee at that character for exactly that second reason — see
+    // `guaranteed`, which is the same physical key arriving by a different
+    // spelling, and everything before it is still held to. Sampling after the
     // key instead made every `{ clear, text, key: "enter" }` against the ordinary
     // "send and reset" handler — a search box, a chat composer, a tag input, all
     // of which empty the field and blur it on submit — fail with a 500 naming a
@@ -222,15 +245,25 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     // deliveries by calling `stopPropagation` on `beforeinput` is saved by the
     // value half, since the characters it swallowed the events for are in the
     // field.
-    if (handle && descs.length > 0 && !textMovesFocus) {
+    if (handle && guaranteed > 0) {
       const after = await releaseTarget();
       const landed = after?.length ?? 0;
       // -1 means the count could not be read at all, so fall back to the focus
       // sample rather than inventing evidence either way.
+      //
+      // That fallback is what still excludes the WHOLE call when `text` carries
+      // an Enter or a Tab: a focus sample cannot tell "the page split the value"
+      // from "the Enter I was asked to send submitted the form and blurred the
+      // field", which is the false positive this exclusion was added for. The
+      // prefix rule replaces it only where there is provenance to replace it
+      // with — a readable delivery count, which says how many characters reached
+      // the parked element regardless of what the Enter then did.
+      const delivered =
+        after?.delivered !== undefined && after.delivered >= 0 ? after.delivered : undefined;
       const shortDelivery =
-        after?.delivered === undefined || after.delivered < 0
-          ? after?.focused === false
-          : after.delivered < descs.length;
+        delivered !== undefined
+          ? delivered < guaranteed
+          : guaranteed === descs.length && after?.focused === false;
       // A field at its own `maxlength` is the standing exclusion, and the one the
       // OTP note above got wrong: the pattern it was measured against is the
       // SINGLE-field variant, where the whole value fits. A SEGMENTED one — six
@@ -239,18 +272,24 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
       // built — holds 1 of N BY DESIGN, and receives 1 delivery of N as well, so
       // neither signal can tell it from a split. A field that cannot hold another
       // character explains its own short value.
-      const valueWrong = landed < descs.length || after?.reverted === true;
+      const valueWrong = landed < guaranteed || after?.reverted === true;
       if (after?.tracked && shortDelivery && valueWrong && !after.full) {
         // Both halves of the count are credential material: the field's own
         // length when it is a password input, and the REQUEST's length when the
         // text came from a `{{secret:…}}` placeholder — which a plain
         // `type="text"` box takes just as often (an API key, a TOTP code, a
         // password field a show/hide control has toggled to text).
+        // Counted against what was checked, not against what was sent: with an
+        // Enter or a Tab in `text` those differ, and quoting the request's own
+        // length there would name characters this never had an opinion about.
+        const upTo =
+          guaranteed < descs.length
+            ? ` before the first Enter/Tab of the ${descs.length} sent`
+            : ``;
         const reached =
           after.secret || clearedSecret || params.secretText
             ? `not all of the text reached`
-            : `only ${after.delivered !== undefined && after.delivered >= 0 ? after.delivered : landed} ` +
-              `of the ${descs.length} character(s) reached`;
+            : `only ${delivered ?? landed} of the ${guaranteed} character(s)${upTo} reached`;
         // The revert is worth its own sentence: it is the state in which
         // `cleared` would have been flatly false.
         const holds = after.reverted
