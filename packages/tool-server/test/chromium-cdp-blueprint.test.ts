@@ -236,7 +236,15 @@ describe("chromiumCdpBlueprint (smoke)", () => {
     }
   });
 
-  it("omits `commands` from the payload when the caller does not set it", async () => {
+  // What this pins is the WIRE SHAPE — a plain key event carries no `commands` —
+  // and not the `if (event.commands !== undefined)` guard that builds it. It
+  // cannot pin that guard, and no test at this layer can: the payload is sent
+  // through `JSON.stringify`, which drops an `undefined`-valued key, so
+  // `payload.commands = undefined` and "no key at all" are byte-identical to the
+  // fake server below (verified in Node). The same is true of every sibling guard
+  // in that builder. Deleting one is caught by review or by the CDP receiver, not
+  // from here.
+  it("sends no `commands` on the wire when the caller does not set it", async () => {
     const s = await startFakeCdp();
     servers.push(s);
     const device = resolveDevice(`chromium-cdp-${s.port}`);
