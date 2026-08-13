@@ -48,6 +48,18 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
   const descs = params.text
     ? [...params.text].map((char) => ({ char, desc: charToChromiumKey(char) }))
     : [];
+  // `\n`, `\r` and `\t` are not characters on this backend: `charToChromiumKey`
+  // maps them to the Enter and Tab descriptors, so they are dispatched inside
+  // the typing loop as the physical keys they are. They therefore deliver no
+  // character to the field and move focus BY DEFINITION — the two reasons the
+  // split check below excludes a named `key` — so a `text` carrying one is
+  // excluded on the same grounds. Without this the SAME Enter succeeded spelled
+  // as `key: "enter"` and failed spelled as `\n`: measured on Chrome 151 against
+  // a search box that submits, empties and blurs (the shape the check's own
+  // comment cites), `{ clear, text: "query\n" }` raised a 500 naming a split
+  // 3/3 while the page had done exactly what was asked, and the control with the
+  // named key passed.
+  const textMovesFocus = descs.some(({ char }) => char === "\n" || char === "\r" || char === "\t");
   for (const { char, desc } of descs) {
     if (!desc) {
       // A character with no CDP descriptor can't be typed — caller input error
@@ -168,7 +180,9 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     // So the check is narrowed on both axes. A named `key` never reaches it: the
     // sample is taken HERE, between the last character and the key, because one
     // key event cannot be split across two fields while for `tab`/`enter` the
-    // focus move IS the requested effect. Sampling after the key instead made
+    // focus move IS the requested effect. `text` carrying `\n`/`\r`/`\t` is
+    // excluded for exactly that second reason — see `textMovesFocus`, which is
+    // the same physical key arriving by a different spelling. Sampling after the key instead made
     // every `{ clear, text, key: "enter" }` against the ordinary "send and reset"
     // handler — a search box, a chat composer, a tag input, all of which empty
     // the field and blur it on submit — fail with a 500 naming a split that did
@@ -189,7 +203,7 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     // the alternative is the silent half-written field this parameter exists to
     // prevent (measured on Chrome 150: 8 of 11 runs wrote text outside the
     // target field).
-    if (handle && descs.length > 0) {
+    if (handle && descs.length > 0 && !textMovesFocus) {
       const after = await releaseTarget();
       const landed = after?.length ?? 0;
       if (after?.tracked && after.focused === false && landed < descs.length) {

@@ -1628,6 +1628,32 @@ describe("keyboard clear — Chromium (CDP)", () => {
     }
   });
 
+  it.each(["\n", "\r", "\t"])(
+    "does not call the same focus move a split when it arrives inside `text` (%j)",
+    async (char) => {
+      // The named key's twin, by the other spelling. `charToChromiumKey` maps
+      // `\n`/`\r` to Enter and `\t` to Tab, so they are dispatched inside the
+      // typing loop as those physical keys — delivering no character and moving
+      // focus by definition, which is exactly why the named key is excluded.
+      // Measured on Chrome 151 against a search box that submits, empties and
+      // blurs: `{ clear, text: "query\n" }` was a 500 naming a split 3/3 while
+      // `{ clear, text: "query", key: "enter" }` on the identical page passed,
+      // and the page's own state was the same in both.
+      const { api, events } = splitApi({ tracked: true, length: 0, focused: false });
+
+      const result = await makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: `query${char}`, delayMs: 0 },
+        CHROMIUM
+      );
+
+      expect(result).toMatchObject({ typed: `query${char}`, keys: 6, cleared: true });
+      // Every character still went out — the exclusion is about the verdict, not
+      // about skipping the dispatch.
+      expect(events.filter((e) => e.type === "char")).toHaveLength(6);
+    }
+  );
+
   it("reads the field back BEFORE the named key, so the key's own effect is not a split", async () => {
     // `{ clear, text, key: "enter" }` is the combination the tool advertises,
     // and the standard Enter handler — a search box, a chat composer, a tag
