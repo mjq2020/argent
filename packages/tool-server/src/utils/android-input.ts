@@ -328,7 +328,10 @@ export interface AndroidClearOptions {
  * stream we can see. Verified that a device which DOES support the subcommand
  * prints nothing on either stream, so this cannot false-reject.
  *
- * A thrown error is left to propagate as the genuine transport failure it is.
+ * A throw from the PROBE is left to propagate as the genuine transport failure
+ * it is: nothing has been sent to the field at that point. The delete that
+ * follows it is different — the select-all has landed by then — so that leg is
+ * rewrapped, the same way the legacy path rewraps its delete run.
  *
  * On a level without `keycombination` the clear falls back to
  * {@link clearByDeleting}.
@@ -348,9 +351,38 @@ export async function injectAndroidClear(
     await clearByDeleting(serial, deadline, options);
     return;
   }
-  await adbShell(serial, `input keyevent ${KEYCODE_DEL}`, {
-    timeoutMs: clearLegTimeout(deadline),
-  });
+  // Capped at the ordinary per-`input` budget as well as at the shared deadline.
+  // `clearLegTimeout(deadline)` alone handed this leg everything the probe did
+  // not spend — ~25s after a warm probe, 10s past the cap every other `input`
+  // call in this file gets, and the reserve is what guarantees its floor anyway.
+  // One `keyevent` has no reason to outlive ADB_INPUT_TIMEOUT_MS.
+  try {
+    await adbShell(serial, `input keyevent ${KEYCODE_DEL}`, {
+      timeoutMs: Math.min(ADB_INPUT_TIMEOUT_MS, clearLegTimeout(deadline)),
+    });
+  } catch (cause) {
+    // The select-all has already been applied, and it SURVIVES the killed delete
+    // — verified on API 36: after this leg was SIGKILLed the field still held its
+    // whole value, and the next character typed into it replaced the lot. So the
+    // field is in one of two states and the caller cannot tell which, which is
+    // the same report the legacy path's delete run gives. `adbShell`'s own error
+    // is filed under ANDROID_ADB_COMMAND_FAILED and says only that
+    // `input keyevent 67` was killed, so a caller reads a transport fault and
+    // retries against a field it believes is untouched.
+    throw new FailureError(
+      `keyboard clear: the delete did not finish on this device, so the focused field is ` +
+        `either empty or still holds its whole value with all of it SELECTED — the select-all ` +
+        `landed and survives, so the next character typed into it replaces the value. Nothing ` +
+        `was typed. Read the field's actual contents before continuing; do not treat it as ` +
+        `unchanged, and do not send a replacement that assumes it is empty.`,
+      {
+        error_code: FAILURE_CODES.KEYBOARD_CLEAR_INTERRUPTED,
+        failure_stage: "keyboard_clear_delete_android",
+        failure_area: "tool_server",
+        error_kind: getFailureSignal(cause)?.error_kind ?? "subprocess",
+      }
+    );
+  }
 }
 
 const KEYCODE_MOVE_END = 123;

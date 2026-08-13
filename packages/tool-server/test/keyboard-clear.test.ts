@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ServiceState, type DeviceInfo } from "@argent/registry";
+import {
+  FAILURE_CODES,
+  FailureError,
+  getFailureSignal,
+  ServiceState,
+  type DeviceInfo,
+} from "@argent/registry";
 import { typeSimulatorServer } from "../src/tools/keyboard/simulator-server-keys";
 import { makeChromiumImpl } from "../src/tools/keyboard/platforms/chromium";
 import { vegaImpl } from "../src/tools/keyboard/platforms/vega";
@@ -563,16 +569,23 @@ describe("keyboard clear — Android (adb input)", () => {
     }
   });
 
-  it("keeps the modern path's DEL on the shared deadline too", async () => {
-    // The common path (a level that HAS `keycombination`) is probe + DEL, and
-    // the DEL is a device write like any other. A fresh full-size cap here
-    // stacks 15s on top of the probe's 15s and the text injection's 15s, which
-    // is the 30s-per-request overrun the shared budget exists to prevent.
+  it.each([
+    // A warm probe leaves ~24s of budget, and the DEL is capped at the ordinary
+    // per-`input` budget instead of taking all of it: one `keyevent` has no
+    // reason to outlive ADB_INPUT_TIMEOUT_MS, and 10s past it is 10s past what
+    // this file says every `input` call gets.
+    ["the ordinary per-`input` cap when the budget is roomier", 2_000, 15_000],
+    // A slow probe leaves less than that cap, and the shared deadline still
+    // binds — a fresh full-size cap here would stack 15s on top of the probe's
+    // 15s and the text injection's 15s, which is the 30s-per-request overrun the
+    // shared budget exists to prevent.
+    ["the shared deadline when that is tighter", 14_000, 12_000],
+  ])("gives the modern path's DEL %s", async (_label, probeMs, expected) => {
     let clock = 1_000_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
     try {
       adbShell.mockImplementationOnce(async () => {
-        clock += 2_000; // a slow probe on a level that supports the subcommand
+        clock += probeMs; // a level that supports the subcommand
         return "";
       });
 
@@ -585,12 +598,46 @@ describe("keyboard clear — Android (adb input)", () => {
       const timeoutOf = (call: [string, string, unknown?]) =>
         (call[2] as { timeoutMs: number }).timeoutMs;
       expect(adbShell.mock.calls[1]![1]).toBe(DEL_CMD);
-      // 26s budget − 2s spent, with no reserve withheld: this IS the mutating
-      // leg. A fresh ADB_INPUT_TIMEOUT_MS would read 15_000.
-      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(24_000);
+      expect(timeoutOf(adbShell.mock.calls[1]!)).toBe(expected);
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it("reports a killed modern DEL as INTERRUPTED, naming the surviving selection", async () => {
+    // The select-all has already landed when this leg runs, and it SURVIVES the
+    // kill — verified on API 36: the field still held its whole value and the
+    // next character typed into it replaced the lot. `adbShell`'s own error says
+    // only that `input keyevent 67` was killed, so a caller reads a transport
+    // fault and retries against a field it believes is untouched. The legacy
+    // path's delete run has been rewrapped for this since it shipped; this leg
+    // had no equivalent.
+    adbShell.mockImplementationOnce(async () => ""); // the level supports the chord
+    adbShell.mockImplementationOnce(async () => {
+      throw new FailureError("adb -s emulator-5554 shell input keyevent 67 failed (killed=true)", {
+        error_code: FAILURE_CODES.ANDROID_ADB_COMMAND_FAILED,
+        failure_stage: "android_adb_command",
+        failure_area: "tool_server",
+        error_kind: "timeout",
+      });
+    });
+
+    const err = await makeAndroidImpl(registryWith({}))
+      .handler({}, { udid: ANDROID.id, clear: true, text: "replacement" }, ANDROID)
+      .then(
+        () => {
+          throw new Error("expected the call to reject, but it resolved");
+        },
+        (e: unknown) => e as Error
+      );
+
+    expect(getFailureSignal(err)?.error_code).toBe(FAILURE_CODES.KEYBOARD_CLEAR_INTERRUPTED);
+    // The kind is carried through, so a killed leg still reads as a timeout.
+    expect(getFailureSignal(err)?.error_kind).toBe("timeout");
+    expect(err.message).toMatch(/all of it SELECTED/);
+    expect(err.message).not.toMatch(/input keyevent/);
+    // Refused before the typing: the replacement must not land on a selection.
+    expect(inputCmds().some((cmd) => cmd.includes("input text"))).toBe(false);
   });
 
   it("floors an overrun leg at 1s rather than handing adb no timeout at all", async () => {
