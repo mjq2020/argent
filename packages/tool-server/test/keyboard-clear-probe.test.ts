@@ -37,6 +37,9 @@ interface FakeEl {
   validity?: { badInput: boolean };
   /** The field's own cap, reflected as -1 when the attribute is absent. */
   maxLength?: number;
+  /** The element's own attributes, for the editing-host walk. */
+  getAttribute?: (name: string) => string | null;
+  parentElement?: FakeEl | null;
   /** The element's own root — a Document or an open ShadowRoot. */
   getRootNode?: () => { activeElement: FakeEl | null } | null;
   /** The document the element lives in, for the frame-chain focus walk. */
@@ -318,6 +321,56 @@ describe("chromium clear — focused-element probe", () => {
     const { result, window } = focused(el);
     expect(result).toMatchObject({ verdict: "editable", label: "DIV#rt", parked: true });
     expect(window[HANDLE]).toBe(el);
+  });
+
+  describe("the editing host, not whatever inside it holds focus", () => {
+    // Blink scopes select-all to the editing HOST, so an element editable only
+    // by INHERITANCE holds none of the content the chord acts on. Measuring it
+    // made every verdict vacuous: measured on Chrome 151, focus on an empty
+    // `<span tabindex="0">` inside a composer whose `beforeinput` the page
+    // cancels reported "SPAN#btn was emptied … the field is already empty" while
+    // the host still held every character — and advised sending the rest of the
+    // request without `clear`, i.e. an append into a full field.
+    const inside = (attrs: Record<string, string>, parent: Partial<FakeEl>) => {
+      const host = {
+        tagName: "DIV",
+        id: "host",
+        isContentEditable: true,
+        textContent: "SECRET DRAFT CONTENT",
+        getAttribute: (name: string) => (name === "contenteditable" ? "true" : null),
+        ...parent,
+      } as unknown as FakeEl;
+      const el = {
+        tagName: "SPAN",
+        id: "btn",
+        isContentEditable: true,
+        textContent: "",
+        getAttribute: (name: string) => attrs[name] ?? null,
+        parentElement: host,
+      } as unknown as FakeEl;
+      return { host, ...focused(el) };
+    };
+
+    it("parks the host when focus sits on an inherited-editable descendant", () => {
+      const { host, result, window } = inside({}, {});
+      expect(result).toMatchObject({ verdict: "editable", label: "DIV#host" });
+      expect(window[HANDLE]).toBe(host);
+    });
+
+    it("parks the element itself when IT declares contenteditable", () => {
+      // A nested editor inside another editable is its own host, which is what
+      // Blink treats as the scope — climbing past it would clear the outer one.
+      const { result, window } = inside({ contenteditable: "true" }, {});
+      expect(result).toMatchObject({ verdict: "editable", label: "SPAN#btn" });
+      expect((window[HANDLE] as FakeEl).id).toBe("btn");
+    });
+
+    it("climbs to the last editable ancestor when nothing declares the attribute", () => {
+      // `document.designMode = "on"`: the whole document is editable and no
+      // element carries the attribute, so the host is that document's body.
+      const { host, window } = inside({}, { getAttribute: () => null, tagName: "BODY", id: "" });
+      expect(window[HANDLE]).toBe(host);
+    });
   });
 
   it("refuses a readonly field rather than dispatching against it", () => {

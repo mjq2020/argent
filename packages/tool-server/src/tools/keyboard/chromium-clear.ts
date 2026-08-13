@@ -519,10 +519,43 @@ export const focusedEditableProbe = (handle: string) => `(() => {
       return JSON.stringify({ verdict: "not-editable", label, mac });
     }
     if (el.isContentEditable === true) {
+      // Measure the EDITING HOST, not whatever inside it holds focus. Blink
+      // scopes select-all to the host, so an element that is editable only by
+      // INHERITANCE — a focusable \`<span tabindex="0">\` inside a composer, a
+      // toolbar chip, an empty inline widget — holds none of the content the
+      // chord acts on, and measuring it made every verdict vacuous: measured on
+      // Chrome 151, focus on such an empty span inside a host whose
+      // \`beforeinput\` the page cancels reported "SPAN#btn was emptied … the
+      // field is already empty" while the host still held every character, and
+      // advised sending the rest of the request without \`clear\` — an append
+      // into a full field, which is the outcome this parameter exists to
+      // prevent. The host is also what the caller means by "the field", so the
+      // label names it.
+      //
+      // The walk stops at the nearest element that declares the attribute
+      // ITSELF, which is what Blink treats as the host: a nested editor inside
+      // another editable is its own host, not the outer one. With nothing
+      // declaring it (\`document.designMode\`) it climbs to the last editable
+      // ancestor, which is that document's body.
+      let host = el;
+      for (let up = 0; up < 32; up++) {
+        const own = host.getAttribute ? host.getAttribute("contenteditable") : null;
+        const declared = own == null ? null : String(own).toLowerCase();
+        if (declared === "true" || declared === "" || declared === "plaintext-only") break;
+        const parent = host.parentElement;
+        if (!parent || parent.isContentEditable !== true) break;
+        host = parent;
+      }
+      const hostLabel =
+        host === el
+          ? label
+          : (identChars((host.tagName || "").toUpperCase()) +
+              (identChars(host.id) ? "#" + identChars(host.id) : "")).slice(0, 60);
+      el = host;
       window[${JSON.stringify(handle)}] = el;
       watchDeliveries(el, false);
       return JSON.stringify({
-        verdict: "editable", label, mac, parked: window[${JSON.stringify(handle)}] === el,
+        verdict: "editable", label: hostLabel, mac, parked: window[${JSON.stringify(handle)}] === el,
         // Stamps every embed it finds, so the verdict can tell content that
         // SURVIVED the clear from an empty-state placeholder the page inserts
         // once emptied — by identity, not by comparing counts.
