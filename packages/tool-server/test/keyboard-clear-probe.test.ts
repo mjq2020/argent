@@ -970,6 +970,10 @@ describe("chromium clear — release probe", () => {
     interface Child {
       tag: string;
       attrs?: Record<string, string>;
+      /** The child's own computed style, read by the harness `getComputedStyle`. */
+      __style?: Record<string, string>;
+      /** Its chain up to the editable, for the ancestor half of the render test. */
+      parentElement?: unknown;
     }
     // The value half is optional so a BARE `[contenteditable]` is expressible.
     // Without that the harness could not express the alternative the production
@@ -1030,6 +1034,47 @@ describe("chromium clear — release probe", () => {
 
     it("counts nothing for an editor that really is empty", () => {
       expect(withChildren([])).toMatchObject({ tracked: true, length: 0, residue: 0 });
+    });
+
+    it("counts an embed Blink does not RENDER as gone, the way the text half already does", () => {
+      // Blink neither selects nor deletes non-rendered content, so a stamped
+      // `display: none` embed survives a clear that emptied the field and turned
+      // the verdict into a PERMANENT failure — permanent because every retry
+      // re-stamps the same node. Measured on Chrome 151: `hello` plus a
+      // `display: none` <img> in a contenteditable raised
+      // KEYBOARD_CLEAR_INEFFECTIVE with the editor already empty of text, and
+      // the same page without the style cleared and typed correctly.
+      //
+      // `input[type=hidden]` carries `display: none` from the UA stylesheet and
+      // is in EMBED_TAGS, so on a `body[contenteditable]` / designMode page one
+      // CSRF token or hidden analytics frame was enough to make every clear a
+      // hard failure — which is the shape that makes this reachable rather than
+      // exotic.
+      expect(withChildren([{ tag: "img", __style: { display: "none" } }])).toMatchObject({
+        tracked: true,
+        residue: 0,
+      });
+      expect(
+        withChildren([
+          { tag: "input", attrs: { type: "hidden" }, __style: { display: "none" } },
+          "img",
+        ])
+      ).toMatchObject({ tracked: true, residue: 1 });
+    });
+
+    it("counts an embed under a non-rendered ANCESTOR as gone", () => {
+      // The element count is a FLAT `querySelectorAll` while the text walk
+      // prunes from the top, and `display: none` does not compute onto a child
+      // (an element outside the rendering tree keeps its own `display`). So the
+      // embed's own style answers nothing for a hidden WRAPPER — the ancestors
+      // have to be walked, up to the queried editable.
+      const { el } = editableWith([]);
+      const hidden = { tagName: "SPAN", __style: { display: "none" }, parentElement: el };
+      const nested: Child = { tag: "img", parentElement: hidden };
+      el.querySelectorAll = () => [nested];
+      stamp(el);
+
+      expect(release({ [HANDLE]: el }).result).toMatchObject({ tracked: true, residue: 0 });
     });
 
     it("counts a node the page inserted AFTER the clear as gone, not as residue", () => {

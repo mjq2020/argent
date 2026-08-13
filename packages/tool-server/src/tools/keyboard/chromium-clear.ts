@@ -97,6 +97,32 @@ const pageMarks = (handle: string) => ({
 });
 
 /**
+ * Whether Blink lays this element out — the one test both halves of the residue
+ * measurement apply, so it is declared once, before either of them.
+ *
+ * Emitted ahead of `countEmbedsFns` in both probes and ahead of
+ * `EDITABLE_TEXT_FN` in the one that measures text. A page-side `const` is
+ * declared in the probe's single IIFE scope, so it can be spelled exactly once
+ * per probe — hence its own constant rather than a copy inside each user.
+ */
+const IS_RENDERED_FN = `
+  const isRendered = (el) => {
+    try {
+      // The top-level view's \`getComputedStyle\` resolves an element in a
+      // same-origin subframe correctly (measured on Chrome 148), so the parked
+      // element's own document does not have to be reached for.
+      const style = typeof getComputedStyle === "function" ? getComputedStyle(el) : null;
+      if (!style) return true;
+      return style.display !== "none" && style.visibility !== "hidden" &&
+        style.visibility !== "collapse";
+    } catch (e) {
+      // Unreadable style counts as rendered: this measurement exists to CATCH
+      // residue, so anything it cannot judge has to stay in the count.
+      return true;
+    }
+  };`;
+
+/**
  * Page-side helpers, inlined into both probes: the content the element holds
  * that `textContent` cannot see, identified rather than merely counted.
  *
@@ -142,6 +168,28 @@ const countEmbedsFns = (mark: string) => `
   const EMBED_MARK = ${JSON.stringify(mark)};
   const EMBED_TAGS = "img,video,audio,canvas,svg,embed,object,iframe,hr,input,select," +
     "textarea,button,picture,math,table";
+  // An embed Blink does not lay out is neither selected nor deleted, exactly as
+  // for the TEXT it does not render — so counting one makes a clear that WORKED
+  // report failure, and permanently, since every retry re-stamps the same node
+  // (measured on Chrome 151: \`hello\` plus a \`display: none\` <img> inside a
+  // contenteditable raised KEYBOARD_CLEAR_INEFFECTIVE with the editor already
+  // empty of text, against a matched control without the style that cleared and
+  // typed correctly). \`input[type=hidden]\` is \`display: none\` by the UA
+  // stylesheet and is in EMBED_TAGS, so on a \`body[contenteditable]\` /
+  // designMode page one CSRF token or analytics iframe was enough to make every
+  // clear a hard failure.
+  //
+  // The ANCESTORS are walked because this query is flat while the text walk
+  // prunes from the top: \`display: none\` on a wrapper does not compute onto its
+  // children (an element outside the rendering tree keeps its own \`display\`), so
+  // asking the embed alone would miss every nested one. The walk stops at the
+  // queried root, which \`querySelectorAll\` guarantees is an ancestor.
+  const embedRendered = (el, root) => {
+    for (let node = el; node && node !== root; node = node.parentElement) {
+      if (!isRendered(node)) return false;
+    }
+    return true;
+  };
   const embedsIn = (node, isFormControl) => {
     // A <textarea>'s child nodes are its DEFAULT value and never track \`value\`,
     // so counting them would report a cleared field as still full.
@@ -156,7 +204,12 @@ const countEmbedsFns = (mark: string) => `
       // verification, so a page that cancelled the edit reported \`cleared: true\`
       // with the pill untouched (measured on Chrome 148, against a matched
       // lowercase control that was correctly refused).
-      return node.querySelectorAll(EMBED_TAGS + ",[contenteditable=false i]");
+      const found = node.querySelectorAll(EMBED_TAGS + ",[contenteditable=false i]");
+      const kept = [];
+      for (let i = 0; i < found.length; i++) {
+        if (embedRendered(found[i], node)) kept.push(found[i]);
+      }
+      return kept;
     } catch (e) {
       return [];
     }
@@ -319,21 +372,6 @@ const deliveryFns = (marks: { count: string; listener: string; wasValue: string 
  *     removed with the rest.
  */
 const EDITABLE_TEXT_FN = `
-  const isRendered = (el) => {
-    try {
-      // The top-level view's \`getComputedStyle\` resolves an element in a
-      // same-origin subframe correctly (measured on Chrome 148), so the parked
-      // element's own document does not have to be reached for.
-      const style = typeof getComputedStyle === "function" ? getComputedStyle(el) : null;
-      if (!style) return true;
-      return style.display !== "none" && style.visibility !== "hidden" &&
-        style.visibility !== "collapse";
-    } catch (e) {
-      // Unreadable style counts as rendered: this measurement exists to CATCH
-      // residue, so anything it cannot judge has to stay in the count.
-      return true;
-    }
-  };
   const editableText = (root) => {
     let out = "";
     const stack = [root];
@@ -395,6 +433,7 @@ const EDITABLE_TEXT_FN = `
 // returns and every verdict it computes would otherwise rest on a manual
 // browser session alone.
 export const focusedEditableProbe = (handle: string) => `(() => {
+  ${IS_RENDERED_FN}
   ${countEmbedsFns(pageMarks(handle).embed)}
   ${deliveryFns(pageMarks(handle))}
   // What a user pressing "select all" on THIS machine would send, so the page
@@ -643,6 +682,7 @@ export const focusedEditableProbe = (handle: string) => `(() => {
  */
 // Exported for test/keyboard-clear-probe.test.ts — see focusedEditableProbe.
 export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
+  ${IS_RENDERED_FN}
   ${countEmbedsFns(pageMarks(handle).embed)}
   ${deliveryFns(pageMarks(handle))}
   ${EDITABLE_TEXT_FN}
