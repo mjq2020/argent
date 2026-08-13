@@ -753,13 +753,16 @@ export type FlowFile = {
  * {@link BLOCK_DIRECTIVE_KEYS} rather than being restated.
  */
 export function blockSteps(step: FlowStep): FlowStep[] | undefined {
-  return isBlockStep(step) ? step.steps : undefined;
+  return isBlockStep(step) ? (step.steps satisfies FlowStep[]) : undefined;
 }
 
 /**
  * Narrow a step to the kinds {@link BLOCK_DIRECTIVE_KEYS} lists. `Extract` is
  * what makes the list load-bearing: {@link blockSteps}' `.steps` typechecks
- * only while EVERY listed kind's step type carries children.
+ * only while EVERY listed kind's step type carries children. The `satisfies`
+ * there pins them to a REQUIRED `steps`; an optional one types as
+ * `FlowStep[] | undefined`, which the return type alone would accept while
+ * every reader sees a childless leaf.
  */
 export function isBlockStep(step: FlowStep): step is BlockStep {
   return isBlockDirectiveKey(step.kind);
@@ -2011,9 +2014,10 @@ const STEP_DIRECTIVE_KEYS: readonly string[] = [
  * restating the kinds, so parse time and run time cannot answer differently.
  * Three constraints keep an entry honest. Two judge the keys already listed:
  * `satisfies` rejects a key that is not a real step kind, and blockSteps'
- * `Extract` rejects a kind whose step type carries no `steps` (a directive
- * listed here without children is a compile error, not a silent runtime
- * `undefined`). Neither can force a key IN, which is what
+ * `.steps` read rejects a kind with no usable `steps` - `Extract` catches a
+ * missing one, its own `satisfies` one that is not a `FlowStep[]`, so a
+ * childless directive listed here is a compile error, not a silent runtime
+ * `undefined`. Neither can force a key IN, which is what
  * {@link _everyChildBearingKindIsRegistered} does — without it a child-bearing
  * kind added later is simply absent here, and absent is not an error.
  *
@@ -2028,19 +2032,32 @@ type BlockDirectiveKind = (typeof BLOCK_DIRECTIVE_KEYS)[number];
 /** The step union those kinds select - what {@link isBlockStep} narrows to. */
 export type BlockStep = Extract<FlowStep, { kind: BlockDirectiveKind }>;
 
+/**
+ * Every step kind whose type carries a `steps` property, whatever its spelling:
+ * optional, `readonly`, any element type. Distributes over the union and asks
+ * `keyof` rather than matching structurally, because the obvious
+ * `Extract<FlowStep, { steps: FlowStep[] }>` misses a `steps?` or a
+ * `readonly FlowStep[]` - anything not both required and assignable to
+ * `FlowStep[]` reads as a childless leaf.
+ */
+type ChildBearingKind<S extends FlowStep = FlowStep> = S extends unknown
+  ? "steps" extends keyof S
+    ? S["kind"]
+    : never
+  : never;
+
 /** The child-bearing step kinds {@link BLOCK_DIRECTIVE_KEYS} fails to list. */
-type UnregisteredBlockKind = Exclude<
-  Extract<FlowStep, { steps: FlowStep[] }>["kind"],
-  BlockDirectiveKind
->;
+type UnregisteredBlockKind = Exclude<ChildBearingKind, BlockDirectiveKind>;
 
 /**
  * Forces a child-bearing kind INTO the registry — the direction the two
  * constraints on {@link BLOCK_DIRECTIVE_KEYS} cannot cover, since both only
  * judge kinds already listed. An unlisted one parses like any other step and
  * then reads as `undefined` from {@link blockSteps}, so every reader listed
- * there silently misses its children. Spelled as a conditional rather than a
- * bare `never` so the compile error names the missing kind.
+ * there silently misses its children. {@link ChildBearingKind} is what makes
+ * this reach every spelling of `steps`, not just the one a structural match
+ * names. Spelled as a conditional rather than a bare `never` so the compile
+ * error names the missing kind.
  */
 const _everyChildBearingKindIsRegistered: [UnregisteredBlockKind] extends [never]
   ? true
