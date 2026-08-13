@@ -1026,16 +1026,18 @@ replacement can't lose the race against its single-instance lock. Instances the 
 run end are torn down then. A launch declaring no id for the run's platform is an error, not a cue to
 switch platforms. Every step hard-stops the flow on failure; later steps are reported as skipped.
 Returns a structured report ({ flow, device, executionPrerequisite, ok, aborted?, passed, failed,
-skipped, errored, startedAt, durationMs, steps }). Each step carries \`durationMs\`, and the ONE step a
-run can fail on also carries \`failure\` — the structured diagnosis to start from rather than a
+skipped, errored, startedAt, durationMs, steps }). \`device\` is the device the run STARTED on; when
+launches moved it onto runner-booted instances, each names its instance in that step's reason and
+marks the move — \`run moved off <id>\`, or \`retired <id> (same app relaunched)\` when the instance it
+left was the one killed — and a relaunch that retired an older owned instance names both.
+
+Every step that RAN carries \`durationMs\`; a step that was skipped without running (after a hard stop,
+or inside an unmet \`when:\` block) carries none, because there is no measurement to report. The ONE
+step a run can fail on also carries \`failure\` — the structured diagnosis to start from rather than a
 post-hoc screenshot: a classified \`code\` and \`category\`, \`determinacy\` ("indeterminate" means argent
 could not read the screen, so re-run rather than edit the flow), the \`selector\` the runner resolved,
 \`expected\`/\`actual\`, ranked \`candidates\` with paste-able selector YAML, a \`screen\` summary, and
-artifact handles for a \`screenshot\` and a full \`tree\` element dump (both optional). — \`device\` is the
-device the run STARTED on; when launches moved it onto
-runner-booted instances, each names its instance in that step's reason and marks the move — \`run moved
-off <id>\`, or \`retired <id> (same app relaunched)\` when the instance it left was the one killed —
-a relaunch that retired an older owned instance names both.
+artifact handles for a \`screenshot\` and a full \`tree\` element dump (both optional).
 
 If a fragment has an execution prerequisite and prerequisiteAcknowledged is not set to true, the tool
 returns a notice with the prerequisite instead of running.`,

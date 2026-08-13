@@ -145,19 +145,25 @@ afterEach(async () => {
  * half: a new code fails here until it is listed.
  *
  * The second half — every code DRIVEN from a real run — is the individual
- * tests below, and it is not total. Two members are defensive branches that a
- * parsed flow cannot reach, so no fixture can produce them honestly:
+ * tests below, plus one code driven from a sibling file. Exactly ONE member is
+ * a defensive branch no fixture can produce honestly:
  *
  * - `step-kind-unsupported` is `execLeafStep`'s `default:` arm, and every
  *   `FlowStep` kind has a case. It exists so a step kind added to the parser
- *   and not to the runner fails loudly instead of silently.
- * - `gesture-geometry-unsatisfiable` needs a pinch whose finger travel rounds
- *   to EXACTLY zero on both axes. A zero-area target never resolves to a
- *   frame (it reports `selector-not-visible` first), and any resolvable span
- *   leaves positive travel however small.
+ *   and not to the runner fails loudly instead of silently. (The device-free
+ *   guard in `execSteps` reports it too, and is unreachable for the same
+ *   reason: it and the run-level decision share `stepRequiresDevice`.)
+ *
+ * `gesture-geometry-unsatisfiable` used to be listed here as a second one, on
+ * the reasoning that it needs a pinch whose finger travel rounds to EXACTLY
+ * zero on both axes. That is true of the PINCH arm — but the code has a second
+ * production site, the rotate arm, which needs only a target with no fitting
+ * on-screen orbit, and `flow-rotate.test.ts` already drives it.
  *
  * Say so here rather than leave the claim standing: a comment that promises
- * coverage the file does not have is worse than the gap it hides.
+ * coverage the file does not have is worse than the gap it hides — and one
+ * that claims a gap the suite does not have sends the next reader looking for
+ * a fixture that already exists.
  */
 const ALL_CODES: FlowFailureCode[] = [
   "selector-not-found",
