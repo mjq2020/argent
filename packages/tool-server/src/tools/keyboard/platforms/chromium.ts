@@ -86,6 +86,11 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
   const typing = descs.length > 0 || named !== undefined;
   let released = false;
   let clearedLabel: string | undefined;
+  // Whether the clear saw a password field. The split message below applies the
+  // same withhold-the-count rule, and the read it can see is the LATER one — a
+  // show/hide control that switches the field to `type="text"` while the
+  // characters go out reports a plain box there.
+  let clearedSecret = false;
   const releaseTarget = async () => {
     released = true;
     return releaseParkedTarget(api, handle!);
@@ -100,6 +105,7 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
       // rests on (see CLEAR_SETTLE_MS).
       const outcome = await clearChromiumField(api, handle, delay, params.secretText === true);
       clearedLabel = outcome.label;
+      clearedSecret = outcome.secret === true;
       // Emptying a field routinely moves focus off it — a field that blurs once
       // empty, an app that advances to the next input, a re-render. The keys
       // below are dispatched at the PAGE, not at an element, so they would then
@@ -241,7 +247,7 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
         // `type="text"` box takes just as often (an API key, a TOTP code, a
         // password field a show/hide control has toggled to text).
         const reached =
-          after.secret || params.secretText
+          after.secret || clearedSecret || params.secretText
             ? `not all of the text reached`
             : `only ${after.delivered !== undefined && after.delivered >= 0 ? after.delivered : landed} ` +
               `of the ${descs.length} character(s) reached`;

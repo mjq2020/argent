@@ -810,6 +810,17 @@ export interface ClearOutcome {
   keptFocus?: boolean;
   /** The element label the probe reported, for the caller's error message. */
   label?: string;
+  /**
+   * The field was a password input when the clear read it — so the caller's own
+   * failure message must withhold counts too.
+   *
+   * Carried here because the two reads can disagree: a show/hide control that
+   * switches the field to `type="text"` while the characters go out leaves the
+   * LATER read reporting a plain box, and the caller only ever sees that one.
+   * Without this, "it was a password field when we cleared it" was dropped
+   * between the two messages that apply the same rule.
+   */
+  secret?: boolean;
 }
 
 /**
@@ -999,14 +1010,19 @@ export async function clearChromiumField(
   // there is nothing to verify against; `parked: false` means the assignment
   // itself did not take (a page can pre-define the slot non-writable). Either
   // way, stay best-effort rather than inventing a failure.
-  if (before.verdict !== "editable" || before.parked === false) return { label: before.label };
+  // `secret` travels on every return: the caller applies the same
+  // withhold-the-count rule to its own message, and the LATER read is the only
+  // one it can see (see `ClearOutcome.secret`).
+  const secret = before.secret === true;
+  if (before.verdict !== "editable" || before.parked === false)
+    return { label: before.label, secret };
 
   // The re-read measures the element the probe parked, NOT whatever holds focus
   // now. Clearing routinely moves focus (a page that blurs on empty, a
   // re-render, an app shortcut), so `activeElement` afterwards cannot tell
   // "emptied, then focus moved" from "never emptied, and focus moved" — and the
   // second is exactly what an app cancelling the chord produces.
-  if (!after?.tracked) return { label: before.label };
+  if (!after?.tracked) return { label: before.label, secret };
   const remaining = after.length ?? 0;
   // Embedded content counts as residue only when it is the SAME content that was
   // there before — the probe stamps each embed and this counts the stamps still
@@ -1017,11 +1033,15 @@ export async function clearChromiumField(
   // `countEmbedsFns`.
   const residualNodes = after.residue ?? 0;
   if (remaining === 0 && residualNodes === 0) {
-    return { keptFocus: after.focused === true, label: before.label };
+    return {
+      keptFocus: after.focused === true,
+      label: before.label,
+      secret: secret || after.secret === true,
+    };
   }
 
   const held =
-    after.secret || before.secret || secretText
+    after.secret || secret || secretText
       ? "its contents"
       : remaining > 0
         ? `${remaining} character(s)`

@@ -1840,6 +1840,49 @@ describe("keyboard clear — Chromium (CDP)", () => {
     ).rejects.toThrow(/only 1 of the 3 character\(s\) reached/);
   });
 
+  it("never quotes a count when the field was a password when it was CLEARED", async () => {
+    // The two reads can disagree, and the split message only ever sees the
+    // later one: a show/hide control that switches the field to `type="text"`
+    // while the characters go out reports a plain box there. "It was a password
+    // field when we cleared it" was dropped between the two messages that apply
+    // the same rule, so the count came back.
+    const events: KeyEventArgs[] = [];
+    const probes: string[] = [];
+    const api = {
+      dispatchKeyEvent: async (e: KeyEventArgs) => void events.push(e),
+      evaluate: async (expression: string) => {
+        probes.push(expression);
+        if (probes.length === 1) {
+          return JSON.stringify({
+            verdict: "editable",
+            label: "INPUT#pw",
+            mac: true,
+            parked: true,
+            secret: true,
+          });
+        }
+        if (probes.length === 2)
+          return JSON.stringify({ tracked: true, length: 0, focused: true, secret: true });
+        // The show/hide control has since revealed the field.
+        return JSON.stringify({
+          tracked: true,
+          length: 2,
+          focused: false,
+          delivered: 2,
+          secret: false,
+        });
+      },
+    };
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: "hunter2", delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/not all of the text reached/);
+  });
+
   it("never quotes a count when the split field is a password", async () => {
     // The same message, for a field whose LENGTH is credential material.
     const { api } = splitApi({ tracked: true, length: 1, focused: false, secret: true });
