@@ -437,9 +437,10 @@ export const MAX_DELETE_COUNT = 150;
 // password field on these levels) would be refused, quoting this constant as
 // though it were a length that had been measured. The refusal is `count >
 // MAX_DELETE_COUNT`, so equality is allowed and `<=` is the relationship.
-// `it("blind-deletes every length the measured path would accept")` in
-// test/keyboard-clear.test.ts pins it, because nothing else would catch the two
-// being separated again.
+// The relationship is pinned by the delete-run assertions in
+// test/keyboard-clear.test.ts, which expect `MAX_DELETE_COUNT + DELETE_MARGIN`
+// keys on the unmeasurable paths (a password field, a dump that failed) —
+// nothing else would catch the two being separated again.
 // Not exported: it IS MAX_DELETE_COUNT, so a second exported name for the same
 // value is a duplicate export. The name stays because the two roles are
 // different — one is the longest field this path accepts, the other is how far
@@ -522,9 +523,13 @@ async function clearByDeleting(
         `the app's own affordance, or use an emulator on a newer API level.`,
       {
         // Its own code rather than KEYBOARD_CLEAR_INEFFECTIVE: this is a
-        // caller-fixable rejection (a 400) that changed nothing, whereas
-        // INEFFECTIVE is an internal fault (a 500) after the edit was attempted.
-        // Sharing one code would mix the two in any dashboard slicing on it.
+        // caller-fixable rejection (a 400) decided BEFORE anything was sent,
+        // whereas INEFFECTIVE is raised after the edit was attempted and
+        // observed not to take — a page-side cancellation of the key or the
+        // `beforeinput`, which is a 500 because the caller cannot fix it, not
+        // because anything inside the tool went wrong. Sharing one code would
+        // mix "nothing happened, fix the request" with "the edit was refused by
+        // the app" in any dashboard slicing on it.
         error_code: FAILURE_CODES.KEYBOARD_CLEAR_FIELD_TOO_LONG,
         failure_stage: "keyboard_clear_too_long_android",
         error_kind: "unsupported",

@@ -222,10 +222,13 @@ export const androidTvControlBlueprint: ServiceBlueprint<TvControlApi, DeviceInf
             `clears once the holder finishes — then unlock the device or take a screenshot as ` +
             `a fallback.`,
           {
-            // The same SIGNAL as the phone path, not just the same words: a bare
-            // `Error` carries none, so the identical device output was
-            // classified from `describe` and unclassified from `tv-remote`, and
-            // no dashboard slicing on the code could see the TV half at all.
+            // The same SIGNAL as the phone path, not just the same words: a
+            // bare `Error` carries none, so the identical device output was
+            // classified when `describe` read it on a phone and unclassified
+            // when the TV `describe` read it here, and no dashboard slicing on
+            // the code could see the TV half at all. (`describe` is the only
+            // caller that reaches this dump — `tv-remote` only presses keys
+            // through `navigate`.)
             error_code: FAILURE_CODES.ANDROID_UIAUTOMATOR_CAPTURE_FAILED,
             failure_stage: "android_uiautomator_capture",
             failure_area: "tool_server",
