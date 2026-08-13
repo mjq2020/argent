@@ -27,6 +27,19 @@ import { typeTv } from "./tv";
  * Gated on the service already being live so a clear never pays for spawning
  * (or installing) the helper: with it down there is no contention, and the dump
  * this falls back to is exactly what ran before.
+ *
+ * What this costs OTHER tools, which is new with this reader: `keyboard` becomes
+ * a client of the same `AndroidDevtools:<serial>` service `describe` uses, and
+ * `utils/android-devtools-client.ts` serialises every RPC onto one host-side
+ * chain. `readHierarchy` gives up on this read after PREFERRED_READ_BUDGET_MS
+ * with a `Promise.race`, but the RPC underneath is abandoned rather than
+ * cancelled — the client exposes no cancel — so the chain does not advance until
+ * the helper answers or its own LONG_RPC_TIMEOUT_MS elapses. A `describe` issued
+ * on the same serial in that window therefore queues behind a read the clear has
+ * already stopped waiting for, and can wait out the remainder of that timeout
+ * before its own request is even sent. It needs a helper that is alive and slow
+ * to answer, which is also the only state in which the clear abandons a read at
+ * all; cancelling it properly means giving the shared RPC client a cancel path.
  */
 function devtoolsHierarchyReader(
   registry: Registry,
