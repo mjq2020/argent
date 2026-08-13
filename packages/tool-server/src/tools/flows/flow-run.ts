@@ -8,7 +8,6 @@ import {
   getFailureSignal,
   isLiveServiceState,
   wrapFailure,
-  zodObjectToJsonSchema,
 } from "@argent/registry";
 import type {
   DeviceInfo,
@@ -98,7 +97,7 @@ const zodSchema = z
       .string()
       .optional()
       .describe(
-        "Absolute path to a co-located flow .yaml on the client and tool server's shared filesystem. This must be supplied through the file-input boundary. For remote execution, pass name + project_root instead."
+        "Omit when name is set. Absolute path to a co-located flow .yaml on the client and tool server's shared filesystem. This must be supplied through the file-input boundary. For remote execution, pass name + project_root instead."
       ),
     device: z
       .string()
@@ -136,15 +135,6 @@ const zodSchema = z
   });
 
 type Params = z.infer<typeof zodSchema>;
-
-const inputSchema: Record<string, unknown> = {
-  ...zodObjectToJsonSchema(zodSchema),
-  // Zod's JSON Schema conversion cannot represent superRefine. `oneOf` makes
-  // the same exactly-one source rule visible to MCP and HTTP clients: neither
-  // branch matches when both fields are absent, and both branches match (which
-  // is invalid for oneOf) when both fields are present.
-  oneOf: [{ required: ["name"] }, { required: ["flow_path"] }],
-};
 
 // A dual-source call (name + flow_path) must be diagnosed by the schema's
 // exactly-one rule, not by whether either unused file happens to exist — in
@@ -985,10 +975,10 @@ off <id>\`, or \`retired <id> (same app relaunched)\` when the instance it left 
 a relaunch that retired an older owned instance names both.
 
 If a fragment has an execution prerequisite and prerequisiteAcknowledged is not set to true, the tool
-returns a notice with the prerequisite instead of running.`,
+returns a notice with the prerequisite instead of running.
+Pass exactly one flow source: name for a saved flow under project_root, or flow_path for an explicit YAML — both together, or neither, fails the call.`,
     longRunning: true,
     zodSchema,
-    inputSchema,
     fileInputs,
     services: () => ({}),
     async execute(_services, params, ctx?: ToolContext) {
