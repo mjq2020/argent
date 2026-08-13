@@ -49,9 +49,14 @@ const zodSchema = z.object({
     // modifier down across awaits, so a second call arriving inside that window
     // would have its keystroke delivered as part of the chord, and the fix is a
     // FIFO chain. An unbounded cadence therefore no longer costs only its own
-    // call — `{ delayMs: 600000 }` holds that device's keyboard, and everything
-    // queued behind it, for ten minutes. 5s per keypress is far past any real
-    // cadence, and matches the bound `await-ui-element` puts on `pollIntervalMs`.
+    // call — it holds that device's keyboard, and everything queued behind it.
+    //
+    // The bound caps ONE keypress, not the hold: that is ~`2 × delayMs ×
+    // text.length`, so `{ text: <120 chars>, delayMs: 5000 }` is schema-valid at
+    // ~20 minutes. What actually bounds the hold is the abort signal the iOS
+    // backend honours (`simulator-server-keys.ts`) — a client that hangs up
+    // releases the chain within about one keypress. 5s per keypress is still far
+    // past any real cadence, which is what makes it a sane ceiling.
     .max(5000)
     .optional()
     .describe(

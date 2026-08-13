@@ -9,6 +9,7 @@ import {
   SHIFT_KEYCODE,
 } from "./key-codes";
 import { InvalidToolInputError } from "../../utils/capability";
+import { sleepOrAbort } from "../../utils/timing";
 import type { KeyboardParams, KeyboardResult } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -60,7 +61,8 @@ function serializePerDevice<T>(deviceId: string, run: () => Promise<T>): Promise
 export function typeSimulatorServer(
   registry: Registry,
   device: DeviceInfo,
-  params: KeyboardParams
+  params: KeyboardParams,
+  signal?: AbortSignal
 ): Promise<KeyboardResult> {
   // Case-folded, because `device.id` is the caller's own string verbatim
   // (`resolveDevice` classifies an iOS UDID by shape and never canonicalises
@@ -71,15 +73,21 @@ export function typeSimulatorServer(
   // field while the call reported it as typed — the exact corruption this chain
   // exists to prevent. No two distinct devices can collide under case-folding:
   // an adb serial and a chromium id are already lower-case, and a UDID is hex.
-  return serializePerDevice(device.id.toLowerCase(), () =>
-    runSimulatorServerType(registry, device, params)
-  );
+  return serializePerDevice(device.id.toLowerCase(), () => {
+    // Checked HERE, as this call's turn comes round, so a request the client has
+    // already abandoned does not spend the device's keyboard — it leaves the
+    // chain immediately and the next waiter starts. Without it a queue of
+    // hung-up calls still typed every one of them out in full.
+    signal?.throwIfAborted();
+    return runSimulatorServerType(registry, device, params, signal);
+  });
 }
 
 async function runSimulatorServerType(
   registry: Registry,
   device: DeviceInfo,
-  params: KeyboardParams
+  params: KeyboardParams,
+  signal?: AbortSignal
 ): Promise<KeyboardResult> {
   const ref = simulatorServerRef(device);
   const api = await registry.resolveService<SimulatorServerApi>(ref.urn, ref.options);
@@ -207,16 +215,28 @@ async function runSimulatorServerType(
   // deletes the selection. Verified on a UIKit `UITextField` (Safari address
   // bar) and a React Native `TextInput` (Bluesky search) — on the latter the JS
   // `onChangeText("")` fires, so native view and React state agree.
+  //
+  // Deliberately ATOMIC with respect to the abort signal — checked before, never
+  // between its two presses. Stopping after the Cmd+A would leave the field's
+  // whole value selected, so the next character typed into it (by anything)
+  // replaces the lot, and a cancelled request has no reader to be told that.
   if (params.clear) {
+    signal?.throwIfAborted();
     await pressKeyCode(A_KEYCODE, LEFT_GUI_KEYCODE);
     await sleep(delay);
     await pressKeyCode(NAMED_KEYS.backspace);
     await sleep(delay);
   }
 
+  // The signal is checked BETWEEN presses, and the cadence wait yields to it, so
+  // an abandoned run stops within about one keypress instead of typing its whole
+  // `text` out. Never inside `pressKeyCode`: cutting the wait between a key's
+  // Down and its Up would leave that key held down in the guest, which is the
+  // failure `releaseHeldModifiers` exists to heal.
   for (const { press } of presses) {
+    signal?.throwIfAborted();
     await pressAndCount(press!.keyCode, press!.withShift ? SHIFT_KEYCODE : undefined);
-    await sleep(delay);
+    await sleepOrAbort(delay, signal);
   }
 
   // Key after text: a combined call means "type, then submit" (text +
@@ -224,6 +244,7 @@ async function runSimulatorServerType(
   // field, which can blur it and leak the text to app-level key commands
   // (e.g. "d" toggles the React Native dev menu when nothing is focused).
   if (namedKeyCode != null) {
+    signal?.throwIfAborted();
     await pressAndCount(namedKeyCode);
   }
 

@@ -261,6 +261,103 @@ describe("keyboard clear — iOS (simulator-server)", () => {
     expect(events).toContain("Down:26");
   });
 
+  describe("giving up when the client does", () => {
+    // The chain is what stops a concurrent keystroke landing inside the clear's
+    // Command hold, and until now there was no way out of it. Each character
+    // costs `2 × delayMs`, `text` has no length cap and `delayMs` may be 5000, so
+    // one call can hold a device's keyboard for minutes — and `longRunning: true`
+    // means the MCP adapter no longer bounds it with its 30s fetch timeout.
+    // Measured on an iPhone 17e (iOS 26.5): `{ text: <40 chars>, delayMs: 2000 }`
+    // ran 160.5s, an `{ key: "escape" }` fired 1s behind it returned in 159.5s
+    // (~440× the 0.36s control), and aborting the long call at 2s left the run
+    // going and the chain held — so the caller could not even bail out with the
+    // `escape` it would send to do so.
+    it("stops an in-flight run within about one keypress of the abort", async () => {
+      const { events, api } = recordingApi();
+      const controller = new AbortController();
+      const run = typeSimulatorServer(
+        registryWith(api),
+        IOS_SIM,
+        { udid: IOS_SIM.id, text: "abcdefghij", delayMs: 20 },
+        controller.signal
+      );
+      // Let a couple of characters go out, then hang up.
+      await new Promise((r) => setTimeout(r, 60));
+      controller.abort();
+
+      await expect(run).rejects.toThrow();
+      const downs = events.filter((e) => e.startsWith("Down:") && e !== "Down:227").length;
+      // Some characters were typed — this is a real run, not a no-op — but not
+      // all ten of them.
+      expect(downs).toBeGreaterThan(0);
+      expect(downs).toBeLessThan(10);
+    });
+
+    it("never leaves a key or a modifier held down when it stops", async () => {
+      // The signal is checked BETWEEN presses, never inside `pressKeyCode`:
+      // cutting the wait between a key's Down and its Up would strand that key in
+      // the guest, which is the exact failure `releaseHeldModifiers` exists to
+      // heal.
+      const { events, api } = recordingApi();
+      const controller = new AbortController();
+      const run = typeSimulatorServer(
+        registryWith(api),
+        IOS_SIM,
+        { udid: IOS_SIM.id, clear: true, text: "abcdefghij", delayMs: 20 },
+        controller.signal
+      );
+      await new Promise((r) => setTimeout(r, 80));
+      controller.abort();
+      await expect(run).rejects.toThrow();
+
+      // Every `Down:<usage>` has a matching `Up:<usage>` after it.
+      const held = new Set<string>();
+      for (const event of events) {
+        const [direction, usage] = event.split(":");
+        if (direction === "Down") held.add(usage!);
+        else held.delete(usage!);
+      }
+      expect([...held]).toEqual([]);
+    });
+
+    it("hands the device's keyboard straight on when a QUEUED call was abandoned", async () => {
+      // The point of the chain check: a request the client has already given up
+      // on must not spend the device's keyboard when its turn comes. Without it a
+      // queue of hung-up calls still typed every one of them out in full, and the
+      // caller waiting behind them paid for all of it.
+      const { events, api } = recordingApi();
+      const registry = registryWith(api);
+      const controller = new AbortController();
+
+      const first = typeSimulatorServer(
+        registry,
+        IOS_SIM,
+        { udid: IOS_SIM.id, text: "a", delayMs: 30 },
+        undefined
+      );
+      const abandoned = typeSimulatorServer(
+        registry,
+        IOS_SIM,
+        { udid: IOS_SIM.id, text: "bbbbbbbbbb", delayMs: 30 },
+        controller.signal
+      );
+      const last = typeSimulatorServer(registry, IOS_SIM, {
+        udid: IOS_SIM.id,
+        text: "c",
+        delayMs: 0,
+      });
+      controller.abort();
+
+      await first;
+      await expect(abandoned).rejects.toThrow();
+      expect(await last).toMatchObject({ typed: "c", keys: 1 });
+      // Usage 5 is `b`: not one of the abandoned call's characters was typed…
+      expect(events).not.toContain("Down:5");
+      // …and the call behind it still ran (6 is `c`).
+      expect(events).toContain("Down:6");
+    });
+  });
+
   it("does not let a rejected call block the ones queued behind it", async () => {
     // The chain stores a tail that never rejects, so a 400 (or a transport
     // failure) on one call cannot wedge the device's queue — while the caller
