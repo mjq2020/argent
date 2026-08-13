@@ -182,58 +182,79 @@ async function runChromium(api: ChromiumCdpApi, params: KeyboardParams): Promise
     // key event cannot be split across two fields while for `tab`/`enter` the
     // focus move IS the requested effect. `text` carrying `\n`/`\r`/`\t` is
     // excluded for exactly that second reason — see `textMovesFocus`, which is
-    // the same physical key arriving by a different spelling. Sampling after the key instead made
-    // every `{ clear, text, key: "enter" }` against the ordinary "send and reset"
-    // handler — a search box, a chat composer, a tag input, all of which empty
-    // the field and blur it on submit — fail with a 500 naming a split that did
-    // not happen, on a request that had done exactly what it was asked to. And
-    // for characters, focus loss has to be corroborated by the target not holding
-    // what was typed — after a clear it should hold exactly those characters, so
-    // FEWER means the rest went somewhere else.
+    // the same physical key arriving by a different spelling. Sampling after the
+    // key instead made every `{ clear, text, key: "enter" }` against the ordinary
+    // "send and reset" handler — a search box, a chat composer, a tag input, all
+    // of which empty the field and blur it on submit — fail with a 500 naming a
+    // split that did not happen, on a request that had done exactly what it was
+    // asked to.
     //
-    // Strictly fewer, so a page that LENGTHENS what it receives — an input mask
-    // inserting separators, an autocompleter — is not read as a split. A page
-    // that SHORTENS it is not covered and cannot be: a field that strips
-    // characters (`value.replace(/\D/g, "")`), trims whitespace, or truncates at
-    // `maxlength`, AND moves focus while the characters are going out, is
-    // indistinguishable here from a genuine split — both leave the target
-    // holding fewer characters than were dispatched. The message therefore
-    // reports what was OBSERVED and names the benign reading, rather than
-    // asserting a split as fact; erring toward the report is deliberate, since
-    // the alternative is the silent half-written field this parameter exists to
-    // prevent (measured on Chrome 150: 8 of 11 runs wrote text outside the
-    // target field).
+    // For characters the evidence is PROVENANCE, corroborated by the value:
+    // `delivered` counts the insertions the parked element itself received, and
+    // the failure needs both a shortfall there and a value that is wrong. A
+    // single focus sample was neither necessary nor sufficient, and each half of
+    // the old rule was defeated by an ordinary page (both measured on Chrome 151,
+    // 3/3, both reported as a clean `cleared: true` replacement):
+    //
+    //   - focus that LEAVES and COMES BACK. The sample was taken after the last
+    //     character, so a loss that did not persist to that instant was
+    //     invisible: an autosuggest-shaped handler left `aefgh` in the target and
+    //     `bcd` in the neighbour with focus restored.
+    //   - a field that REVERTS on blur (an editable data grid, a click-to-edit
+    //     title, a controlled input rejecting a value). It ends up holding MORE
+    //     characters than were sent, so "fewer than dispatched" could not fire —
+    //     while holding its exact pre-clear value, which makes `cleared` flatly
+    //     false. Hence `reverted` as the second way for the value to be wrong.
+    //
+    // Requiring both signals is what keeps the benign shapes out. A page that
+    // NORMALISES what it receives — stripping separators
+    // (`value.replace(/\D/g, "")`), trimming, upper-casing — holds a shorter
+    // value legitimately, and every character was still delivered to it, so it no
+    // longer fires (it did before, and could not be separated from a split by the
+    // count alone). A page that LENGTHENS it (an input mask, an autocompleter)
+    // was already excluded and still is. Conversely a page that hides the
+    // deliveries by calling `stopPropagation` on `beforeinput` is saved by the
+    // value half, since the characters it swallowed the events for are in the
+    // field.
     if (handle && descs.length > 0 && !textMovesFocus) {
       const after = await releaseTarget();
       const landed = after?.length ?? 0;
-      // A field at its own `maxlength` is the third exclusion, and the one the
-      // comment above got wrong about the OTP shape: the pattern it was measured
-      // against is the SINGLE-field variant, where the whole value fits and
-      // `landed == descs.length` saves it. A SEGMENTED one — six `<input
-      // maxlength="1">` boxes with the standard auto-advance handler, which is
-      // how essentially every 2FA code, PIN and split card number is built —
-      // holds 1 of N BY DESIGN, so the corroboration confirmed the split instead
-      // of vetoing it (measured on Chrome 151, 3/3: the boxes read the requested
-      // code exactly, the stale digit gone, and the tool told the caller the code
-      // was mis-entered). A field that cannot hold another character explains its
-      // own short value; that also covers the plain `maxlength` truncation the
-      // comment above admits it cannot separate from a split.
-      if (after?.tracked && after.focused === false && landed < descs.length && !after.full) {
+      // -1 means the count could not be read at all, so fall back to the focus
+      // sample rather than inventing evidence either way.
+      const shortDelivery =
+        after?.delivered === undefined || after.delivered < 0
+          ? after?.focused === false
+          : after.delivered < descs.length;
+      // A field at its own `maxlength` is the standing exclusion, and the one the
+      // OTP note above got wrong: the pattern it was measured against is the
+      // SINGLE-field variant, where the whole value fits. A SEGMENTED one — six
+      // `<input maxlength="1">` boxes with the standard auto-advance handler,
+      // which is how essentially every 2FA code, PIN and split card number is
+      // built — holds 1 of N BY DESIGN, and receives 1 delivery of N as well, so
+      // neither signal can tell it from a split. A field that cannot hold another
+      // character explains its own short value.
+      const valueWrong = landed < descs.length || after?.reverted === true;
+      if (after?.tracked && shortDelivery && valueWrong && !after.full) {
         // Both halves of the count are credential material: the field's own
         // length when it is a password input, and the REQUEST's length when the
         // text came from a `{{secret:…}}` placeholder — which a plain
         // `type="text"` box takes just as often (an API key, a TOTP code, a
         // password field a show/hide control has toggled to text).
-        const missing =
+        const reached =
           after.secret || params.secretText
-            ? `not all of the text is in it`
-            : `only ${landed} of the ${descs.length} character(s) are in it`;
+            ? `not all of the text reached`
+            : `only ${after.delivered !== undefined && after.delivered >= 0 ? after.delivered : landed} ` +
+              `of the ${descs.length} character(s) reached`;
+        // The revert is worth its own sentence: it is the state in which
+        // `cleared` would have been flatly false.
+        const holds = after.reverted
+          ? ` That field now holds the value it held BEFORE the clear, so it was not replaced at all.`
+          : ``;
         throw new FailureError(
-          `keyboard: the page moved focus away from ${clearedLabel ?? "the field"} while the text ` +
-            `was being typed, and ${missing} — so the rest of the value most likely landed ` +
-            `wherever focus went. (The other reading: a field that strips or truncates what it ` +
-            `receives holds a shorter value legitimately.) Either way this was not a clean ` +
-            `replacement — re-read the screen before continuing.`,
+          `keyboard: ${reached} ${clearedLabel ?? "the field"} — the page moved focus away from it ` +
+            `while the text was being typed, so the rest of the value most likely landed wherever ` +
+            `focus went.${holds} This was not a clean replacement — re-read the screen before ` +
+            `continuing.`,
           {
             // Same reason as the sibling above: the clear itself worked, and
             // what failed is where the characters went.

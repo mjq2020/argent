@@ -385,7 +385,7 @@ describe("keyboard tool with secret placeholders", () => {
       caught = err as Error;
     }
     expect(caught).toBeDefined();
-    expect(caught!.message).toMatch(/not all of the text is in it/);
+    expect(caught!.message).toMatch(/not all of the text reached/);
     expect(caught!.message).not.toContain("hunter2");
     expect(caught!.message).not.toMatch(/\b7 of\b/);
   });
@@ -430,7 +430,7 @@ describe("keyboard tool with secret placeholders", () => {
       caught = err as Error;
     }
     expect(caught).toBeDefined();
-    expect(caught!.message).toMatch(/not all of the text is in it/);
+    expect(caught!.message).toMatch(/not all of the text reached/);
     expect(caught!.message).not.toMatch(/\b7 character/);
   });
 

@@ -1756,6 +1756,90 @@ describe("keyboard clear — Chromium (CDP)", () => {
     ).rejects.toThrow(/only 1 of the 3 character\(s\)/);
   });
 
+  it("reports a split that focus was BACK from by the time it was sampled", async () => {
+    // The old rule's blind spot: `focused` is one sample, taken after the last
+    // character, so a loss that does not persist to that instant is invisible.
+    // Measured on Chrome 151, 3/3 — an autosuggest-shaped handler that focused a
+    // neighbour on the 2nd character and returned on its 3rd left `aefgh` in the
+    // target and `bcd` next door, and the call reported a clean replacement.
+    // What sees it is provenance: 5 of the 8 characters were delivered here.
+    const { api } = splitApi({ tracked: true, length: 5, focused: true, delivered: 5 });
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: "abcdefgh", delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/only 5 of the 8 character\(s\) reached/);
+  });
+
+  it("reports a field that REVERTED to its pre-clear value", async () => {
+    // The other half of M3, and the one where `cleared: true` was flatly false:
+    // an editable data grid / click-to-edit title / controlled input that puts
+    // its old value back on blur ends up holding MORE characters than were sent,
+    // so "fewer than dispatched" could never fire. Measured 3/3 with six of the
+    // eight characters in the neighbour.
+    const { api } = splitApi({
+      tracked: true,
+      length: 18,
+      focused: false,
+      delivered: 3,
+      reverted: true,
+    });
+
+    await expect(
+      makeChromiumImpl(registryWith(api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: "abcdefgh", delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/holds the value it held BEFORE the clear/);
+  });
+
+  it("does not call a field that NORMALISES what it receives a split", async () => {
+    // Every character was delivered here; the field merely strips or trims what
+    // it keeps (`value.replace(/\D/g, "")`, a trim, an upper-case). The old rule
+    // could not separate that from a split and reported it as one whenever focus
+    // also moved — which the delivery count now settles.
+    const { api, events } = splitApi({
+      tracked: true,
+      length: 6,
+      focused: false,
+      delivered: 8,
+    });
+
+    const result = await makeChromiumImpl(registryWith(api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, text: "+1 555-0", delayMs: 0 },
+      CHROMIUM
+    );
+
+    expect(result).toMatchObject({ typed: "+1 555-0", keys: 8, cleared: true });
+    expect(events.filter((e) => e.type === "char")).toHaveLength(8);
+  });
+
+  it("falls back to the focus sample when the delivery count is unreadable", async () => {
+    // -1 is "the page would not give up the count". Inventing evidence either way
+    // would be wrong, so the pre-provenance rule stands.
+    const kept = splitApi({ tracked: true, length: 1, focused: true, delivered: -1 });
+    const result = await makeChromiumImpl(registryWith(kept.api)).handler(
+      {},
+      { udid: CHROMIUM.id, clear: true, text: "abc", delayMs: 0 },
+      CHROMIUM
+    );
+    expect(result).toMatchObject({ cleared: true });
+
+    const lost = splitApi({ tracked: true, length: 1, focused: false, delivered: -1 });
+    await expect(
+      makeChromiumImpl(registryWith(lost.api)).handler(
+        {},
+        { udid: CHROMIUM.id, clear: true, text: "abc", delayMs: 0 },
+        CHROMIUM
+      )
+    ).rejects.toThrow(/only 1 of the 3 character\(s\) reached/);
+  });
+
   it("never quotes a count when the split field is a password", async () => {
     // The same message, for a field whose LENGTH is credential material.
     const { api } = splitApi({ tracked: true, length: 1, focused: false, secret: true });
@@ -1766,7 +1850,7 @@ describe("keyboard clear — Chromium (CDP)", () => {
         { udid: CHROMIUM.id, clear: true, text: "hunter2", delayMs: 0 },
         CHROMIUM
       )
-    ).rejects.toThrow(/not all of the text is in it/);
+    ).rejects.toThrow(/not all of the text reached/);
   });
 
   it("fails a clear that left embedded content a text measurement cannot see", async () => {

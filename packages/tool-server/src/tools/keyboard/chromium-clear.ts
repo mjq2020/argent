@@ -40,19 +40,20 @@
  *
  *   - a page that reacts LATER than the settle. A field restoring its value
  *     120ms after being emptied reads as empty and reports a clean replacement.
- *   - a split where the page also LENGTHENS the value. The corroboration is
- *     "the target holds fewer characters than were dispatched", so a
- *     format-as-you-type field that turns `50` into `$5.00` while sending the
- *     `0` elsewhere passes the count test.
+ *   - a split where the page also LENGTHENS the value. The split check needs the
+ *     value to be wrong as well as the deliveries short, and a format-as-you-type
+ *     field that turns `50` into `$5.00` while sending the `0` elsewhere holds
+ *     MORE than was sent, which is not one of the two ways to be wrong.
  *   - residue rendered without an element the count recognises — an `<a>` drawn
- *     entirely by a CSS `background-image`. Widening `countEmbeds` far enough to
- *     catch it would start counting the structural leftovers of a genuinely
- *     empty editor, which fails clears that worked.
+ *     entirely by a CSS `background-image`. Widening the embed selector far
+ *     enough to catch it would start counting the structural leftovers of a
+ *     genuinely empty editor, which fails clears that worked.
  *
  * The converse — a page that SHORTENS what it receives (stripping separators,
- * trimming, `maxlength`) and moves focus while the characters go out — is
- * indistinguishable from a real split, and is reported. See the guard in
- * `platforms/chromium.ts` for why that direction is the deliberate one.
+ * trimming, `maxlength`) — used to be indistinguishable from a real split and was
+ * reported as one. It no longer is: every character was still delivered to the
+ * field, which is the question the split check asks first. See the guard in
+ * `platforms/chromium.ts`.
  */
 import { randomUUID } from "node:crypto";
 import { FAILURE_CODES, FailureError } from "@argent/registry";
@@ -78,12 +79,22 @@ export function newTargetHandle(): string {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * The per-call property each embedded element found BEFORE the clear is stamped
- * with, so the re-read can recognise THAT element rather than count its
- * replacement. Derived from the target handle, so it is unique per call for the
- * same reasons — see `newTargetHandle`.
+ * The per-call properties the probes leave on page objects, all derived from the
+ * target handle so they are unique per call for the same reasons — see
+ * `newTargetHandle`. Every one of them is dropped again on the release pass.
+ *
+ *   - `embed`: stamped on each embedded element found BEFORE the clear, so the
+ *     re-read can recognise THAT element rather than count its replacement.
+ *   - `ins` / `insFn`: on the target itself — how many characters were delivered
+ *     INTO it, and the listener that counts them.
+ *   - `was`: on the target itself — the value it held before the clear.
  */
-const embedMark = (handle: string) => `${handle}_embed`;
+const pageMarks = (handle: string) => ({
+  embed: `${handle}_embed`,
+  count: `${handle}_ins`,
+  listener: `${handle}_insFn`,
+  wasValue: `${handle}_was`,
+});
 
 /**
  * Page-side helpers, inlined into both probes: the content the element holds
@@ -170,6 +181,100 @@ const countEmbedsFns = (mark: string) => `
       if (unstamp) { try { delete seen[i][EMBED_MARK]; } catch (e) {} }
     }
     return held;
+  };`;
+
+/**
+ * Page-side helpers, inlined into both probes: WHERE the characters went, and
+ * what the field held before the clear.
+ *
+ * Both exist because "the target holds fewer characters than were dispatched" is
+ * not the question the caller needs answered — "were the characters delivered to
+ * the field I emptied?" is, and a count of what the field holds afterwards
+ * answers it in neither direction:
+ *
+ *   - a page that moves focus away and back gets the count right at the ONE
+ *     instant it is sampled. Measured on Chrome 151, 3/3: an autosuggest-shaped
+ *     handler that focused a neighbour on the 2nd character and came back on its
+ *     3rd left `aefgh` in the target and `bcd` in the neighbour, with focus
+ *     restored — reported as a clean `{cleared: true}` replacement.
+ *   - a page that reverts the field on blur (an editable data grid, a
+ *     click-to-edit title, a controlled input rejecting a value) ends up holding
+ *     MORE characters than were sent, so the count conjunct cannot fire either.
+ *     Measured 3/3: the field held its exact pre-clear value, six characters were
+ *     in the neighbour, and `cleared: true` was flatly false.
+ *
+ * So the target counts the insertions delivered to it — a `beforeinput` listener
+ * armed when the element is parked, filtered to the `insert*` input types so the
+ * clear's own `deleteContentBackward` is not one of them — and remembers the
+ * value it is about to lose. A shortfall in DELIVERIES is what says the
+ * characters went somewhere else; the value it holds afterwards is then only
+ * asked whether it is wrong (short, or the pre-clear value back again).
+ *
+ * Both signals are needed, and each one alone is wrong:
+ *
+ *   - deliveries alone would fail a field that normalises what it receives
+ *     (strips separators, trims, upper-cases): every character arrived, the value
+ *     is merely shorter. That is the false-failure class the count conjunct was
+ *     added to prevent.
+ *   - the value alone is what M3 above defeats in both directions.
+ *
+ * A page whose own capture listener calls `stopPropagation` on `beforeinput`
+ * hides the deliveries from this count — and is then saved by the second
+ * signal, because the characters it swallowed the events for still landed in the
+ * field. `-1` means the count could not be read at all (a page that refused the
+ * property), and the caller falls back to the focus sample it used before.
+ */
+const deliveryFns = (marks: { count: string; listener: string; wasValue: string }) => `
+  const DELIVERY_COUNT = ${JSON.stringify(marks.count)};
+  const DELIVERY_LISTENER = ${JSON.stringify(marks.listener)};
+  const VALUE_BEFORE = ${JSON.stringify(marks.wasValue)};
+  // BEFORE: start counting what arrives IN this element, and remember what it
+  // holds. Armed on the element rather than on the document so an insertion into
+  // a different field is not counted — that is the whole measurement.
+  const watchDeliveries = (el, isFormControl) => {
+    try {
+      el[DELIVERY_COUNT] = 0;
+      const onInsert = (ev) => {
+        try {
+          // The clear's own edit is a \`deleteContentBackward\`, so filtering to
+          // the insertions keeps it out of the count without any bookkeeping.
+          if (String((ev && ev.inputType) || "").indexOf("insert") !== 0) return;
+          el[DELIVERY_COUNT] = (el[DELIVERY_COUNT] || 0) + 1;
+        } catch (e) {}
+      };
+      el[DELIVERY_LISTENER] = onInsert;
+      // Capture, so a handler on the element itself cannot stop the event
+      // reaching this one first.
+      el.addEventListener("beforeinput", onInsert, true);
+      if (isFormControl) el[VALUE_BEFORE] = String(el.value || "");
+    } catch (e) {}
+  };
+  // AFTER: how many insertions this element received, or -1 when that cannot be
+  // read. Releases the listener on the way out, like every other per-call mark.
+  const deliveriesTo = (el, release) => {
+    let held = -1;
+    try {
+      if (typeof el[DELIVERY_COUNT] === "number") held = el[DELIVERY_COUNT];
+      if (release) {
+        if (el[DELIVERY_LISTENER]) el.removeEventListener("beforeinput", el[DELIVERY_LISTENER], true);
+        delete el[DELIVERY_LISTENER];
+        delete el[DELIVERY_COUNT];
+      }
+    } catch (e) {}
+    return held;
+  };
+  // AFTER: the field holds exactly what it held before the clear — so whatever
+  // else happened, it was not replaced. Only asked of a form control, whose
+  // \`value\` is unambiguous; the revert-on-blur shape this catches is a form
+  // control pattern.
+  const heldValueAgain = (el, isFormControl, value, release) => {
+    let same = false;
+    try {
+      const was = el[VALUE_BEFORE];
+      same = isFormControl && typeof was === "string" && was !== "" && was === value;
+      if (release) delete el[VALUE_BEFORE];
+    } catch (e) {}
+    return same;
   };`;
 
 /**
@@ -290,7 +395,8 @@ const EDITABLE_TEXT_FN = `
 // returns and every verdict it computes would otherwise rest on a manual
 // browser session alone.
 export const focusedEditableProbe = (handle: string) => `(() => {
-  ${countEmbedsFns(embedMark(handle))}
+  ${countEmbedsFns(pageMarks(handle).embed)}
+  ${deliveryFns(pageMarks(handle))}
   // What a user pressing "select all" on THIS machine would send, so the page
   // sees the real chord. Read from the renderer, not the tool-server host — CDP
   // reaches remote renderers through a forwarded local port. Resolved OUTSIDE
@@ -379,6 +485,7 @@ export const focusedEditableProbe = (handle: string) => `(() => {
       }
       if (el.readOnly === true) return JSON.stringify({ verdict: "read-only", label, mac });
       window[${JSON.stringify(handle)}] = el;
+      watchDeliveries(el, true);
       return JSON.stringify({
         verdict: "editable", label, mac, parked: window[${JSON.stringify(handle)}] === el,
         // A password field is cleared like any other, but its LENGTH is
@@ -413,6 +520,7 @@ export const focusedEditableProbe = (handle: string) => `(() => {
     }
     if (el.isContentEditable === true) {
       window[${JSON.stringify(handle)}] = el;
+      watchDeliveries(el, false);
       return JSON.stringify({
         verdict: "editable", label, mac, parked: window[${JSON.stringify(handle)}] === el,
         // Stamps every embed it finds, so the verdict can tell content that
@@ -502,7 +610,8 @@ export const focusedEditableProbe = (handle: string) => `(() => {
  */
 // Exported for test/keyboard-clear-probe.test.ts — see focusedEditableProbe.
 export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
-  ${countEmbedsFns(embedMark(handle))}
+  ${countEmbedsFns(pageMarks(handle).embed)}
+  ${deliveryFns(pageMarks(handle))}
   ${EDITABLE_TEXT_FN}
   try {
     const el = window[${JSON.stringify(handle)}];
@@ -603,6 +712,10 @@ export const clearedTargetProbe = (handle: string, keep = false) => `(() => {
       // field's own cap explains a short value, and a password field's capacity
       // is one more thing about a credential not to echo back.
       full: limit >= 0 && value.length >= limit,
+      // How many characters were delivered INTO this element, and whether it
+      // ended up holding the very value the clear removed — see \`deliveryFns\`.
+      delivered: deliveriesTo(el, ${keep ? "false" : "true"}),
+      reverted: heldValueAgain(el, form, value, ${keep ? "false" : "true"}),
     });
   } catch (e) {
     return JSON.stringify({ tracked: false });
@@ -640,6 +753,18 @@ export interface ClearedTarget {
    * in `platforms/chromium.ts`.
    */
   full?: boolean;
+  /**
+   * Characters delivered INTO this element since it was parked, or -1 when the
+   * count could not be read. This is the provenance question — "did the
+   * characters reach the field I emptied?" — which what the field HOLDS
+   * afterwards answers in neither direction. See `deliveryFns`.
+   */
+  delivered?: number;
+  /**
+   * The field holds the very value the clear removed, so it was not replaced
+   * however many characters were dispatched at it. See `deliveryFns`.
+   */
+  reverted?: boolean;
 }
 
 /**
