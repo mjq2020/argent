@@ -1060,6 +1060,127 @@ describe("keyboard clear — Android (adb input)", () => {
       expect(deleteRun(inputCmds()[1]!)).toHaveLength(5 + 8);
     }, 20_000);
 
+    describe("the budget algebra the read legs share", () => {
+      // Three branches decide how the clear's 26s is split, and mutation left all
+      // three green: the `Math.min` clamp on the helper read, the `> 0` guard that
+      // decides whether to consult it at all, and the retry loop's attempt-0 arm.
+      // Each one below fails on the corresponding mutation.
+      it("clamps the helper's share to PREFERRED_READ_BUDGET_MS, not to what is left", async () => {
+        // With a fresh deadline the read legs could fund 12.5s (26 − 11 reserve −
+        // 2.5 for one dump), and a wedged helper must still be abandoned at 5s so
+        // the dump fallback keeps its share.
+        vi.useFakeTimers();
+        try {
+          seedLegacyLevel();
+          seedDump(dumpWith("abcd"));
+          const getHierarchy = vi.fn(() => new Promise<{ xml: string }>(() => {}));
+
+          const run = makeAndroidImpl(registryWithDevtools(getHierarchy)).handler(
+            {},
+            { udid: ANDROID.id, clear: true },
+            ANDROID
+          );
+
+          await vi.advanceTimersByTimeAsync(4_900);
+          // Still waiting on the helper: no dump has gone out yet.
+          expect(adbExecOutBinary).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(200);
+          expect(adbExecOutBinary).toHaveBeenCalledTimes(1);
+
+          await vi.runAllTimersAsync();
+          await run;
+          expect(deleteRun(inputCmds()[1]!)).toHaveLength(4 + 8);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("takes the REMAINDER when that is smaller than the helper's own cap", async () => {
+        // A slow probe leaves less than 5s of read share, and the helper read must
+        // shrink to it — spending the full cap would come out of the dump's share
+        // and the delete run's reserve.
+        let clock = 1_000_000;
+        const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+        const realNow = performance.now();
+        try {
+          adbShell.mockImplementationOnce(async () => {
+            clock += 10_000; // a slow probe: 16s left, so 2.5s of read share
+            return "Usage: input …";
+          });
+          seedDump(dumpWith("abcd"));
+          const getHierarchy = vi.fn(() => new Promise<{ xml: string }>(() => {}));
+
+          await makeAndroidImpl(registryWithDevtools(getHierarchy)).handler(
+            {},
+            { udid: ANDROID.id, clear: true },
+            ANDROID
+          );
+
+          // Real elapsed time, since the race runs on a real timer: ~2.5s, not the
+          // 5s cap.
+          expect(performance.now() - realNow).toBeLessThan(4_000);
+          expect(getHierarchy).toHaveBeenCalledTimes(1);
+          expect(deleteRun(inputCmds()[1]!)).toHaveLength(4 + 8);
+        } finally {
+          nowSpy.mockRestore();
+        }
+      }, 20_000);
+
+      it("does not even ISSUE the helper read once its share is gone", async () => {
+        // The guard is not just about how long to wait: the RPC serialises on one
+        // chain with `describe`, so a read nobody can wait for still holds that
+        // chain until the helper's own 15s timeout.
+        let clock = 1_000_000;
+        const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+        try {
+          adbShell.mockImplementationOnce(async () => {
+            clock += 14_000; // 12s left: less than reserve + one dump
+            return "Usage: input …";
+          });
+          const getHierarchy = vi.fn(async () => ({ xml: dumpWith("abcd") }));
+
+          await makeAndroidImpl(registryWithDevtools(getHierarchy)).handler(
+            {},
+            { udid: ANDROID.id, clear: true },
+            ANDROID
+          );
+
+          expect(getHierarchy).not.toHaveBeenCalled();
+          // No dump either — there is no share left for one — so the blind count.
+          expect(adbExecOutBinary).not.toHaveBeenCalled();
+          expect(deleteRun(inputCmds()[1]!)).toHaveLength(MAX_DELETE_COUNT + 8);
+        } finally {
+          nowSpy.mockRestore();
+        }
+      });
+
+      it("does not charge the FIRST dump the retry backoff", async () => {
+        // `attempt > 0 ? DUMP_RETRY_BACKOFF_MS : 0` — with the backoff applied on
+        // attempt 0 as well, a budget that funds exactly one dump declines it and
+        // the clear falls to the blind count.
+        let clock = 1_000_000;
+        const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+        try {
+          adbShell.mockImplementationOnce(async () => {
+            clock += 12_500; // 13.5s left: reserve + exactly one dump
+            return "Usage: input …";
+          });
+          seedDump(dumpWith("abcdef"));
+
+          await makeAndroidImpl(registryWith({})).handler(
+            {},
+            { udid: ANDROID.id, clear: true },
+            ANDROID
+          );
+
+          expect(adbExecOutBinary).toHaveBeenCalledTimes(1);
+          expect(deleteRun(inputCmds()[1]!)).toHaveLength(6 + 8);
+        } finally {
+          nowSpy.mockRestore();
+        }
+      });
+    });
+
     it("disarms the budget timer the helper's answer beat", async () => {
       // The loser of a race is abandoned, not cancelled, and an armed
       // `setTimeout` holds the event loop open by itself — so the read that WON

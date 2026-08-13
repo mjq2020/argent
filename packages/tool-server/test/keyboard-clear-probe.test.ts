@@ -971,13 +971,20 @@ describe("chromium clear — release probe", () => {
       tag: string;
       attrs?: Record<string, string>;
     }
-    const ATTR_SELECTOR = /^\[([a-z-]+)=([^\]\s]+)(\s+i)?\]$/i;
+    // The value half is optional so a BARE `[contenteditable]` is expressible.
+    // Without that the harness could not express the alternative the production
+    // selector is chosen over, and the "nested editor is not an embed" assertion
+    // below could not demonstrate anything: it returned 0 for both spellings
+    // where a browser returns 0 and 2.
+    const ATTR_SELECTOR = /^\[([a-z-]+)(?:=([^\]\s]+)(\s+i)?)?\]$/i;
     const matchesSelector = (child: Child, selector: string): boolean => {
       const attr = ATTR_SELECTOR.exec(selector);
       if (!attr) return child.tag.toLowerCase() === selector.toLowerCase();
       const [, name, value, insensitive] = attr;
       const held = child.attrs?.[name];
       if (held === undefined) return false;
+      // No value in the selector: presence alone, whatever it holds.
+      if (value === undefined) return true;
       return insensitive ? held.toLowerCase() === value.toLowerCase() : held === value;
     };
     /** An editable holding `children`, whose selector match is the real one. */
@@ -1087,12 +1094,18 @@ describe("chromium clear — release probe", () => {
       // The other value of the same enumerated attribute: `true` (and its empty
       // form) marks editable content, not a survivor, and matching the attribute
       // rather than its value would count both.
-      expect(
-        withChildren([
-          { tag: "div", attrs: { contenteditable: "true" } },
-          { tag: "div", attrs: { contenteditable: "" } },
-        ])
-      ).toMatchObject({ tracked: true, residue: 0 });
+      const nested: Child[] = [
+        { tag: "div", attrs: { contenteditable: "true" } },
+        { tag: "div", attrs: { contenteditable: "" } },
+      ];
+      expect(withChildren(nested)).toMatchObject({ tracked: true, residue: 0 });
+      // …and the alternative really is different here, rather than the harness
+      // being unable to tell them apart: matching the attribute alone counts both
+      // of these, which is what makes the 0 above the value match's work.
+      expect(nested.filter((child) => matchesSelector(child, "[contenteditable]"))).toHaveLength(2);
+      expect(nested.filter((child) => matchesSelector(child, "[contenteditable=false i]"))).toEqual(
+        []
+      );
     });
 
     it("never counts the structural leftovers an emptied editor keeps", () => {
