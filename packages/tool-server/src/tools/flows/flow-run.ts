@@ -197,7 +197,9 @@ export interface StepReport {
    * looks like; it rendered no content to settle; too few reads came back with
    * content for it to judge anything; or its captures never produced a
    * comparable pair, leaving stillness proved on the UI tree alone without the
-   * presentation-layer motion the pixel half exists to catch.
+   * presentation-layer motion the pixel half exists to catch. Also by
+   * `scroll-to`, when the edge-avoid nudge was swallowed after the target was
+   * already accepted, so the step passed on a landing nobody read back.
    */
   warning?: string;
   /** Underlying tool id for `tool` steps. */
