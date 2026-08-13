@@ -48,6 +48,24 @@ afterEach(async () => {
 });
 
 describe("keyboard `clear` through record and replay", () => {
+  it("declares the recorder long-running, since it inherits the step's worst case", () => {
+    // `flow-add-step` dispatches an arbitrary tool by name, so its worst case is
+    // the worst case of whatever it wraps — and `keyboard` budgets ~56s for a
+    // `{ clear, text, key }` and declares the flag itself for that reason.
+    // Without it here the MCP adapter applies its 30s fetch timeout to the
+    // RECORDING of such a step and, on abort, re-POSTs the identical body up to
+    // 4 more times. None of that work is cancellable, so each retry is a fresh
+    // device action AND a fresh appended step.
+    //
+    // Measured against a real tool-server through the real MCP adapter,
+    // recording one `await-ui-element` with `timeoutMs: 40000`: the call took
+    // 153s, returned "This operation was aborted" — so the agent concludes
+    // nothing was recorded — and left FIVE identical steps in the YAML, which
+    // the replay then performs five times. With the flag: 40s, one step, no
+    // error.
+    expect(createFlowAddStepTool(mockRegistry([])).longRunning).toBe(true);
+  });
+
   it("keeps `clear` in the recorded YAML", async () => {
     const calls: Call[] = [];
     const addStep = createFlowAddStepTool(mockRegistry(calls));
