@@ -574,13 +574,27 @@ export const focusedEditableProbe = (handle: string) => `(() => {
       // The walk stops at the nearest element that declares the attribute
       // ITSELF, which is what Blink treats as the host: a nested editor inside
       // another editable is its own host, not the outer one. With nothing
-      // declaring it (\`document.designMode\`) it climbs to the last editable
-      // ancestor, which is that document's body.
+      // declaring it (\`document.designMode\`) it climbs to that document's body
+      // and stops there — see the BODY break below, which is what makes the
+      // stop happen.
       let host = el;
       for (let up = 0; up < 32; up++) {
         const own = host.getAttribute ? host.getAttribute("contenteditable") : null;
         const declared = own == null ? null : String(own).toLowerCase();
         if (declared === "true" || declared === "" || declared === "plaintext-only") break;
+        // The body is the top of the walk, and the test below cannot express
+        // that on its own: under \`document.designMode\` NOTHING declares the
+        // attribute and \`documentElement.isContentEditable\` is \`true\` as well,
+        // so the walk took one more step and parked <html> — which
+        // \`document.activeElement\` never reports (it falls back to <body>), so
+        // the post-clear focus check read as focus lost EVERY time, whatever the
+        // page did. Measured on Chrome 151 against a designMode document: the
+        // whole document was emptied and \`{ clear, text }\` then raised
+        // KEYBOARD_CLEAR_FOCUS_LOST naming HTML and blaming the page, with
+        // \`activeElement\` BODY before and after. A bare \`{ clear: true }\` was
+        // unaffected, so only the combined form — the form the parameter exists
+        // for — hit it.
+        if ((host.tagName || "").toUpperCase() === "BODY") break;
         const parent = host.parentElement;
         if (!parent || parent.isContentEditable !== true) break;
         host = parent;

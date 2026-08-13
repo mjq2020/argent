@@ -365,11 +365,28 @@ describe("chromium clear — focused-element probe", () => {
       expect((window[HANDLE] as FakeEl).id).toBe("btn");
     });
 
-    it("climbs to the last editable ancestor when nothing declares the attribute", () => {
+    it("climbs to the body, and no further, when nothing declares the attribute", () => {
       // `document.designMode = "on"`: the whole document is editable and no
       // element carries the attribute, so the host is that document's body.
-      const { host, window } = inside({}, { getAttribute: () => null, tagName: "BODY", id: "" });
+      //
+      // The <html> above it is modelled, and reports `isContentEditable: true`
+      // as a browser really does under designMode — which is what let the walk
+      // take one more step and park it. `document.activeElement` never returns
+      // <html> (it falls back to <body>), so the post-clear focus check then
+      // read as focus lost EVERY time: measured on Chrome 151, a designMode
+      // document was emptied by `{ clear, text }` and the call raised
+      // KEYBOARD_CLEAR_FOCUS_LOST naming HTML and blaming the page for moving
+      // focus, with `activeElement` BODY both before and after.
+      //
+      // Without a `parentElement` here the walk stops for a reason the real DOM
+      // does not supply, and the <html> hop cannot be expressed at all.
+      const root = { tagName: "HTML", isContentEditable: true, getAttribute: () => null };
+      const { host, window } = inside(
+        {},
+        { getAttribute: () => null, tagName: "BODY", id: "", parentElement: root as never }
+      );
       expect(window[HANDLE]).toBe(host);
+      expect((window[HANDLE] as FakeEl).tagName).toBe("BODY");
     });
   });
 
