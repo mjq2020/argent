@@ -255,7 +255,8 @@ export function stepRequiresDevice(registry: Registry, step: FlowStep): boolean 
  * {@link stepRequiresDevice}, and a flow that is only that block would then
  * resolve device-free and hard-stop on the first device step in its body. The
  * exhaustiveness check there forces a new kind to be classified, but not to be
- * classified `true`; the walk is what makes either answer safe.
+ * classified `true`; the walk - here and in {@link flowScopesDevice}, the
+ * question the runner asks next - is what makes either answer safe.
  */
 export function flowRequiresDevice(registry: Registry, steps: FlowStep[]): boolean {
   return steps.some(
@@ -273,10 +274,21 @@ export function flowRequiresDevice(registry: Registry, steps: FlowStep[]): boole
  * (keeping the cross-agent protection the scope exists for), or, where no
  * single device is resolvable, run the step's unscoped meaning rather than
  * failing a flow whose whole purpose is to clear the machine.
+ *
+ * Walks a block's body via {@link blockSteps}. The walk answers nothing in a
+ * run today: `when`, the only block kind, classifies device-requiring, so a
+ * flow holding a block is answered by {@link flowRequiresDevice} and never
+ * reaches this question at all. The pair needs both walks - under
+ * a block kind that reads nothing off the device, a `devices` scope in its body
+ * would be invisible here, the run would resolve no device, and the teardown
+ * would execute with its unscoped meaning, the machine-wide sweep the scope
+ * exists to prevent.
  */
 export function flowScopesDevice(registry: Registry, steps: FlowStep[]): boolean {
   return steps.some(
-    (step) => step.kind === "tool" && declaresAny(registry, step.name, DEVICE_BIND_LIST_KEYS)
+    (step) =>
+      (step.kind === "tool" && declaresAny(registry, step.name, DEVICE_BIND_LIST_KEYS)) ||
+      flowScopesDevice(registry, blockSteps(step) ?? [])
   );
 }
 

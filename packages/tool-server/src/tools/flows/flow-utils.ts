@@ -729,7 +729,7 @@ export type FlowFile = {
 /**
  * The literal child steps of a block directive, or undefined for a leaf step.
  *
- * The single predicate for "this step has authored children", read at six
+ * The single predicate for "this step has authored children", read at seven
  * sites. Four expand a block that will NOT execute into skip lines, so a report
  * keeps one line per authored step no matter where the run ended: `execSteps`'
  * three gates — a hard stop, a device-free flow, a cancellation — plus
@@ -737,12 +737,12 @@ export type FlowFile = {
  * reaches those same skip lines by another route: `execWhenStep` has the block
  * in hand and passes `step.steps` straight to `reportBlockSkipped`.) The fifth
  * is the upload preflight's walk, where a block it cannot see hides a nested
- * `run:`/`snapshot` from validation. The sixth, `flowRequiresDevice`
- * (flow-device.ts), reads children not to skip them but to resolve the flow's
- * device requirement from a block's body — the guard against a later block
- * directive whose header reads nothing off the device, and a no-op while
- * `when`, whose header already classifies device-requiring, is the only block
- * kind.
+ * `run:`/`snapshot` from validation. The sixth and seventh,
+ * `flowRequiresDevice` and `flowScopesDevice` (flow-device.ts), read children
+ * not to skip them but to resolve the flow's device decisions from a block's
+ * body — the guard against a later block directive whose header reads nothing
+ * off the device, and dead in a run while `when`, whose header already
+ * classifies device-requiring, is the only block kind.
  *
  * Five sites asked `kind === "when"` directly before this existed — the five in
  * the runner; `flowRequiresDevice`'s walk arrived after the predicate and never
