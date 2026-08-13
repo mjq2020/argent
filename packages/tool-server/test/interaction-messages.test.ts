@@ -1,14 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  FAILURE_CODES,
-  type FailureSignal,
-  type Registry,
-  type ToolDefinition,
-} from "@argent/registry";
+import { FAILURE_CODES, type FailureSignal } from "@argent/registry";
 import { createRegistry } from "../src/utils/setup-registry";
-import { pasteTool } from "../src/tools/paste";
-import { createProposeVariantTool } from "../src/tools/variants/propose-variant";
-import { awaitUserSelectionTool } from "../src/tools/variants/await-user-selection";
+import { definitionsById, EXPECTED_TOOL_COUNT } from "./helpers/catalog";
 
 const failureSignal: FailureSignal = {
   error_code: FAILURE_CODES.ARGENT_UNCLASSIFIED_FAILURE,
@@ -17,26 +10,10 @@ const failureSignal: FailureSignal = {
   error_kind: "unknown",
 };
 
-function definitionsById(registry: Registry): Map<string, ToolDefinition<any, any>> {
-  const definitions = new Map<string, ToolDefinition<any, any>>();
-  for (const id of registry.getSnapshot().tools) {
-    definitions.set(id, registry.getTool(id)!);
-  }
-
-  // Lens tools are only registered on macOS; add them explicitly so this test
-  // covers the same catalog on every CI platform.
-  definitions.set("propose_variant", createProposeVariantTool(registry));
-  definitions.set("await_user_selection", awaitUserSelectionTool);
-
-  // This definition intentionally exists outside createRegistry.
-  definitions.set("paste", pasteTool);
-  return definitions;
-}
-
 describe("tool interaction messages", () => {
   it("defines all three formatters for every tool", () => {
     const definitions = definitionsById(createRegistry());
-    expect(definitions.size).toBe(76);
+    expect(definitions.size).toBe(EXPECTED_TOOL_COUNT);
 
     for (const [id, definition] of definitions) {
       expect(definition.interaction?.startedMsg, `${id}.startedMsg`).toBeTypeOf("function");
