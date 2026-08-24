@@ -7,16 +7,27 @@ import {
 } from "../../src/utils/debugger/scripts/network-interceptor";
 
 describe("NETWORK_INTERCEPTOR_SCRIPT", () => {
-  it.each([
-    ["TextEncoder", TextEncoder],
-    ["the legacy fallback", undefined],
-  ])("records UTF-8 response bytes with %s", async (_label, textEncoder) => {
-    const body = JSON.stringify({ message: "你好 👋" });
+  async function interceptResponse({
+    body,
+    mimeType,
+    contentLength,
+    textEncoder = TextEncoder,
+  }: {
+    body: string | undefined;
+    mimeType: string;
+    contentLength?: number;
+    textEncoder?: typeof TextEncoder | undefined;
+  }) {
     const response = {
-      url: "https://example.test/unicode",
+      url: "https://example.test/data",
       status: 200,
       statusText: "OK",
-      headers: { forEach: () => {} },
+      headers: {
+        forEach: (callback: (value: string, key: string) => void) => {
+          callback(mimeType, "content-type");
+          if (contentLength !== undefined) callback(String(contentLength), "content-length");
+        },
+      },
       clone: () => ({ text: async () => body }),
     };
     const sandbox: Record<string, unknown> = {
@@ -28,9 +39,42 @@ describe("NETWORK_INTERCEPTOR_SCRIPT", () => {
     await (sandbox.fetch as () => Promise<unknown>)();
     await Promise.resolve();
 
-    const entries = sandbox.__argent_network_log as Array<{ encodedDataLength: number }>;
-    expect(entries[0]?.encodedDataLength).toBe(Buffer.byteLength(body, "utf8"));
-    expect(entries[0]?.encodedDataLength).not.toBe(body.length);
+    return (sandbox.__argent_network_log as Array<{ encodedDataLength: number }>)[0];
+  }
+
+  it.each([
+    ["TextEncoder", TextEncoder],
+    ["the legacy fallback", undefined],
+  ])("records UTF-8 response bytes with %s", async (_label, textEncoder) => {
+    const body = JSON.stringify({ message: "你好 👋" });
+    const entry = await interceptResponse({ body, mimeType: "application/json", textEncoder });
+
+    expect(entry?.encodedDataLength).toBe(Buffer.byteLength(body, "utf8"));
+    expect(entry?.encodedDataLength).not.toBe(body.length);
+  });
+
+  it("does not re-encode replacement characters from a binary response", async () => {
+    const body = "\uFFFD".repeat(512) + "a".repeat(512);
+    const entry = await interceptResponse({ body, mimeType: "application/octet-stream" });
+
+    expect(entry?.encodedDataLength).toBe(1024);
+    expect(entry?.encodedDataLength).not.toBe(Buffer.byteLength(body, "utf8"));
+  });
+
+  it("prefers a valid Content-Length for binary responses", async () => {
+    const entry = await interceptResponse({
+      body: undefined,
+      mimeType: "image/png",
+      contentLength: 16,
+    });
+
+    expect(entry?.encodedDataLength).toBe(16);
+  });
+
+  it("records zero when a binary body is unavailable", async () => {
+    const entry = await interceptResponse({ body: undefined, mimeType: "image/png" });
+
+    expect(entry?.encodedDataLength).toBe(0);
   });
 });
 

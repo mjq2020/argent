@@ -47,6 +47,30 @@ export const NETWORK_INTERCEPTOR_SCRIPT = `(function() {
     return length;
   }
 
+  function responseByteLength(body, mimeType, headers) {
+    var keys = Object.keys(headers);
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].toLowerCase() !== 'content-length') continue;
+
+      var value = String(headers[keys[i]]).trim();
+      if (/^\\d+$/.test(value)) return Number(value);
+    }
+
+    if (typeof body !== 'string') return 0;
+
+    var textual = mimeType.indexOf('text/') === 0
+      || mimeType === 'application/json'
+      || mimeType.slice(-5) === '+json'
+      || mimeType === 'application/xml'
+      || mimeType.slice(-4) === '+xml'
+      || mimeType === 'application/javascript'
+      || mimeType === 'application/x-javascript'
+      || mimeType === 'application/graphql'
+      || mimeType === 'application/x-www-form-urlencoded';
+
+    return textual ? utf8ByteLength(body) : body.length;
+  }
+
   function getOrCreate(reqId) {
     if (byId[reqId]) return byId[reqId];
     var entry = {
@@ -109,7 +133,7 @@ export const NETWORK_INTERCEPTOR_SCRIPT = `(function() {
         var cloned = response.clone();
         cloned.text().then(function(body) {
           entry.state = 'finished';
-          entry.encodedDataLength = utf8ByteLength(body);
+          entry.encodedDataLength = responseByteLength(body, mimeType, respHeaders);
           entry.durationMs = Math.round((ts() - t) * 1000);
           entry.responseBody = body;
         }).catch(function() {
