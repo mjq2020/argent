@@ -20,56 +20,6 @@ export const NETWORK_INTERCEPTOR_SCRIPT = `(function() {
   var MAX_ENTRIES = 2000;
   function genId() { return 'rn-net-' + (nextReqId++); }
   function ts() { return Date.now() / 1000; }
-  function utf8ByteLength(value) {
-    if (typeof TextEncoder !== 'undefined') {
-      return new TextEncoder().encode(value).length;
-    }
-
-    var length = 0;
-    for (var i = 0; i < value.length; i++) {
-      var code = value.charCodeAt(i);
-      if (code <= 0x7f) {
-        length += 1;
-      } else if (code <= 0x7ff) {
-        length += 2;
-      } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
-        var next = value.charCodeAt(i + 1);
-        if (next >= 0xdc00 && next <= 0xdfff) {
-          length += 4;
-          i += 1;
-        } else {
-          length += 3;
-        }
-      } else {
-        length += 3;
-      }
-    }
-    return length;
-  }
-
-  function responseByteLength(body, mimeType, headers) {
-    var keys = Object.keys(headers);
-    for (var i = 0; i < keys.length; i++) {
-      if (keys[i].toLowerCase() !== 'content-length') continue;
-
-      var value = String(headers[keys[i]]).trim();
-      if (/^\\d+$/.test(value)) return Number(value);
-    }
-
-    if (typeof body !== 'string') return 0;
-
-    var textual = mimeType.indexOf('text/') === 0
-      || mimeType === 'application/json'
-      || mimeType.slice(-5) === '+json'
-      || mimeType === 'application/xml'
-      || mimeType.slice(-4) === '+xml'
-      || mimeType === 'application/javascript'
-      || mimeType === 'application/x-javascript'
-      || mimeType === 'application/graphql'
-      || mimeType === 'application/x-www-form-urlencoded';
-
-    return textual ? utf8ByteLength(body) : body.length;
-  }
 
   function getOrCreate(reqId) {
     if (byId[reqId]) return byId[reqId];
@@ -130,15 +80,28 @@ export const NETWORK_INTERCEPTOR_SCRIPT = `(function() {
           mimeType: mimeType
         };
 
-        var cloned = response.clone();
-        cloned.text().then(function(body) {
+        // Read the cloned response as a Blob to preserve the decoded entity's
+        // byte length across text charsets and binary responses. Content-Length
+        // cannot be used here: HEAD/304 responses may advertise a body that was
+        // not sent, and compression headers describe a different measurement.
+        var sizeClone = response.clone();
+        var bodyClone = response.clone();
+        var sizePromise = typeof sizeClone.blob === 'function'
+          ? sizeClone.blob().then(function(blob) {
+              return blob && typeof blob.size === 'number' ? blob.size : undefined;
+            }).catch(function() { return undefined; })
+          : Promise.resolve(undefined);
+        var bodyPromise = bodyClone.text().catch(function() { return undefined; });
+
+        Promise.all([sizePromise, bodyPromise]).then(function(values) {
+          var byteLength = values[0];
+          var body = values[1];
           entry.state = 'finished';
-          entry.encodedDataLength = responseByteLength(body, mimeType, respHeaders);
+          if (typeof byteLength === 'number') entry.encodedDataLength = byteLength;
           entry.durationMs = Math.round((ts() - t) * 1000);
-          entry.responseBody = body;
+          if (typeof body === 'string') entry.responseBody = body;
         }).catch(function() {
           entry.state = 'finished';
-          entry.encodedDataLength = 0;
           entry.durationMs = Math.round((ts() - t) * 1000);
         });
 
